@@ -4,8 +4,10 @@ Catalog of first-party process execution across the fleet: one section per
 repo, one subsection per usage. This is the curated picture of what dr-exec
 must serve — content is added deliberately as behaviors and terminology are
 settled, and each usage accretes its mapping onto dr-exec vocabulary
-(use case, terms, budget axes) in place. Repos ordered by most recent PR
-activity.
+(use case, terms, budget axes) in place. Companion to
+`current-implementations.md`, which records the mechanisms; a repo whose
+execution code is purely mechanism appears only there. Repos ordered by most
+recent PR activity.
 
 ## dr-code
 
@@ -43,19 +45,13 @@ activity.
 
 ## dr-cognee
 
-## code-eval
-
 ## symphony-lite
 
 ## dr-notion
 
 ## dr-dspy
 
-## llmflow
-
 ## codearc
-
-## dr-queues
 
 ## marimo_utils
 
@@ -67,12 +63,6 @@ activity.
 
 ## dr_gen
 
-## dr-docker
-
 ## dr-util
 
 ## parse_claude
-
-## utils
-
-## scripts
