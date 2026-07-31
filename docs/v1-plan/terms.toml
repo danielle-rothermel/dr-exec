@@ -1,0 +1,37 @@
+# Vocabulary introduced by the dr-exec v1 plan rather than the repository's
+# core execution model. Each entry has a canonical name and a definition
+# precise enough to make misuse detectable.
+
+[[terms]]
+name = "output overflow policy"
+definition = """
+The caller-declared response when captured payload output exceeds its byte \
+budget. V1 provides exactly two policies, fail and marked truncation; the \
+selected policy and any overflow remain visible in the run result and run \
+record."""
+
+[[terms]]
+name = "fail output overflow policy"
+definition = """
+The output overflow policy spelled `FAIL` in the declaration API. The \
+executor terminates the run, attributes the outcome to the output budget, \
+and retains the output captured so far with truncation marked; it never \
+discards the diagnostic prefix or attributes the executor-inflicted signal \
+death to the payload."""
+
+[[terms]]
+name = "marked truncation output overflow policy"
+definition = """
+The output overflow policy spelled `MARKED_TRUNCATION` in the declaration \
+API. The executor stops retaining bytes at the bound but continues draining \
+both payload streams through EOF, lets the run finish, and records truncation \
+plus the number of bytes dropped per stream. It is never silent truncation."""
+
+[[terms]]
+name = "executor identity"
+definition = """
+The pinned identity of the executor machinery that produced a run, carried \
+in every run record for cache keys and provenance. Production and fake \
+executors have distinct identities; executor identity is independent of \
+callable object identity and is not runtime identity, which describes the \
+platform and interpreter environment."""

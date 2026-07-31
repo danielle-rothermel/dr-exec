@@ -8,6 +8,9 @@ it, or reshape it, without a rewrite. Every surface here is designed
 against that contract's behaviors and vocabulary; where v1 defers a
 behavior, it defers visibly, never silently.
 
+Repository-wide execution vocabulary lives in `.defs/terms.toml`.
+Vocabulary introduced by this plan lives in `terms.toml`.
+
 ## Scope
 
 **Serves:** use case 1 (untrusted Python source, call-scoped), use case 2
@@ -48,8 +51,8 @@ One package, `dr_exec`, consumed only as a pinned release. Modules:
 - `dr_exec.run` — public call-scoped entry points.
 - `dr_exec.batch` — the batch protocol: parent-side orchestration and the
   driver kit the child runs.
-- `dr_exec.declare` — the declaration types: budgets, grants, containment
-  profiles, exit policies.
+- `dr_exec.declare` — the declaration types: budgets, environment
+  passthrough, containment profiles, exit policies.
 - `dr_exec.record` — run result, run record, narration.
 - `dr_exec.fake` — the contract-enforcing fake.
 
@@ -165,9 +168,9 @@ edit that happens to pass tests.
   per-argument ceiling (Linux `MAX_ARG_STRLEN` = 128 KiB), so `source`
   is validated pre-spawn against a pinned 96 KiB bound, and the full
   argv plus granted environment is validated against a conservative
-  1 MiB aggregate (`ARG_MAX` floor) — an oversized grant with a
-  valid-size source is rejected pre-spawn too, never a mid-spawn
-  E2BIG.
+  1 MiB aggregate (`ARG_MAX` floor) — an oversized environment
+  passthrough with a valid-size source is rejected pre-spawn too, never
+  a mid-spawn E2BIG.
 - Narration is parent-side — `dr_exec.*` loggers live in the calling
   process; narration is never written into the child's streams, so a
   consumer asserting exact captured stderr is unaffected by verbosity.
@@ -184,9 +187,9 @@ process or persistence boundary is a serialization model.
   memory, and a noisy stderr consuming the protocol channel's budget is a
   visible, attributed outcome rather than a hidden coupling), denominated
   in bytes on the raw streams before decoding. Output budgets carry a
-  caller-declared overflow policy: `FAIL` (the run is killed and the
-  outcome attributed to the budget; output captured so far is retained
-  and marked truncated — diagnostics are never discarded) or
+  caller-declared output overflow policy: `FAIL` (the run is killed and
+  the outcome attributed to the budget; output captured so far is
+  retained and marked truncated — diagnostics are never discarded) or
   `MARKED_TRUNCATION` (the run continues to completion; capture stops at
   the bound and the truncation is marked). Under `MARKED_TRUNCATION` the
   executor keeps draining both streams to EOF and discards bytes past
@@ -199,17 +202,18 @@ process or persistence boundary is a serialization model.
   Input budgets are enforced before spawn (a caller error, never a
   wasted spawn). Termination and startup self-budgets have built-in
   defaults and are not caller-facing in v1.
-- `EnvironmentGrant` — `none()` (default), `named(vars)` (listed parent
-  variables), `fixed(mapping)` (a literal replacement environment;
-  nothing is read from the parent at all — the shape for hermetic
-  determinism controls like `OPENBLAS_NUM_THREADS=1`), `overlay(extra,
-  exclusions=())` (the whole parent environment plus extras minus
-  exclusions; exclusions verified absent before spawn). Grants are
-  frozen snapshots: `named` resolves values from the parent environment
-  at grant *construction*, never at spawn, so a persisted identity
-  derived from a grant is a claim every later run honors. Grants are
-  introspectable data — declared names, and for `fixed` the mapping —
-  so consumers can derive identity hashes from exactly what the child
+- `EnvironmentGrant` — declares environment passthrough as `none()`
+  (default), `named(vars)` (listed parent variables), `fixed(mapping)`
+  (a literal replacement environment; nothing is read from the parent
+  at all — the shape for hermetic determinism controls like
+  `OPENBLAS_NUM_THREADS=1`), or `overlay(extra, exclusions=())` (the
+  whole parent environment plus extras minus exclusions; exclusions
+  verified absent before spawn). Passthrough declarations are frozen
+  snapshots: `named` resolves values from the parent environment at
+  declaration construction, never at spawn, so an identity derived from
+  the declaration is a claim every later run honors. The declarations
+  are introspectable data — declared names, and for `fixed` the mapping
+  — so consumers can derive identity hashes from exactly what the child
   will receive.
 - `ContainmentProfile` — v1 ships one: `PROCESS_BOUNDARY_ONLY`, whose
   declared limits state plainly that it restricts nothing beyond the
@@ -248,9 +252,9 @@ break under concurrent callers in one process).
   -> RunResult` —
   untrusted source in a declared runtime. `HERMETIC` is the default
   runtime (isolated interpreter; the child environment is solely the
-  caller's grant — the runtime injects nothing); a declared alternative
-  names an interpreter and importable package set. `profile` has no
-  default.
+  declared environment passthrough — the runtime injects nothing); a
+  declared alternative names an interpreter and importable package set.
+  `profile` has no default.
 - `run_untrusted_command(command, *, profile, budgets, records,
   input_text="", environment=EnvironmentGrant.none(),
   exit_policy=REPORT_ONLY) -> RunResult` — the argv-general untrusted
@@ -283,11 +287,12 @@ dr-code's batch_runner currently hand-rolls).
 - `RunRecord` (serialized) — the durable twin: invocation (argv or
   source digest *and* input digest — a trusted driver over untrusted
   stdin is the supported use-case-3 shape, and the record identifies
-  both halves), trust category, grants, profile, budgets in force,
-  runtime, timestamps, outcome and attribution, measurements, and where
-  outputs landed (scratch path included). Written at spawn, finalized
-  at exit, kept regardless of outcome. A record-write failure is
-  narrated and attributed executor-side; it never fails the run.
+  both halves), trust category, environment passthrough, profile,
+  budgets in force, runtime, timestamps, outcome and attribution,
+  measurements, and where outputs landed (scratch path included).
+  Written at spawn, finalized at exit, kept regardless of outcome. A
+  record-write failure is narrated and attributed executor-side; it
+  never fails the run.
   Records land in the caller-declared directory (one JSON file per run,
   filename `run-<utc-timestamp>-<uuid>.json` — collision-free under
   concurrency; volume control is the caller's directory choice plus
@@ -297,11 +302,11 @@ dr-code's batch_runner currently hand-rolls).
   rule: JSON keys are an explicit key enum golden-tested at
   exact-literal level, never derived from field names; digests are
   SHA-256 over UTF-8 with stated canonicalization; `UNBUDGETED`
-  serializes as the literal string `"unbudgeted"`; grants serialize as
-  sorted declared *names* plus a SHA-256 digest of the canonicalized
-  name=value payload — value-sensitive identity without persisting
-  values, because redaction is the caller's and secrets never land in
-  records.
+  serializes as the literal string `"unbudgeted"`; environment
+  passthrough serializes as sorted declared *names* plus a SHA-256 digest
+  of the canonicalized name=value payload — value-sensitive identity
+  without persisting values, because redaction is the caller's and
+  secrets never land in records.
 - Narration — verbose by default on the standard `logging` channel
   (`dr_exec.*` loggers), quiet by configuration: spawn (with what and
   where), waiting, killing, reaping, record location. Narration is
@@ -386,9 +391,9 @@ obligations its ancestor lacks.
   outcomes at scripting time: a test that passes against the fake
   cannot be wrong about the contract.
 - Every call's full declaration set — command/source, `input_text`,
-  runtime, budgets, environment grant, profile, exit policy, records —
-  is recorded and assertable: adding a budget to production code is
-  test-visible, never fake-breaking.
+  runtime, budgets, environment passthrough, profile, exit policy,
+  records — is recorded and assertable: adding a budget to production
+  code is test-visible, never fake-breaking.
 - Consumers never test spawn-path *correctness*: lifecycle, teardown,
   and budget enforcement are the engine suite's job, seeded by porting
   dr-code's `os.killpg` fault-injection tests (the reap-race coverage)

@@ -32,9 +32,12 @@ explicit grant, never a default."""
 [[terms]]
 name = "environment passthrough"
 definition = """
-An explicit grant of parent environment to a child, either as named \
-variables or an overlay. An overlay may carry named exclusions that are \
-verified absent before spawn."""
+The complete declaration of the environment visible to a child: no \
+environment, named variables copied from the parent, a fixed replacement \
+environment, or the parent environment overlaid with additions and named \
+exclusions. It is the only route by which environment reaches a child; \
+parent-derived values are frozen when the declaration is constructed, and \
+exclusions are verified absent before spawn."""
 
 [[terms]]
 name = "containment"

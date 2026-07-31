@@ -105,9 +105,10 @@ here as "scored against", never as "attributed to".
     gate would see spurious nondeterminism) and unpinned BLAS threads
     oversubscribe the corpus evaluator's 4-way process pool. Honored:
     dr-code declares `EnvironmentGrant.fixed({"OPENBLAS_NUM_THREADS":
-    "1"})` at its Python-execution call sites — the grant shape added
-    to the contract for exactly this (`HERMETIC` itself injects
-    nothing; the environment is solely the caller's grant).
+    "1"})` at its Python-execution call sites — the fixed environment
+    passthrough shape added to the contract for exactly this (`HERMETIC`
+    itself injects nothing; the child environment is solely the declared
+    environment passthrough).
 15. **Fake cannot claim production identity.** dr-code's corpus
     evaluator refuses an injected runner claiming the production
     identity. Honored library-side: `FakeExecutor` refuses construction
@@ -137,7 +138,7 @@ here as "scored against", never as "attributed to".
    (timeout/error counts, elapsed values) change accordingly.
 3. **Abort-and-discard on output overflow.** Overflow kills the run and
    discards all captured output. The distinct-outcome half is a
-   requirement (above); the discard half is an artifact. → `FAIL`
+   requirement (above); the discard half is an artifact. → `FAIL` output
    overflow policy: killed, budget-attributed, captured-so-far output
    retained with marked truncation. Every protocol consumer branches on
    attribution *before* parsing captured output — the mutants oracle's
@@ -167,8 +168,9 @@ here as "scored against", never as "attributed to".
    namespacing and is *retained*; the rest of the shape is incidental.
    → Key derived from `computation_id` plus dr-exec's declared
    invocation identity (executor identity + source digest + input
-   digest + budgets in force + grant names/value-digest + profile +
-   runtime), pinned by a golden test in dr-code so drift is loud.
+   digest + budgets in force + environment-passthrough names/value
+   digest + profile + runtime), pinned by a golden test in dr-code so
+   drift is loud.
 7. **Runner identity by callable `is`-check.** `generate.py`'s
    `runner is run_python_subprocess` check (the corpus evaluator's
    None-check-plus-declared-string is already the right shape). →
@@ -181,16 +183,17 @@ here as "scored against", never as "attributed to".
 8. **Environment handling as ad-hoc per-site idioms.** Inherit-all on
    the generic path; copy-then-overlay in the test module runner; a
    construction-time allowlist snapshot in the classifier lane. → The
-   grant vocabulary, matched to what each site actually means:
+   environment passthrough vocabulary, matched to what each site
+   actually means:
    - Classifier lane: `EnvironmentGrant.named(<behavior allowlist ∪
      matched secret names>)` — a deny-by-default snapshot frozen at
-     lane construction (grants resolve at construction by contract), so
-     the persisted `environment_identity` stays derivable from the
-     grant's introspectable contents and reproducible across runs. The
-     suffix predicate stays dr-code's; the executable `shutil.which` +
-     SHA-256 pin stays caller-side. Never `overlay()` — that would both
-     widen an untrusted agent CLI's reach and make the identity hash a
-     function of the operator's shell.
+     lane construction (`named()` resolves at construction by contract),
+     so the persisted `environment_identity` stays derivable from the
+     passthrough declaration's introspectable contents and reproducible
+     across runs. The suffix predicate stays dr-code's; the executable
+     `shutil.which` + SHA-256 pin stays caller-side. Never `overlay()` —
+     that would both widen an untrusted agent CLI's reach and make the
+     identity hash a function of the operator's shell.
    - Python execution sites: `fixed({"OPENBLAS_NUM_THREADS": "1"})`
      (requirement 14).
    - Self-invocation module-runner fixture: `run_tool` with
@@ -346,11 +349,12 @@ the known non-obvious ones.
   `FakeExecutor`; parity/oracle suites onto the real engine with
   `Records.none()`; lifecycle fault-injection and descendant-liveness
   tests deleted here (they live in dr-exec). Call sites declare
-  budgets, grants, records.
+  budgets, environment passthrough, records.
 - **cutover/02** ← rebuild/02: test-suite baseline; the `python -m`
   module-runner fixture rides `run_tool` with the
-  `overlay(COLUMNS, NO_COLOR, PYTHONHASHSEED)` grant and scratch cwd;
-  contract tests re-pin on outcome fields, never message text.
+  `overlay(COLUMNS, NO_COLOR, PYTHONHASHSEED)` environment passthrough
+  and scratch cwd; contract tests re-pin on outcome fields, never
+  message text.
 - **cutover/03** ← rebuild/03: eval kernel rebuild on the seam
   cutover/01 established; scoring-profile version bump carrying the
   declared budget set; `HumanEvalScoringProfile` and eval-record
@@ -376,8 +380,8 @@ the known non-obvious ones.
   unconstructable by design).
 - **cutover/07** ← rebuild/07: behavioral mutants; oracle keeps its
   sentinel-envelope protocol over `run_untrusted_python` with a `FAIL`
-  output policy and a mandatory attribution pre-branch before envelope
-  parsing; runner identity from dr-exec, runtime identity stays
+  output overflow policy and a mandatory attribution pre-branch before
+  envelope parsing; runner identity from dr-exec, runtime identity stays
   dr-code's; `is`-check deleted; determinism gate re-pinned;
   `tests/mutants/test_boundaries.py`'s AST module-path pin re-pinned to
   `dr_exec.run`.
@@ -385,7 +389,7 @@ the known non-obvious ones.
   near-verbatim port.
 - **cutover/09** ← rebuild/09: failure classifier; `SubscriptionLane`
   rides `run_untrusted_command` with `PROCESS_BOUNDARY_ONLY` and the
-  `named()` snapshot grant (adjudication artifact 8);
+  `named()` snapshot environment passthrough (adjudication artifact 8);
   `LaneTransportError` mapping keyed on attribution;
   `MAX_SUBPROCESS_OUTPUT_BYTES` imports re-pinned to the lane's own
   declared budget constant; the interactive flock/rendezvous tests in
@@ -403,9 +407,9 @@ changes `pyproject.toml`.
 
 ### What each side owns afterward
 
-dr-exec: spawn, lifecycle, budgets, grants, capture, batch transport,
-attribution, records, executor identity, the fake, and the spawn-path
-test suite. dr-code: HumanEval schemas and case semantics,
+dr-exec: spawn, lifecycle, budgets, environment passthrough, capture,
+batch transport, attribution, records, executor identity, the fake, and
+the spawn-path test suite. dr-code: HumanEval schemas and case semantics,
 candidate/harness domain mapping (e.g. SIGSEGV → "candidate crashed"),
 scoring, caching policy and key derivation (including
 `computation_id`), retry policy, runtime identity, the classifier's
