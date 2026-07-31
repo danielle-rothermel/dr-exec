@@ -73,6 +73,26 @@ Axes and their default rules:
   defaults.
 - Per-item result size — protocol budget, declared by the batch protocol.
 
+## Amortization
+
+The unit of containment and the unit of work are different units. A test
+case is milliseconds; a container is seconds — pay containment per case and
+the experiment slows by orders of magnitude, silently invalidating every
+plan made from the per-item cost. Amortization is therefore a contract
+obligation, not a performance nicety:
+
+- Containment setup and teardown attach to a declared outer dimension
+  boundary (a sandbox per experiment, a process per candidate, nothing per
+  case) and amortize over everything inside it.
+- Budgets are enforcement limits, not reservations — a limit costs nothing
+  until violated; a reservation costs its full amount while unused, turning
+  worst-case guesses into hard concurrency ceilings. Reserving happens only
+  by explicit declaration.
+- The safe path must be affordable — when rigorous execution costs orders
+  of magnitude more than a bare `subprocess.run`, callers will take the
+  unsafe path and be right to; keeping the paved road's overhead
+  proportionate to the work is what keeps it used.
+
 ## Observability
 
 Defaults never guess what you won't need to know — the information twin of
@@ -123,7 +143,10 @@ intermediate is lost data, not lost convenience.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
    - Argv only — commands are argument vectors; nothing is ever interpreted by a shell.
    - No survivors — when a run ends, by any path, the child's entire process tree is gone before the call returns.
-3. **Untrusted batch** — many untrusted work items amortized through one budgeted child, with structured per-item results.
+3. **Untrusted batch** — work structured as a cross-product of dimensions (candidates × tasks × cases), amortized through shared children at declared dimension boundaries, with results indexed by the dimensions.
+   - The batch is a cross-product, not a list — its dimensions are first-class, and every result is indexed by them.
+   - Sharing boundaries are declared — which dimension crossings share a warm child and which get fresh state is the batch's central design decision, made explicitly by the caller, never an implementation accident.
+   - Failure scope follows dimensions — a payload failure fells its own sub-batch (one candidate's cases), never the whole batch; partial results are partial per dimension, and attribution names the level that failed.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 4. **Trusted tool invocation** — hardened calls to known programs (git, uv, linters, docker) with the lifecycle rigor ad-hoc call sites never have.
    - Stdio passthrough is first-class — streaming a trusted tool's output to the operator is a supported mode, not a reason to bypass the executor.
