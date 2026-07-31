@@ -49,14 +49,30 @@ activity.
 
 ## dr-notion
 
+## dr-dspy
+
 ## llmflow
 
 ## codearc
+
+## dr-queues
 
 ## marimo_utils
 
 ## nl-code
 
+## dr_exp
+
+## deconCNN
+
+## dr_gen
+
+## dr-docker
+
 ## dr-util
 
 ## parse_claude
+
+## utils
+
+## scripts
