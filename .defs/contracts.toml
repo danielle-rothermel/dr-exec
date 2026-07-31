@@ -107,15 +107,15 @@ date = "2026-07-31"
 [[contracts]]
 title = "Completed runs are data with one failure owner"
 statement = """
-A child that ran produces a run result regardless of exit status or whether a \
-post-spawn failure belongs to payload, executor, driver, channel, budget, or \
-machine; absence and pre-spawn executor failure produce no run result. Absence \
-remains distinct from other spawn failures, exit interpretation is caller \
-policy with a report-only default, and every failure receives exactly one \
-evidence-based attribution without blaming payload by elimination; only \
-evidence-attributed channel failures form the retriable class. Aggregating \
-trusted-tool calls preserves per-call durable artifacts and collects ordinary \
-statuses without failing fast."""
+Every completed execution attempt produces a run result, including recognized \
+spawn outcomes such as absence where no child ran; only executor machinery \
+failure that prevents a trustworthy result produces none. Absence remains \
+distinct from other spawn failures, exit interpretation is caller policy with \
+a report-only default, and every failure receives exactly one evidence-based \
+attribution without blaming payload by elimination; only evidence-attributed \
+channel failures form the retriable class. Aggregating trusted-tool calls \
+preserves per-call durable artifacts and collects ordinary statuses without \
+failing fast."""
 rationale = """
 Using exceptions or sentinel values for ordinary exits collapses absence, \
 crash, kill, timeout, overflow, and nonzero exit into unusable control flow. \

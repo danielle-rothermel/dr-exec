@@ -184,9 +184,10 @@ failure is always distinguishable from payload failure."""
 [[terms]]
 name = "run result"
 definition = """
-The structured record of a completed run: exit status, delivered output, and \
-measurements. It exists whenever the child ran, however it exited and whoever \
-owns the failure; no run result exists when no child ran."""
+The structured record of a completed execution attempt: exit status when a \
+child ran, delivered output, and measurements. It represents every recognized \
+outcome, including absence and other spawn outcomes where no child ran; \
+executor machinery failure is the case where no trustworthy run result exists."""
 
 [[terms]]
 name = "run record"
