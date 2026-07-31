@@ -1137,7 +1137,7 @@ hung sandbox hangs the caller; no memory, CPU, or output bounds on either
 side of the WASM boundary.
 
 Observability — crash diagnosis only (exit code plus stderr on failure);
-no narration, no durable record; silent restart of a dead sandbox is
+no narration, no run record; silent restart of a dead sandbox is
 exactly the silent-replacement pattern the supervised behaviors forbid.
 
 Lifecycle — persistent child with restart-on-death (`_ensure_deno_process`
@@ -1419,7 +1419,7 @@ formulas, opposite sides of the boundary. Caller stdin cap 50 MiB
 `max(10 MiB, 50 KiB × N)` for batches; chunking at 200 items.
 
 Observability — structured stage codes plus `retriable`; `stderr[:200]`
-head-slices in two messages; no narration or durable record.
+head-slices in two messages; no narration or run record.
 
 Lifecycle — delegated to the adapter; inside the worker, per-item
 `os.chdir` + directory wipe between items — per-item filesystem hygiene
@@ -1516,12 +1516,17 @@ the marker line is absent, submission is still logged as success with
 detection parses `job list` output with a bare `except` that degrades to
 an empty set — duplicate protection fails open. No timeouts anywhere.
 Budget axes — none. Lifecycle — `run` defaults. Observability —
-notable: `SubmissionLogger` writes a durable timestamped JSON
+`SubmissionLogger` writes a durable timestamped JSON
 append log per experiment (config/seed/job_id/success/error), read back
 as the *idempotency key set* on re-runs, and the summary generates a
 copy-pasteable retry command — submission is idempotent-by-persisted-log
 rather than by server state, one of the survey's better run-record
-patterns.
+patterns. Attribution — returncode-gated success with a coherent
+`check=` split (`check=True` for probes, `check=False` for submissions),
+but two collapses below it: an absent "Job submitted with ID:" marker
+still logs success with `job_id or "unknown"`, and the duplicate-detection
+parse degrades through a bare `except` to an empty set, so duplicate
+protection fails open.
 
 ## deconCNN
 
@@ -1541,6 +1546,19 @@ discarded; one process per job id in a loop (no batching, full `uv run`
 startup each). One safety pattern: a dry-run gate plus a
 queued-jobs-only guard before destructive `job remove` calls.
 
+Budget axes — none: no timeouts anywhere and no output bounds; the only
+admission-shaped control is the dry-run gate and queued-jobs-only guard
+before destructive `job remove` calls. Observability — none of the
+executor's own: the re-invocation wrappers inherit stdio so progress is
+the operator's terminal and nothing is retained, and the helper that
+collapses to `False` discards stderr; no run record. Lifecycle — `run`
+defaults, leader-only, with no timeout to trigger even that; each job is a
+fresh process in a loop paying full `uv run` startup, and nothing outlives
+the call. Attribution — the wrappers propagate the child's exit code
+faithfully via `sys.exit`, but the cross-repo helper collapses launch
+failure and job failure into a bare `False` with stderr discarded, so
+absence and payload failure are indistinguishable.
+
 ## dr_gen
 
 ### Local parallel training launcher
@@ -1557,7 +1575,7 @@ bound is a max-parallel-jobs admission count. Lifecycle — busy-poll
 admission and drain loops over a handle list with sleeps; no kill path,
 no signal handling, no reap: Ctrl-C orphans every child. Attribution —
 rc==0 binary, plus a pointer to the per-job stderr log. Observability —
-`print(flush=True)` narration; one durable record,
+`print(flush=True)` narration; one run record,
 `launcher_critical_errors.log`, for launch failures (two exception
 classes distinguished, failing command included) — failed launches are
 otherwise silently skipped. Hardcoded cluster paths throughout.
@@ -1576,7 +1594,8 @@ envelope `DockerRuntimeResult(ok, error=ErrorEnvelope(code, retriable))`;
 container cleanup via cidfile in `finally` (`docker rm -f`, CID validated
 against `[0-9a-f]{64}`). Weaknesses: no `start_new_session`/`killpg` (bare
 `proc.kill()` on the docker CLI client), no TERM→KILL escalation, writer
-thread joined without timeout, no argv validation, no plain-argv
+thread joined without timeout, unvalidated env values and command entries
+(image, limits, and paths are pydantic-validated), no plain-argv
 (non-Docker) entry point. `cleanup.py:21` is a best-effort `docker rm -f`
 with output discarded and no timeout.
 
@@ -1621,12 +1640,9 @@ that is lossy: payload nonzero-exit and executor RuntimeError share
 INTERNAL_ERROR; signal deaths undistinguished; `retriable=True` is set on
 exactly one path (timeout). The envelope's ok/error invariant is
 *structurally enforced* by a model validator, and `adapters.py`
-re-validates it defensively with machine-readable violation tags. Inputs
-to argv construction are pydantic-validated (nonempty image, positive
-limits, absolute container paths, `..` rejected) — narrower than "no
-argv validation."
+re-validates it defensively with machine-readable violation tags.
 
-Amortization — wrong before: `batching.py` is a first-class
+Amortization — `batching.py` is a first-class
 batch-amortization primitive — one container for many jobs with strict
 result-count alignment (misaligned results refuse to return), and
 `run_batch_with_failure_isolation` *recursively bisects* a failing chunk
@@ -1682,6 +1698,18 @@ asserts wall-clock thresholds (<5 s, <3 s, <10 s) via `perf_counter`
 around *untimed* processes — a hang blocks the suite forever instead of
 failing the very threshold it was written to guard. Ruff S603/S607
 suppressed globally in pyproject.
+
+Budget axes — none: zero `timeout=` across all 44 sites and no output
+bounds, which is exactly what makes `test_performance.py`'s wall-clock
+assertions unenforceable. Observability — none of the executor's own: no
+narration and no run record; captured stdout/stderr is consumed only by
+per-test assertions and discarded. Lifecycle — `subprocess.run` defaults,
+leader-only, with no timeout to trigger even that; every call pays the
+full two-level `uv run` → `python` tree, and all 44 share the repo working
+tree with no per-test isolation. Attribution — uniform and deliberate:
+`check=False` with the returncode asserted per test, so exit status is
+data rather than an exception — but with no timeout, a hang is
+indistinguishable from progress and never attributed at all.
 
 ## utils
 
