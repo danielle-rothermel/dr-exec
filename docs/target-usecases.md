@@ -138,6 +138,11 @@ intermediate is lost data, not lost convenience.
 
 ## Use cases
 
+All execution is machine-local. The executor's guarantees — no survivors,
+group kill, reaping, liveness — end at the machine boundary; invoking
+`ssh` is a trusted-tool call whose far side is the caller's domain, not a
+remote-execution mode.
+
 1. **Untrusted Python source, call-scoped** — run generated Python in a budgeted, disposable runtime.
    - Fresh state per run — nothing a prior run did can affect this one.
    - Concurrent runs never collide — each run works in its own scratch workspace by default; shared assets are read-only views, never shared mutable state.
@@ -145,6 +150,7 @@ intermediate is lost data, not lost convenience.
    - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
+   - No wedging on the executor's pipes — input feeding and output draining are concurrent whenever both are live; a caller can never deadlock a run through the executor's own plumbing.
    - No survivors — when a run ends, by any path, the child's entire process tree is gone before the call returns.
 2. **Untrusted command, call-scoped** — same, argv-general: compiled artifacts of generated code, headless agent CLIs.
    - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
@@ -153,6 +159,7 @@ intermediate is lost data, not lost convenience.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
    - Argv only — commands are argument vectors; nothing is ever interpreted by a shell.
+   - No wedging on the executor's pipes — input feeding and output draining are concurrent whenever both are live; a caller can never deadlock a run through the executor's own plumbing.
    - No survivors — when a run ends, by any path, the child's entire process tree is gone before the call returns.
 3. **Untrusted batch** — work structured as a cross-product of dimensions (candidates × tasks × cases), amortized through shared children at declared dimension boundaries, with results indexed by the dimensions.
    - The batch is a cross-product, not a list — its dimensions are first-class, and every result is indexed by them.
