@@ -8,6 +8,9 @@
 - **Inherited state** — what a child process receives automatically from its parent: environment variables (and any credentials in them), working directory, open file descriptors. Inheritance is never the default; it is always an explicit grant.
 - **Containment** — the declared restrictions on what a payload can reach (filesystem, network, processes, resources): a posture ranging from bare process boundary to full sandbox, always stated, never implied.
 - **Call-scoped** — the child's entire lifetime, spawn through reap, falls within a single executor call. Contrast: supervised long-lived processes, which outlive the call.
+- **Supervised** — a child whose owner observes liveness and exit and is accountable for teardown; the opposite of fire-and-forget.
+- **Liveness** — verified evidence that a process is still the child we spawned: identity, not a bare pid check.
+- **Reap** — collect a dead child's exit status so it cannot linger as a zombie.
 - **Hermetic** — no undeclared inputs: the runtime includes only what was declared. Distinct from containment (restricting what a payload can reach) and from POSIX session isolation (process-group lifecycle).
 - **Budgeted** — every resource axis — wall-clock, output, input — carries an explicit finite budget; exceeding one is a distinguishable failure, never silent. Per-axis names (deadline, output cap) refer to a single budget.
 - **Executor** — our machinery on the parent side of the process boundary: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
@@ -30,5 +33,12 @@
 5. **Sandboxes** — real containment (filesystem/network/resource) for untrusted execution; mechanism to be researched (not necessarily docker); replaces and decommissions dr-docker.
    - Containment is verified, not assumed — execution refuses rather than silently degrading when the promised containment is unavailable.
 6. **Supervised long-lived processes** — children that outlive the call (agent servers, stdio RPC); a fully targeted use case with its own distinct set of concerns (liveness, restart, streaming I/O, reaping across calls), designed as its own contract — never a mode of the call-scoped runners.
+   - Supervised, never orphaned — every child has an accountable owner; spawn-and-forget with nobody responsible for observing exit and reaping does not exist.
+   - Exit is an observed event — child death is detected and surfaced promptly with attribution (crash vs clean exit vs killed), not discovered as a broken pipe on next use.
+   - Liveness is verified identity, not a pid probe — "still running" means verified to be the child we spawned, so pid reuse cannot impersonate a dead child.
+   - Shutdown is deliberate and complete — stop means the whole process tree terminated, escalated, and reaped within a budget, with the same rigor as call-scoped teardown.
+   - Ownership survives the owner — supervision can be persisted and reattached; a child is never unkillable because its spawner exited.
+   - Interactions are budgeted even when the child is not — each request or stream carries budgets; unbounded accumulation is an explicit grant, never a default.
+   - No silent replacement — a restarted child is a new child, visibly; supervision never swaps the process behind a handle.
 
 For more info: subprocess usage audit results at /Users/daniellerothermel/drotherm/repos/dr-exec/docs/subprocess-usage-audit.md
