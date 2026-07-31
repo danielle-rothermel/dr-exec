@@ -291,6 +291,58 @@ dies.
 
 ## dr_exp
 
+### Slurm worker fleet launcher
+
+`src/dr_exp/worker/launcher.py` — the fleet's most complete supervised
+long-lived implementation. `WorkerLauncher` spawns N workers per GPU (its
+own CLI: `sys.executable -m dr_exp.cli.main ... worker --worker-id ...`),
+each with an environment overlay (`os.environ.copy()` plus a per-worker
+`CUDA_VISIBLE_DEVICES`), stdout+stderr into a per-worker log file, and
+`preexec_fn=os.setsid` for group management. Supervision loop: `poll()`
+health check every 5 s; restart-on-failure as a constructor-declared
+policy, gated on pending work, with restart counts tracked and each restart
+logged; a launcher lifetime cap of 47 h defaulted deliberately inside the
+48 h SLURM limit; a control-file command channel (`stop_<jobid>` /
+`finish_current_<jobid>`) checked each tick; signal handlers routing
+SIGTERM/SIGINT into the same shutdown path. Shutdown is group-targeted with
+escalation: SIGTERM via `killpg` to every worker, a fixed 5 s grace sleep,
+SIGKILL to survivors. GPU discovery parses `CUDA_VISIBLE_DEVICES` with
+`nvidia-smi --list-gpus` fallback (full binary path, captured, `check=True`,
+no timeout). Weaknesses: restart identity reconstructed by string-parsing
+worker IDs; the grace period is a fixed sleep, not a bounded wait, and
+kills are never followed by a reap; no per-job deadline at this layer.
+
+Budget axes:
+
+- Launcher lifetime — 47 h against SLURM's 48 h: a contract budget derived
+  from a real downstream constraint, the taxonomy's clearest existing
+  example.
+- Termination — 5 s TERM→KILL escalation, group-targeted (executor
+  self-budget); no post-kill reap wait.
+- Output — per-worker logs spill to disk, unbounded: the permissive
+  disk-backed posture the budgets principle prefers.
+- Per-worker/per-job wall-clock — none at this layer.
+
+Observability — the fleet's richest: narration to console and a launcher
+log file simultaneously; a per-worker durable log each; a status JSON
+heartbeat rewritten every 60 s (workers, restart counts, job-state tallies,
+runtime); error aggregation sweeping worker logs for
+error/exception/traceback markers every 10 min into `errors.log`; every
+spawn, restart, kill, and signal logged. One durable-record flaw: the
+status file is deleted on clean exit, so the final heartbeat survives only
+crashes.
+
+### CLI self-invocation job submission
+
+`scripts/submission/*.py` (~a dozen sites) — job submission drives the
+repo's own `dr_exp` CLI via `subprocess.run(capture_output=True)`, parsing
+stdout for lines like "Job submitted with ID:". Self-invocation as an API:
+the process boundary substitutes for a library call, with string-parsing
+where a return value should be. No timeouts anywhere; mixed `check=`
+postures. Budget axes — none. Observability — captured output is consumed
+only for the parsed line; no narration or record beyond each script's own
+prints.
+
 ## deconCNN
 
 ## dr_gen
