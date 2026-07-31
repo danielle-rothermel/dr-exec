@@ -1,462 +1,194 @@
 # dr-exec v1 design
 
-This is the **v1** design. Its purpose is narrow and explicit: fill the
-execution needs of dr-code's open PR stack — HumanEval batch evaluation,
-self-invocation test probes, execution faking in tests — on a foundation
-shaped so the full vision in `target-usecases.md` can be built on top of
-it, or reshape it, without a rewrite. Every surface here is designed
-against that contract's behaviors and vocabulary; where v1 defers a
-behavior, it defers visibly, never silently.
+V1 targets the execution needs of dr-code's open PR stack: HumanEval batch
+evaluation, self-invocation probes, and execution fakes. It implements a narrow
+call-scoped slice of the [target use cases](../high-level-plan/target-usecases.md)
+without making deferred containment, supervision, or fleet behavior appear
+partially supported. Its shared call-scoped foundation is intended to support
+later use cases without introducing a second execution engine.
 
-Repository-wide execution vocabulary lives in `.defs/terms.toml`.
-Vocabulary introduced by this plan lives in `terms.toml`.
+## Structured design index
 
-## Scope
+Repository-wide accepted vocabulary and behavior live in:
 
-**Serves:** use case 1 (untrusted Python source, call-scoped), use case 2
-(untrusted command, call-scoped — the argv-general form; model-authored
-prompts driving agent CLIs are untrusted payload by the contract's
-categorization), use case 3 (untrusted batch), use case 4 (trusted tool
-invocation, minus multi-call aggregation and minus stdio passthrough —
-the passthrough deferral is what keeps the build-tooling consumers below
-on stdlib), and the Testing section (the fake, and ownership of the
-spawn-path test suite).
+- [core terminology](../../.defs/terms.toml)
+- [standing contracts](../../.defs/contracts.toml)
 
-**Defers, cleanly severable:** containment mechanisms beyond the process
-boundary (use case 5 — v1 ships exactly one containment profile),
-supervised children and fleets (use cases 6–7), the streamed / spooled /
-stdio-passthrough delivery modes (captured with marked truncation covers
-the v1 consumers; spooled is the designed-for first addition), bytes-mode
-I/O, and cwd beyond the per-run scratch workspace.
+The v1 plan is classified against a frozen revision of those contracts. These
+files are proposals for review, not standing repository authority:
 
-**Visibly unbudgeted in v1:** memory, CPU time, processes, file size,
-open files. Per the no-unstated-third-case rule, these axes are declared
-unbudgeted in the run record — never silently unenforced.
+- [v1 terminology](terms.toml)
+- [compatible contract extensions](contract-extensions.toml)
+- [contract contradictions](contract-contradictions.toml)
+- [new contracts](new-contracts.toml)
+- [intentional scope exclusions](intentionally-out-of-scope.toml)
+- [unaddressed contracts](unaddressed-contracts.toml)
 
-**Deferred consumers:** fleet call sites whose needs sit on deferred
-surfaces stay on stdlib `subprocess` until the surface exists, and are
-named here so staying is a visible decision, not drift: build tooling
-(hatch build hooks, packaging tests driving `uv`/`pnpm` — need arbitrary
-cwd, passthrough delivery, and generous or absent deadlines), repo-scoped
-`git` provenance capture (needs arbitrary cwd), long-lived dev servers
-with readiness probes (use case 6), and interactive multi-process test
-harnesses (mid-run polling and rendezvous — no call-scoped shape fits).
+Every unchecked item in the
+[review discussion](review-discussion-topics.md) remains unresolved. In
+particular, a clause appearing in an extension or contradiction file does not
+settle the corresponding discussion topic. Review must resolve that checklist
+before the disputed behavior is treated as accepted.
 
-## Architecture
+## Scope and consumer map
 
-One package, `dr_exec`, consumed only as a pinned release. Modules:
+V1 serves target use cases 1 and 2, the v1 batch slice of use case 3, and the
+captured-output subset of trusted-tool use case 4. Multi-call trusted-tool
+aggregation is not part of the v1 API. V1 also supplies the library-owned fake
+and owns the production engine's spawn-path tests.
 
-- `dr_exec.engine` — internal: the call-scoped spawn/lifecycle/IPC core.
-  Not imported by consumers.
-- `dr_exec.run` — public call-scoped entry points.
-- `dr_exec.batch` — the batch protocol: parent-side orchestration and the
-  driver kit the child runs.
-- `dr_exec.declare` — the declaration types: budgets, environment
-  passthrough, containment profiles, exit policies.
-- `dr_exec.record` — run result, run record, narration.
-- `dr_exec.fake` — the contract-enforcing fake.
+The structured [scope exclusions](intentionally-out-of-scope.toml) cover
+delivery beyond captured text, containment beyond the process boundary,
+supervised ownership and interaction, and fleets. V1 also does not expose
+arbitrary cwd or interactive multi-process orchestration.
 
-### The engine
+The plan currently proposes that memory, CPU time, process count, file size,
+and open-file count remain visibly unbudgeted. The memory choice conflicts with
+the standing contract and is recorded in
+[contract contradictions](contract-contradictions.toml); the broader budget
+shape remains subject to the linked [review discussion](review-discussion-topics.md).
 
-The single implementation of the shared invariants; every public entry
-point routes through it.
+Consumers that require a deferred surface stay on their current execution path
+until that complete surface exists:
 
-- Argv-only: commands are validated argument vectors (nonempty strings,
-  no NULs); nothing is ever interpreted by a shell.
-- Lifecycle: fresh session per spawn; group-targeted teardown on every
-  exit path with a completion-race-safe kill, escalation, and reap inside
-  the executor self-budget for termination — the run's process group is
-  gone before the call returns. The one residual, declared as a limit of
-  `PROCESS_BOUNDARY_ONLY` (below) rather than left silent: a descendant
-  that itself calls `setsid`/`start_new_session` after the leader exits
-  reparents to init and leaves the group, so group teardown cannot reach
-  it. Closing that gap needs a PID namespace, a subreaper, or a job
-  object — real containment, which is use case 5's job; the profile
-  states the exposure so no caller mistakes v1's guarantee for the full
-  process-tree teardown the contract's ultimate "no survivors" behavior
-  describes. A descendant that merely runs in the leader's group (an
-  ordinary background helper) is reaped normally.
-- I/O: input feeding and output draining are concurrent whenever both are
-  live; a caller can never deadlock a run through the executor's own
-  plumbing.
-- Inherited state: the child receives nothing by default — environment,
-  working directory, file descriptors. All grants are explicit
-  declarations. Stdin is a pipe carrying exactly the declared input and
-  then closed (closed immediately when no input is declared); the
-  parent's stdin is never inherited, so a child that reads stdin sees
-  EOF, never a hang.
-- Scratch workspace: each run executes in its own temporary working
-  directory by default; concurrent runs cannot collide. The workspace is
-  removed on every exit path before the call returns; its path is in the
-  run record, and payload artifacts that must outlive the run are
-  written to caller-supplied absolute paths (artifact paths are payload
-  output, per the contract). Cleanup failure is narrated and
-  executor-attributed but never converts a completed run into an
-  exception — the record-write rule's mirror.
+- build hooks and packaging tests need arbitrary cwd and passthrough output;
+- repository provenance capture needs arbitrary cwd;
+- long-lived development servers need supervision and readiness;
+- interactive multi-process harnesses need mid-run polling and rendezvous.
 
-### Pinned semantics
+## Package navigation
 
-Contract-level decisions consumers build persisted identity and scoring
-on. Each is deliberate, golden-tested at the exact-literal level where a
-literal exists, and changed only by contract revision — never by a local
-edit that happens to pass tests.
+The proposed package is `dr_exec`, consumed through pinned releases:
 
-- Byte-denominated budgets — output and input budgets count bytes on the
-  raw streams; decoding happens after accounting. A budget boundary never
-  moves because an encoding changed.
-- Never-raising decode — captured output is UTF-8 decoded with
-  `errors="replace"`. Hostile payload bytes yield a scoreable string,
-  never an executor failure.
-- Byte-exact capture — captured payload output is exactly what the child
-  wrote: no banners, prefixes, framing, or newline normalization.
-  Narration lives on the logging channel only. Consumers may parse
-  captured streams with `startswith`/whole-stream equality.
-- Real pipes — the child's stdio are ordinary OS pipes; the payload may
-  `dup`, redirect, or close its own descriptors. Anti-spoofing protocols
-  built on descriptor duplication are supported, not fought.
-- Untrusted-Python invocation shape — `HERMETIC` runs
-  `interpreter -I -c <source>`: `-I` isolation (no `PYTHON*`
-  environment, no user site, no cwd on `sys.path`), source delivered as
-  argv so child-observable state is run-invariant (`<string>` tracebacks,
-  no `__file__`, `__name__ == "__main__"`). Source size is validated
-  before spawn against an explicit bound with declared ARG_MAX headroom —
-  a caller error, never a mid-spawn surprise.
-- Run-invariant child-observable state — the executor injects nothing
-  run-varying into what the child can see: no environment variables, no
-  argv additions, no stdio framing. Determinism gates (run twice, compare
-  exactly) are a supported consumer pattern. The one run-varying
-  observable is the scratch working directory's path; payloads that read
-  and emit their cwd are the documented caveat.
-- Executor kills are never payload-attributed — a signal death inflicted
-  by the executor's own enforcement (deadline, overflow) is reported
-  through the outcome's budget attribution; the raw returncode is still
-  present but consumers branch on attribution first, so an
-  executor-inflicted `-SIGKILL` can never masquerade as a payload crash.
-- Thread-safe, duration-bounded calls — the engine is safe under
-  concurrent calls from one process, and every call's wall time is
-  bounded by the declared deadline plus the executor self-budgets for
-  termination and joining. Callers may hold leases and heartbeats around
-  calls.
-- Descriptor table — the child starts with exactly file descriptors 0
-  (stdin), 1 (stdout), and 2 (stderr), each connected to the run's pipes;
-  the executor's own descriptors (records,
-  scratch, narration) are never inheritable, so `os.dup(1)` in a
-  payload deterministically returns 3. Anti-spoofing protocols count on
-  this; it is golden-tested with a descriptor-probe child.
-- Spawn absence and spawn-errno rules — argv[0] is resolved execvp-style
-  against the *granted* environment's `PATH` (with no `PATH` granted,
-  only absolute argv[0] resolves; a relative argv[0] under `none()` is
-  a pre-spawn caller error). Spawn absence attribution is assigned
-  exactly on ENOENT from the spawn attempt; any advisory pre-check never
-  changes the outcome. Every other spawn errno (EACCES, ENOEXEC, …)
-  lands as machine attribution with the errno preserved —
-  distinguishable, per the collapsed-attribution prohibition.
-- Attribution precedence — exactly one attribution, decided once after
-  teardown from recorded enforcement flags, in pinned order: spawn
-  absence, then output budget, then wall-clock budget, then exit-status
-  interpretation. A recorded violation wins over a clean exit that
-  raced it (a child that flooded past a `FAIL` bound and exited 0
-  before the kill landed is still a budget outcome), and an overflow
-  that expired the deadline while draining is an output outcome, not a
-  timeout. Golden-tested.
-- Measurements — duration is spawn-to-reap on the monotonic clock,
-  excluding parent-side setup; teardown time is reported as its own
-  field. Output consumption counts bytes *produced* per stream (the
-  executor keeps counting past a truncation bound), so a consumer can
-  size a bound from an overflowing run. Record timestamps are ISO-8601
-  UTC wall-clock.
-- Source-size bound — machine protection derived from the platform exec
-  limits, not an interior default: the binding constraint is the
-  per-argument ceiling (Linux `MAX_ARG_STRLEN` = 128 KiB), so `source`
-  is validated pre-spawn against a pinned 96 KiB bound, and the full
-  argv plus granted environment is validated against a conservative
-  1 MiB aggregate (`ARG_MAX` floor) — an oversized environment
-  passthrough with a valid-size source is rejected pre-spawn too, never
-  a mid-spawn E2BIG.
-- Narration is parent-side — `dr_exec.*` loggers live in the calling
-  process; narration is never written into the child's streams, so a
-  consumer asserting exact captured stderr is unaffected by verbosity.
+- `dr_exec.engine` — private call-scoped spawn, I/O, lifecycle, budget,
+  attribution, and recording implementation;
+- `dr_exec.run` — public call-scoped entry points;
+- `dr_exec.batch` — parent-side batch orchestration and the child driver kit;
+- `dr_exec.declare` — budget, environment, containment, and exit declarations;
+- `dr_exec.record` — results, records, and narration;
+- `dr_exec.fake` — the contract-enforcing consumer test fake.
 
-### Declarations (`dr_exec.declare`)
+The single-engine boundary and pinned-release rule are proposed in
+[new contracts](new-contracts.toml). The module names and ownership map above
+remain navigational design rather than a structured contract.
 
-Frozen internal value objects (dataclasses); anything that crosses a
-process or persistence boundary is a serialization model.
+## Residual API design
 
-- `Budgets` — wall-clock, output, and input axes. Each axis holds either
-  a declared budget or the explicit `UNBUDGETED` sentinel; there is no
-  unset state. The output budget is a single bound shared across stdout
-  and stderr (a deliberate shape: it bounds the executor's total capture
-  memory, and a noisy stderr consuming a plain run's shared output budget
-  is a visible, attributed outcome rather than a hidden coupling),
-  denominated in bytes on the raw streams before decoding. Output budgets
-  carry a caller-declared output overflow policy: `FAIL` (the run is
-  killed and the outcome attributed to the budget; output captured so
-  far is retained and marked truncated — diagnostics are never
-  discarded) or
-  `MARKED_TRUNCATION` (the run continues to completion; capture stops at
-  the bound and the truncation is marked). Under `MARKED_TRUNCATION` the
-  executor keeps draining both streams to EOF and discards bytes past
-  the bound — the pipe is never closed early and the payload is never
-  blocked or killed by the executor's own accounting, so an
-  executor-side capture decision can never change how the payload dies.
-  Truncation metadata records the bytes dropped per stream. Under either
-  policy a consumer branches on the outcome before parsing captured
-  output, so truncation can never masquerade as a protocol violation.
-  Input budgets are enforced before spawn (a caller error, never a
-  wasted spawn). Executor self-budgets for termination and startup have
-  built-in defaults and are not caller-facing in v1.
-- `EnvironmentGrant` — declares environment passthrough as `none()`
-  (default), `named(vars)` (listed parent variables), `fixed(mapping)`
-  (a literal replacement environment; nothing is read from the parent
-  at all — the shape for hermetic determinism controls like
-  `OPENBLAS_NUM_THREADS=1`), or `overlay(extra, exclusions=())` (the
-  whole parent environment plus extras minus exclusions; exclusions
-  verified absent before spawn). Passthrough declarations are frozen
-  snapshots: `named` resolves values from the parent environment at
-  declaration construction, never at spawn, so an identity derived from
-  the declaration is a claim every later run honors. The declarations
-  are introspectable data — declared names, and for `fixed` the mapping
-  — so consumers can derive identity hashes from exactly what the child
-  will receive.
-- `ContainmentProfile` — v1 ships one: `PROCESS_BOUNDARY_ONLY`, whose
-  declared limits state plainly that it restricts nothing beyond the
-  process boundary (full filesystem, network, and credential reach) and
-  that teardown reaches the run's process group but not a descendant
-  that re-sessions itself out of it (the setsid-escape residual above).
-  Running any untrusted payload requires naming a profile at the call
-  site — the trust gate is the parameter's existence, and it cannot be
-  defaulted.
-- `ExitPolicy` — caller-declared mapping from exit status to meaning;
-  default report-only.
+The structured files specify the behavioral obligations but not the complete
+Python signatures. The proposed call surface is:
 
-### Entry points (`dr_exec.run`)
+```python
+run_tool(
+    command,
+    *,
+    budgets,
+    records,
+    input_text="",
+    environment=EnvironmentGrant.none(),
+    exit_policy=REPORT_ONLY,
+) -> RunResult
 
-Trust categorization is declared by which function is called — the
-call-site acknowledgment is the function name, ungreppable-around — and
-the category is recorded in the run record, so it is auditable after
-the fact, not only visible at the call site. All three entry points
-share one declaration surface (`input_text`, `environment`,
-`exit_policy`, `budgets`, `records`); asymmetries between them are
-limited to the trust parameters themselves. `records` is a required
-keyword on every entry point — `Records.directory(path)` or the
-explicit `Records.none()`; there is no unset state and no ambient
-record configuration (a process-global record directory would be
-exactly the inherited-state-by-default this contract forbids, and would
-break under concurrent callers in one process).
+run_untrusted_python(
+    source,
+    *,
+    profile,
+    budgets,
+    records,
+    runtime=HERMETIC,
+    input_text="",
+    environment=EnvironmentGrant.none(),
+    exit_policy=REPORT_ONLY,
+) -> RunResult
 
-- `run_tool(command, *, budgets, records, input_text="",
-  environment=EnvironmentGrant.none(), exit_policy=REPORT_ONLY)
-  -> RunResult` — trusted payloads: known programs with first-party
-  arguments, including stdin-fed tools. Spawn absence (unresolvable
-  program) is a distinct outcome in the result, not a start failure.
-- `run_untrusted_python(source, *, profile, budgets, records,
-  runtime=HERMETIC, input_text="",
-  environment=EnvironmentGrant.none(), exit_policy=REPORT_ONLY)
-  -> RunResult` —
-  untrusted source in a declared runtime. `HERMETIC` is the default
-  runtime (isolated interpreter; the child environment is solely the
-  declared environment passthrough — the runtime injects nothing); a
-  declared alternative names an interpreter and importable package set.
-  `profile` has no default.
-- `run_untrusted_command(command, *, profile, budgets, records,
-  input_text="", environment=EnvironmentGrant.none(),
-  exit_policy=REPORT_ONLY) -> RunResult` — the argv-general untrusted
-  form (use case 2): compiled artifacts of generated code, agent CLIs
-  driven by model-authored prompts. Same engine, same invariants as
-  `run_tool`, plus the undefaultable `profile` parameter and spawn
-  absence as a distinct outcome.
+run_untrusted_command(
+    command,
+    *,
+    profile,
+    budgets,
+    records,
+    input_text="",
+    environment=EnvironmentGrant.none(),
+    exit_policy=REPORT_ONLY,
+) -> RunResult
+```
 
-Outcomes are data: every entry point returns a `RunResult` for every run
-that spawned, including budget violations and signal deaths. Exceptions
-are reserved for executor failure — the case where no run result exists —
-and for pre-spawn caller errors (invalid declarations, oversized input).
-This extends the contract's use-case-4 rule to all of v1: budget
-violations arrive as attributed outcomes, not exceptions, so batch
-adapters never translate exception types into per-item data (the pattern
-dr-code's batch_runner currently hand-rolls).
+`EnvironmentGrant` exposes `none()`, `named(vars)`, `fixed(mapping)`, and
+`overlay(extra, exclusions=())`. Record selection is explicit per call through
+`Records.directory(path)` or `Records.none()`. There is no ambient record
+configuration. These names and exact signatures still need to be captured by
+the implementation's public API and tests.
 
-### Results, records, narration (`dr_exec.record`)
+## Residual engine and record details
 
-- `RunResult` (frozen, in-memory) — raw returncode including negative
-  signal values, captured stdout/stderr with any truncation marked as
-  metadata (never in-band), measurements (duration, budget consumption),
-  and an `Attribution` field: payload, executor, channel, budget,
-  machine, or spawn absence (`absence` in the persisted enum). Exactly
-  one. Attribution values are a pinned `StrEnum` whose literals are
-  persisted-format strings (consumers write them into durable artifacts
-  and cache keys), golden-tested per the wire-format rule. A budget
-  attribution names the violated axis (wall-clock, output, input) —
-  three-way discrimination is data, never exception type.
-- `RunRecord` (serialized) — the durable twin: invocation (argv or
-  source digest *and* input digest — a trusted driver over untrusted
-  stdin is the supported use-case-3 shape, and the record identifies
-  both halves), trust category, environment passthrough, profile,
-  budgets in force, runtime, timestamps, outcome and attribution,
-  measurements, and where outputs landed (scratch path included).
-  Written at spawn, finalized at exit, kept regardless of outcome. A
-  record-write failure is narrated and attributed executor-side; it
-  never fails the run.
-  Records land in the caller-declared directory (one JSON file per run,
-  filename `run-<utc-timestamp>-<uuid>.json` — collision-free under
-  concurrency; volume control is the caller's directory choice plus
-  `Records.none()` for hot loops).
-- The record wire format is pinned — consumers derive persisted cache
-  keys from it, so it is a persisted format under the no-magic-strings
-  rule: JSON keys are an explicit key enum golden-tested at
-  exact-literal level, never derived from field names; digests are
-  SHA-256 over UTF-8 with stated canonicalization; `UNBUDGETED`
-  serializes as the literal string `"unbudgeted"`; environment
-  passthrough serializes as sorted declared *names* plus a SHA-256 digest
-  of the canonicalized name=value payload — value-sensitive identity
-  without persisting values, because redaction is the caller's and
-  secrets never land in records.
-- Narration — verbose by default on the standard `logging` channel
-  (`dr_exec.*` loggers), quiet by configuration: spawn (with what and
-  where), waiting, killing, reaping, record location. Narration is
-  faithful, budget-accounted separately from payload output, and never
-  fails the run.
-- Executor identity — `EXECUTOR_IDENTITY`, a pinned string of the form
-  `dr-exec@<version>`, carried in every `RunRecord` and exposed for
-  consumers to fold into content-addressed cache keys and dataset
-  provenance. The fake declares its own distinct identity
-  (`dr-exec-fake@<version>`) and refuses construction claiming the
-  production identity, so a fake-produced outcome can never
-  cache-collide with or impersonate a real one — the guard dr-code's
-  corpus evaluator enforces caller-side today moves into the library.
-  Identity is a declared value, never inferred from callable object
-  identity — wrapping or partial-applying an entry point must not
-  change what a run claims to be. Executor identity answers "which
-  machinery produced this run"; it is not a *runtime* identity
-  (platform/interpreter provenance stays the consumer's to declare and
-  persist).
+The following concrete details are not fully represented by the structured
+proposal and therefore remain visible design obligations:
 
-### Batch protocol (`dr_exec.batch`)
+- Command resolution uses the granted environment's `PATH`. With no granted
+  `PATH`, only an absolute executable resolves; a relative executable is a
+  pre-spawn declaration error. Spawn-time `ENOENT` is spawn absence, while
+  other spawn errors preserve their errno and receive machine attribution.
+- Attribution is selected after teardown in this order: spawn absence, output
+  budget, wall-clock budget, then exit-status interpretation. A recorded output
+  violation wins a race with the deadline or a clean exit.
+- Duration covers spawn through reap on a monotonic clock, parent setup is
+  excluded, teardown duration is separate, and record timestamps are UTC.
+  Output measurements count bytes produced after the retention limit so an
+  overflowing run still provides sizing evidence.
+- Scratch cleanup runs on every exit path. A cleanup failure is narrated and
+  executor-attributed without replacing an otherwise trustworthy run result.
+- Records use one collision-free `run-<utc-timestamp>-<uuid>.json` file per run
+  in the caller-selected directory. The initial layout is flat; directory
+  sharding remains a future consumer-driven choice.
+- Persisted digests use SHA-256 over explicitly canonicalized UTF-8 input.
+  Environment identity includes sorted declared names and a digest of the
+  canonical name/value payload without persisting the values themselves.
+- Executor identity has the proposed forms `dr-exec@<version>` and
+  `dr-exec-fake@<version>`. Exact persisted keys, literals, canonicalization,
+  and identity strings belong in serialization models and golden tests rather
+  than additional narrative prose.
 
-The generic half of dr-code's HumanEval machinery, with the contract
-obligations its ancestor lacks.
+The structured proposal selects captured text and a pinned incremental NDJSON
+batch protocol, but output and batch serialization remain under explicit
+review in [review discussion topics](review-discussion-topics.md). The exact
+wire schemas must be captured in boundary models and golden tests once that
+discussion settles.
 
-- `BatchRequest` — a flat item list whose ids are caller-declared
-  dimension coordinates (opaque strings; the cross-product fan-out
-  across outer dimensions stays parent-side, so the sharing boundary is
-  declared by constructing the request: one warm child per
-  `BatchRequest`); an opaque per-item payload; a caller-supplied driver
-  body plus the item schema. Budgets cross the boundary as data: the
-  child rehydrates the same declared contract object the caller wrote.
-- Batch protocol wire format (child → parent): newline-delimited JSON,
-  pinned at the same fidelity as the record schema (exact line-shape key
-  literals, golden-tested). The driver's *first* protocol line is a
-  prelude that echoes the batch request identity (item ids, config digest
-  — SHA-256 over canonical sorted-key UTF-8 JSON, the canonicalization
-  pinned), so results are trustable incrementally and a later truncation
-  or death can never retroactively invalidate results already delivered.
-  Then one result line *per item as it completes* — a result once
-  produced is never lost — and a terminal completion line signaling the
-  child finished on its own terms.
-- Batch protocol channel budget — the driver's protocol stdout carries
-  its own declared contract budget (per-item result size,
-  prelude/terminal size), separate from the payload-stream output budget
-  that bounds payload stderr. A payload that floods its own streams can
-  therefore never consume the batch protocol channel's budget and void
-  completed results — the noisy-payload case is the common case for
-  generated code, and it costs only the noisy items, never the batch.
-- Driver kit — the executor's agent inside the child: protocol-stdout
-  protection (private handle captured before `sys.stdout` reassignment;
-  the known fd-level hole is documented in the profile's limits),
-  per-item execution hooks, item-failures-as-data, load-phase failure
-  fanned out to one error result per item. The per-item *body* the
-  consumer supplies is consumer domain code: consumers keep
-  real-execution tests of their driver bodies (see the fake section's
-  testing rule).
-- Parent-side accounting: exactly one result per item; missing,
-  duplicate, unknown, or shape-invalid results are executor-side protocol
-  failures. Partial results survive every failure mode, scoped per
-  dimension; items missing at child death are synthesized by the caller
-  from the run's outcome and attribution, never invented by the
-  executor.
-- The attribution seam: dr-exec reports raw distinguishable outcomes
-  (which items completed, how the child exited, driver-vs-payload fault).
-  Domain meaning — e.g. mapping a SIGSEGV death to "candidate crashed" —
-  stays with the consumer.
+## Residual batch and fake details
 
-### The fake (`dr_exec.fake`)
+The batch driver retains a private protocol-output handle before consumer code
+can replace `sys.stdout`; direct file-descriptor writes remain a declared hole
+of the process-boundary-only profile. The driver provides per-item hooks and
+turns a load-phase failure into one error result per item. These implementation
+choices support the proposed [incremental batch contract](contract-extensions.toml)
+but are not themselves structured clauses.
 
-- `FakeExecutor` — implements the same entry-point signatures, runs the
-  same declaration validation as the engine (a call the real executor
-  would reject, the fake rejects identically), executes nothing, and
-  returns scripted results. Scripting is behavioral: results are keyed
-  by a caller-supplied callable over the full declaration (dr-code's
-  existing doubles inspect the payload and synthesize matching
-  protocol output — a flat FIFO cannot express them), with a simple
-  in-order queue as convenience.
-- The fake validates scripted results against the same invariants the
-  engine guarantees — attribution/returncode consistency, truncation
-  marking, exactly one attribution — rejecting unconstructable
-  outcomes at scripting time: a test that passes against the fake
-  cannot be wrong about the contract.
-- Every call's full declaration set — command/source, `input_text`,
-  runtime, budgets, environment passthrough, profile, exit policy,
-  records — is recorded and assertable: adding a budget to production
-  code is test-visible, never fake-breaking.
-- Consumers never test spawn-path *correctness*: lifecycle, teardown,
-  and budget enforcement are the engine suite's job, seeded by porting
-  dr-code's `os.killpg` fault-injection tests (the reap-race coverage)
-  and the real-descendant liveness tests (grandchild observably dead
-  within the executor self-budget for termination on the deadline,
-  overflow, and normal-exit paths) into this repo. Consumer real-engine
-  oracle tests — parity suites and driver-body tests whose meaning
-  depends on genuinely executing a payload — are a sanctioned
-  real-engine use, run with `Records.none()` and quiet narration; the
-  fake is for logic tests, never a mandate to make real-engine oracle
-  tests tautological.
+`FakeExecutor` supports behavior selected from the complete declaration, with
+an in-order queue as a convenience. It does not execute payloads. The
+contract-enforcing behavior and testing ownership are proposed in
+[contract extensions](contract-extensions.toml); the scripting interface above
+remains residual API design.
 
-## Packaging and the dr-code cutover
+The engine test suite receives the lifecycle fault-injection and descendant
+liveness cases currently owned by dr-code. Consumer parity suites and
+driver-body tests remain real-engine oracle tests; consumer logic tests use the
+fake. The exact cutover sequence and behavior adjudication are in the
+[dr-code cutover plan](dr-code-cutover.md).
 
-dr-exec is released as a pinned package; consumers upgrade by explicit
-pin bumps, never by tracking a branch. During the cutover's development
-phase, dr-code consumes dr-exec as a local path dependency
-(`[tool.uv.sources]`), switched to a pinned PyPI release once the design
-settles and publishes.
+## Future design hooks
 
-The cutover is governed by an authority principle: this contract is the
-deliberate design; dr-code's pinned behaviors are prior art under
-review, not requirements. Each divergence gets a requirement-vs-artifact
-verdict — real obligations (attribution fidelity, protocol protection,
-no-deadlock I/O) are honored in this contract's vocabulary; incidental
-shapes (exception-class dispatch, whole-batch wire formats, sentinel
-returncodes) are replaced, and dr-code's tests, schemas, and persisted
-formats are re-pinned to the new contract. The full adjudication, the
-accepted behavior changes, and the parallel-stack migration plan live in
-`dr-code-cutover.md`.
+The current proposal leaves several extension points deliberately unresolved:
 
-The lifecycle fault-injection tests (the reap-race coverage) migrate
-into this repo's engine suite; dr-code consumers test against the fake
-only.
+- additional containment profiles should preserve the profile-shaped call
+  surface;
+- a declared-cwd grant should extend the existing grant vocabulary;
+- spooled and passthrough output need complete delivery contracts;
+- per-item batch enforcement would require an in-child protocol addition;
+- plain-run per-stream output budgets can be added if a consumer establishes
+  the need;
+- a record registry and high-volume directory layout belong above the current
+  per-call record selection.
 
-## Deliberate v1 decisions to revisit
-
-- One containment profile. The profile parameter's shape is the UC5
-  foundation; new profiles must not change call sites.
-- Captured-only delivery. `RunResult`/`RunRecord` already model "where
-  outputs landed" so spooled delivery adds a declaration, not a schema
-  change. Spooled and passthrough delivery unblock the deferred
-  build-tooling consumers.
-- Per-run scratch cwd only. A declared-cwd grant (the shape that
-  unblocks the git-provenance and build-tooling consumers) would be a
-  new declaration on the existing grant vocabulary, not a schema change.
-- The record directory is caller-declared per call, not discovered; a
-  registry (for supervised use cases) would layer above it. Layout is
-  one flat directory per declaration — sharding under high run counts
-  is the caller's directory choice; revisit if a consumer outgrows it.
-- Batch budgets are per-run (the whole child), not per-item; the driver
-  kit reports per-item timing, and incremental NDJSON delivery means a
-  deadline costs only the unfinished tail. Per-item enforcement would be
-  an in-child protocol addition if a consumer ever needs it.
-- Trust categorization is enforced by entry-point naming plus the
-  recorded category, not by a redundant required parameter — the
-  function name already is the declaration, and the record makes it
-  auditable. Real enforcement (verified containment) is use case 5's
-  job; revisit if audit shows `run_tool` absorbing untrusted payloads.
-- Per-stream output budgets exist only where a protocol demands them
-  (the batch protocol channel); plain runs keep the single shared
-  bound. Generalizing per-stream declaration is a compatible extension
-  if a consumer needs it.
+These are design directions, not accepted compatibility guarantees. Any choice
+that settles them must first be represented in the plan's structured contract
+artifacts and reviewed through the repository's
+[contract-led planning process](../processes/planning.md).
