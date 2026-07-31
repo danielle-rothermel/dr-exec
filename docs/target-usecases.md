@@ -142,6 +142,28 @@ intermediate is lost data, not lost convenience.
   best-effort infrastructure: a logging failure is itself reported, but it
   never breaks the execution it observes.
 
+## Testing
+
+Every consumer re-solved execution faking, and most solved it wrong: five
+hand-rolled fake patterns exist across the fleet, with doubles that
+drifted from the real contract, fakes that break when a budget is added,
+and spawn paths left untested by design. The library owes consumers the
+solution:
+
+- The fake ships with the library — consumers never write their own
+  executor double.
+- The fake enforces the real contract — a call the real executor would
+  reject (bad argv, undeclared trust, malformed grant), the fake rejects
+  identically; a test that passes against the fake cannot be wrong about
+  the contract.
+- Declarations are assertable — tests can observe exactly what a call
+  declared (budgets, grants, containment profile, exit policy), so adding
+  a budget to production code is a test-visible improvement, never a
+  fake-breaking event.
+- Consumers never test the spawn path — spawn-path correctness is
+  dr-exec's tested responsibility; consumers test their own logic against
+  the fake.
+
 ## Use cases
 
 All execution is machine-local. The executor's guarantees — no survivors,
