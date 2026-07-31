@@ -1,0 +1,230 @@
+# Shared vocabulary for dr-exec. Each entry has a canonical name and a
+# definition precise enough to make misuse detectable.
+
+[[terms]]
+name = "payload"
+definition = """
+The content a child process executes or interprets: source code, argv, stdin \
+programs, or prompts driving agent CLIs. Payload trust is categorized by who \
+authored the content, not by which binary runs it."""
+
+[[terms]]
+name = "trusted payload"
+definition = """
+Payload content we authored or pinned, such as first-party code or known \
+tools with first-party arguments. Its failures are bugs, not adversarial \
+behavior."""
+
+[[terms]]
+name = "untrusted payload"
+definition = """
+Payload content from outside our control, above all model-generated source, \
+compiled artifacts, prompts, or commands. It is assumed arbitrary and runs \
+only under an explicitly declared containment profile."""
+
+[[terms]]
+name = "inherited state"
+definition = """
+What a child process receives automatically from its parent: environment \
+variables, working directory, and open file descriptors. Inheritance is an \
+explicit grant, never a default."""
+
+[[terms]]
+name = "environment passthrough"
+definition = """
+An explicit grant of parent environment to a child, either as named \
+variables or an overlay. An overlay may carry named exclusions that are \
+verified absent before spawn."""
+
+[[terms]]
+name = "containment"
+definition = """
+The declared restrictions on what a payload can reach across filesystem, \
+network, process, and resource axes. It is a stated spectrum from a bare \
+process boundary to a full sandbox, never an implied property."""
+
+[[terms]]
+name = "containment profile"
+definition = """
+The complete declared containment for a run: per-axis reach grants, resource \
+backing, and known enforcement limits. It is a named reusable object \
+independent of both enforcement mechanism and child lifetime."""
+
+[[terms]]
+name = "call-scoped"
+definition = """
+A child lifetime that falls entirely within one executor call, from spawn \
+through reap. It contrasts with a supervised child that outlives the call."""
+
+[[terms]]
+name = "supervised"
+definition = """
+A child whose owner observes liveness and exit and is accountable for \
+teardown. It is the opposite of fire-and-forget."""
+
+[[terms]]
+name = "liveness"
+definition = """
+Verified evidence that a process is still the child the executor spawned. \
+It is process identity, not a bare pid check."""
+
+[[terms]]
+name = "slot"
+definition = """
+A supervised child's declared logical position, such as GPU 3 or worker 1. \
+The slot remains stable across replacements while process identity changes."""
+
+[[terms]]
+name = "fleet"
+definition = """
+A set of supervised children declared as one slot map and operated on by \
+collective verbs such as spawn, drain, and stop. It is the supervised \
+analogue of a batch."""
+
+[[terms]]
+name = "reap"
+definition = """
+Collect a dead child's exit status so the process cannot linger as a zombie."""
+
+[[terms]]
+name = "hermetic"
+definition = """
+A runtime with no undeclared inputs. It is distinct from containment, which \
+restricts reach, and from POSIX session isolation, which governs process-group \
+lifecycle."""
+
+[[terms]]
+name = "budgeted"
+definition = """
+A resource axis is budgeted or visibly unbudgeted, with no unstated third \
+case. Every active budget is visible, finite, attributable to its declarer, \
+and produces a distinguishable outcome when exceeded; "bounded" is not a \
+synonym."""
+
+[[terms]]
+name = "interior default"
+definition = """
+A default budget set below machine scale without derivation from the workload \
+or a real downstream constraint. Interior defaults are prohibited for \
+workload budgets."""
+
+[[terms]]
+name = "sharing boundary"
+definition = """
+The declared dimension crossing at which children are shared rather than \
+refreshed. It is the batch's central design decision and the boundary over \
+which containment setup amortizes."""
+
+[[terms]]
+name = "warm child"
+definition = """
+A child reused across work items inside a declared sharing boundary rather \
+than respawned for every item."""
+
+[[terms]]
+name = "group-targeted"
+definition = """
+A lifecycle action addressed to the child's entire process group or tree. \
+Its opposite is leader-only, which signals only the direct child and can \
+leave survivors."""
+
+[[terms]]
+name = "collapsed attribution"
+definition = """
+The antipattern of folding distinct failure kinds such as absence, timeout, \
+crash, and nonzero exit into one sentinel value, losing the attribution the \
+executor owes."""
+
+[[terms]]
+name = "captured"
+definition = """
+Payload output buffered by the executor and returned as part of the run \
+result at exit."""
+
+[[terms]]
+name = "streamed"
+definition = """
+Payload output delivered incrementally to calling code as it is produced. \
+Streamed output remains budgeted."""
+
+[[terms]]
+name = "spooled"
+definition = """
+Payload output written directly to a caller-designated file as it is \
+produced. It is the disk-backed mode for permissive output budgets and the \
+natural mode for long-lived children."""
+
+[[terms]]
+name = "stdio passthrough"
+definition = """
+Child output forwarded live to the operator's own stdio rather than delivered \
+to calling code."""
+
+[[terms]]
+name = "artifact paths"
+definition = """
+Declared filesystem locations where a payload writes files. These files are \
+payload output, not an executor delivery mode; the run record notes where \
+they landed."""
+
+[[terms]]
+name = "driver"
+definition = """
+Executor machinery inside a child that receives work items, executes payload \
+work, and emits results. It is part of the executor for attribution purposes \
+despite its address."""
+
+[[terms]]
+name = "executor"
+definition = """
+Our machinery around the payload on either side of the process boundary: \
+spawning, lifecycle enforcement, drivers, and result interpretation. Executor \
+failure is always distinguishable from payload failure."""
+
+[[terms]]
+name = "run result"
+definition = """
+The structured record of a completed run: exit status, delivered output, and \
+measurements. It exists whenever the child ran, however it exited and whoever \
+owns the failure; no run result exists when no child ran."""
+
+[[terms]]
+name = "run record"
+definition = """
+The durable twin of a run result, persisted while the run is live and kept \
+regardless of outcome. It survives the process that created it."""
+
+[[terms]]
+name = "attribution"
+definition = """
+The determination of which party owns a failure: payload, executor including \
+driver, channel, budget, machine, or absence. Every failure has exactly one; \
+a channel claim requires evidence, and unknown defaults to executor rather \
+than blaming payload by elimination."""
+
+[[terms]]
+name = "channel"
+definition = """
+The mechanism carrying bytes and enforcement between executor and payload, \
+such as pipes, container daemons, sandbox runtimes, or wired-in services. \
+Channel failures are retriable because they are neither payload misbehavior \
+nor executor bugs."""
+
+[[terms]]
+name = "exit policy"
+definition = """
+The caller-declared mapping from exit status to success, failure, or domain \
+data. Its default is report-only."""
+
+[[terms]]
+name = "dimension"
+definition = """
+One direction of a batch cross-product, such as candidates, tasks, or cases. \
+Results are indexed by dimensions and failure scopes bind to them; dimensions \
+are distinct from budget axes and containment reach axes."""
+
+[[terms]]
+name = "narration"
+definition = """
+The executor's own progress logging: lifecycle events emitted as they happen \
+on the executor's stream, never on the payload's streams."""
