@@ -6,7 +6,7 @@
 - **Trusted payload** — content we authored or pinned (first-party code, known tools with first-party arguments). Failures are bugs, not adversarial behavior.
 - **Untrusted payload** — content from outside our control, above all model-generated: generated source, compiled artifacts of it, model-authored prompts or commands. Assumed arbitrary; runs only under an explicitly declared containment profile.
 - **Inherited state** — what a child process receives automatically from its parent: environment variables (and any credentials in them), working directory, open file descriptors. Inheritance is never the default; it is always an explicit grant.
-- **Environment passthrough** — an explicit grant of parent environment to the child, named-variable or overlay; the only route by which inherited environment reaches a child.
+- **Environment passthrough** — an explicit grant of parent environment to the child, named-variable or overlay; the only route by which inherited environment reaches a child. An overlay grant may carry named exclusions, verified absent before spawn.
 - **Containment** — the declared restrictions on what a payload can reach (filesystem, network, processes, resources): a spectrum from bare process boundary to full sandbox, always stated, never implied.
 - **Containment profile** — the complete declared containment for a run: per-axis reach grants, resource backing, and the enforcement's known limits. A named, reusable object independent of the mechanism that enforces it.
 - **Call-scoped** — the child's entire lifetime, spawn through reap, falls within a single executor call. Contrast: supervised long-lived processes, which outlive the call.
@@ -148,14 +148,14 @@ remote-execution mode.
    - Fresh state per run — nothing a prior run did can affect this one.
    - Concurrent runs never collide — each run works in its own scratch workspace by default; shared assets are read-only views, never shared mutable state.
    - Declared runtime — the interpreter and importable package set are explicit inputs, hermetic by default; nothing from the host leaks in by accident.
-   - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
+   - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible; overlay grants may carry named exclusions, verified absent before spawn.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
    - No wedging on the executor's pipes — input feeding and output draining are concurrent whenever both are live; a caller can never deadlock a run through the executor's own plumbing.
    - No survivors — when a run ends, by any path, the child's entire process tree is gone before the call returns.
 2. **Untrusted command, call-scoped** — same, argv-general: compiled artifacts of generated code, headless agent CLIs.
    - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
-   - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
+   - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible; overlay grants may carry named exclusions, verified absent before spawn.
    - Concurrent runs never collide — each run works in its own scratch workspace by default; shared assets are read-only views, never shared mutable state.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
@@ -195,6 +195,7 @@ remote-execution mode.
    - Ownership survives the owner — supervision can be persisted and reattached; a child is never unkillable because its spawner exited.
    - Supervision is commandable from outside — stop and drain can be requested by something other than the spawning process.
    - Interactions are budgeted even when the child is not — each request or stream carries budgets; unbounded accumulation is an explicit grant, never a default.
+   - Interaction cancellation is first-class — in-flight work can be cancelled through the child's protocol without killing the child; signals address the process, cancellation addresses the request.
    - Incremental observation — output is observable as it is produced, not only at exit; observation itself stays budgeted.
    - Deadlock-free bidirectional exchange — when stdin and stdout are both live, the executor owns the concurrency; a caller cannot wedge on the executor's own pipes.
    - No silent replacement — a restarted child is a new child occupying the same declared slot, visibly; slot identity is first-class, never reconstructed from names, and supervision never swaps the process behind a handle.
