@@ -193,6 +193,35 @@ finer.
 
 ## whetstone-envs
 
+### Symlink-farm workspaces for a vendored generator
+
+`src/whetstone_envs/c18/upstream.py:169` — `[sys.executable,
+"run_experiment.py", ...]` drives a vendored generator whose output
+filename is fixed, so each call gets a `TemporaryDirectory` populated with
+symlinks into the read-only vendored tree (:143-146) as its `cwd`:
+parallel calls cannot collide, and the shared tree stays untouched. The
+result is read from a file the child wrote (:183-195) — file-delivered,
+not captured. Test-side patterns worth noting: `patch --batch -p1` applied
+against pinned SHA256s (content-pinned mutation of the vendored tree),
+full env replacement with a constructed `PATH`, and `PYTHONHASHSEED`
+pinning for determinism.
+
+Budget axes — wall-clock per call; output captured unbounded (the result
+travels by file, disk-backed and unbounded).
+
+Observability — none live; on failure `UpstreamError` carries
+`stderr[-500:]` — the recurring tail-slice pattern: a post-hoc excerpt
+standing in for a record nothing kept in full.
+
+Lifecycle — `subprocess.run` defaults, leader-only.
+
+Attribution — `check=False` with nonzero mapped to a dedicated
+`UpstreamError` carrying the stderr tail: a typed executor-side verdict,
+no finer split.
+
+Amortization — a fresh symlink farm per call: cheap (symlinks, not
+copies), a deliberate trade of per-call setup for parallel safety.
+
 ## fchord
 
 ## dotfiles
