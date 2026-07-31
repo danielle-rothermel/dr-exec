@@ -287,6 +287,39 @@ the fleet's clearest existing warm-worker amortization.
 
 ## dr-subs
 
+### SSH remote worker invocation
+
+`src/dr_subs/machines.py:121-198` (`_run_remote_worker`) — the fleet's one
+remote execution path: `Popen(("ssh", *_SSH_OPTIONS, source_id,
+*_REMOTE_WORKER_COMMAND))` with the peer drawn from a closed enum (:51), a
+JSON request on stdin, and the response read via `selectors` + `os.read`.
+Companion probes: an ssh reachability check (DEVNULL, timeout 8,
+returncode inspected) before expensive work, and a `scutil` hostname query
+whose failure degrades gracefully to `"local"`. Design flaw worth
+preserving as a lesson: the request is written to stdin in full before the
+read loop starts (:149), so a request larger than the pipe buffer can
+never complete — the write-before-read deadlock in production form.
+
+Budget axes — both caller-declared per call, the fleet's best
+parameterization: wall-clock (default 3600 s) and a response cap
+(64 MiB default, per-call override) — a contract budget on the response;
+input unbounded.
+
+Observability — stderr uninherited by the protocol: it passes through to
+the operator's terminal (accidental stdio passthrough for diagnostics); no
+narration, no record.
+
+Lifecycle — `_stop_process`: SIGTERM → 1 s wait → SIGKILL, single process
+only; no session, no group — the ssh client dies, whatever it spawned
+remotely is out of reach entirely.
+
+Attribution — the fleet's only transport-aware taxonomy:
+`RemoteScanError(code)` distinguishes transport failures (`ssh_timeout`,
+`ssh_unavailable`) from remote-worker failures (`peer_worker_unavailable`,
+`peer_worker_timeout`, `peer_response_limit`, `peer_protocol_error`) —
+attribution across a machine boundary, plus a typed UTF-8 decode error at
+the response edge.
+
 ## dr-diagram
 
 ## unitbench
