@@ -90,8 +90,9 @@ intermediate is lost data, not lost convenience.
 - Every run leaves a durable record — what was invoked (argv, cwd,
   environment grant posture), budgets in force, timestamps, outcome and
   attribution, and where outputs including intermediates landed. The run
-  result is the in-memory answer; the record is its persistent shadow and
-  survives the process that made it.
+  result is the in-memory answer; the record is its persistent shadow —
+  current while the run is live, not only complete at exit, and persisting
+  regardless of outcome: success never deletes the record.
 - Verbose by default, quiet by declaration — the default level assumes a
   new or debugging user, which is when defaults matter; flags reduce it.
   Silence is unrecoverable, noise is filterable, and disk at machine scale
@@ -127,10 +128,13 @@ intermediate is lost data, not lost convenience.
    - Exit is an observed event — child death is detected and surfaced promptly with attribution (crash vs clean exit vs killed), not discovered as a broken pipe on next use.
    - Liveness is verified identity, not a pid probe — "still running" means verified to be the child we spawned, so pid reuse cannot impersonate a dead child.
    - Shutdown is deliberate and complete — stop means the whole process tree terminated, escalated, and reaped within a budget, with the same rigor as call-scoped teardown.
+   - Drain is distinct from stop — a supervisor can stop accepting work and let in-flight work finish; abandoning paid-for work is never the only shutdown.
+   - External deadlines are anticipated — when the environment will kill the run at a known time, shutdown begins with enough headroom that teardown and the final record are ours, not the environment's.
    - Ownership survives the owner — supervision can be persisted and reattached; a child is never unkillable because its spawner exited.
+   - Supervision is commandable from outside — stop and drain can be requested by something other than the spawning process.
    - Interactions are budgeted even when the child is not — each request or stream carries budgets; unbounded accumulation is an explicit grant, never a default.
    - Incremental observation — output is observable as it is produced, not only at exit; observation itself stays budgeted.
    - Deadlock-free bidirectional exchange — when stdin and stdout are both live, the executor owns the concurrency; a caller cannot wedge on the executor's own pipes.
-   - No silent replacement — a restarted child is a new child, visibly; supervision never swaps the process behind a handle.
+   - No silent replacement — a restarted child is a new child occupying the same declared slot, visibly; slot identity is first-class, never reconstructed from names, and supervision never swaps the process behind a handle.
 
 For more info: subprocess usage audit results at /Users/daniellerothermel/drotherm/repos/dr-exec/docs/subprocess-usage-audit.md
