@@ -61,7 +61,9 @@ Three kinds of budget:
 - **Executor self-budgets** — bounds on the executor's own operations
   (termination wait, startup deadline) so cleanup and supervision can never
   hang. The only tier with true built-in defaults, because they protect the
-  machinery, not the workload.
+  machinery, not the workload. Escalation waits are sized so the child's
+  final diagnostics land — a kill that erases the evidence of why it was
+  needed is mis-sized.
 
 Axes and their default rules:
 
@@ -136,6 +138,9 @@ intermediate is lost data, not lost convenience.
 - Narration and payload output are separate channels, never conflated —
   the executor's own logging must not corrupt captured or protocol output,
   the same invariant the batch protocol enforces from the child's side.
+- Narration never fails the run — the record and narration are
+  best-effort infrastructure: a logging failure is itself reported, but it
+  never breaks the execution it observes.
 
 ## Use cases
 
@@ -205,5 +210,3 @@ remote-execution mode.
    - Collective verbs are atomic — spawn, drain, and stop apply to the fleet as single operations with per-slot attribution; the caller never loops over children.
    - Aggregate health is first-class — fleet-level state (slots alive, restarts per slot, work remaining) is queryable and durably recorded as one current view, a different question from any child's liveness.
    - Restart meets the work supply — per-slot restart policy is gated on remaining work, so a fleet winds down as work drains instead of respawning idle workers.
-
-For more info: subprocess usage audit results at /Users/daniellerothermel/drotherm/repos/dr-exec/docs/subprocess-usage-audit.md
