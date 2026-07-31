@@ -147,6 +147,9 @@ intermediate is lost data, not lost convenience.
    - The batch is a cross-product, not a list — its dimensions are first-class, and every result is indexed by them.
    - Sharing boundaries are declared — which dimension crossings share a warm child and which get fresh state is the batch's central design decision, made explicitly by the caller, never an implementation accident.
    - Failure scope follows dimensions — a payload failure fells its own sub-batch (one candidate's cases), never the whole batch; partial results are partial per dimension, and attribution names the level that failed.
+   - The driver is the executor's agent inside the child — attribution splits within the child process: driver failure is executor failure, payload failure is payload failure, even when they die together.
+   - Every item is accounted for — exactly one result per item; missing, duplicate, unknown, or shape-invalid results are executor-side protocol failures, detected at the boundary.
+   - A result once produced is never lost — results leave the child incrementally, so a death at item N costs items N onward, not the batch.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 4. **Trusted tool invocation** — hardened calls to known programs (git, uv, linters, docker) with the lifecycle rigor ad-hoc call sites never have.
    - Stdio passthrough is first-class — streaming a trusted tool's output to the operator is a supported mode, not a reason to bypass the executor.
