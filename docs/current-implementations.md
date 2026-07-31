@@ -10,6 +10,69 @@ activity.
 
 ## dr-code
 
+### Bounded subprocess primitive
+
+`src/dr_code/execution/subprocess.py` (345 lines, branch
+`rebuild/01-subprocess-execution`) — the reference call-scoped runner:
+`run_subprocess` (argv) and `run_python_subprocess`
+(`sys.executable -I -c <source>` with the minimal replacement environment
+`{"OPENBLAS_NUM_THREADS": "1"}`). Anatomy: argv validation (nonempty string
+sequence, no NULs, never a shell); environment inherited (`None`) or full
+validated replacement; `Popen` with `start_new_session=True` plus three
+daemon IPC threads (stdin writer, two bounded stream readers sharing a
+lock and overflow event); a monotonic-deadline poll loop; on every exit
+path `os.killpg(SIGKILL)` with a completion-race retry after reaping the
+leader. Typed errors: `SubprocessError` → `Timeout` / `OutputLimit` /
+`Infrastructure` (→ `Start`); nonzero exit never raises — the raw
+returncode (including negative signal values) returns in a frozen
+`SubprocessCompletedProcess(returncode, stdout, stderr)`; text-only, UTF-8
+decode with `errors="replace"`. Injection seam: `PythonSubprocessRunner`
+Protocol — with two near-identical ~25-line test doubles at
+`tests/metrics/helpers.py:153` and
+`tests/humaneval/test_humaneval_primitives.py:167` (unbounded, no group
+kill). Notable properties: the only fleet implementation combining session
+isolation, whole-group kill, and a bounded termination wait; the
+completion-race retry on group signaling. Weaknesses: no cwd, env overlay,
+bytes mode, per-stream caps, truncate mode, streaming or passthrough,
+optional stdin, or absence pre-check (a missing program surfaces as
+`SubprocessStartError`).
+
+Budget axes — wall-clock, output, input, and termination; all except
+wall-clock are module constants rather than caller-declared:
+
+- Wall-clock — required, finite, positive `timeout_seconds` per call (the
+  one caller-declared budget); enforced by a 10 ms poll loop; expiry →
+  `SubprocessTimeoutError`.
+- Output — 1 MiB shared across stdout and stderr; overflow aborts the run →
+  `SubprocessOutputLimitError`; no truncate mode.
+- Input — 4 MiB, validated before spawn; oversized input is rejected
+  without spawning.
+- Termination — 5 s bounded wait for group death and 1 s bounded IPC-thread
+  joins; exceeding either → `SubprocessInfrastructureError`.
+
+### HumanEval batch protocol machinery
+
+`src/dr_code/humaneval/batch_runner.py` plus `batch_runner_script.py` — the
+adapter/driver pair over the primitive. Parent side: builds a JSON payload
+(candidate code, support code, checks) for stdin and interprets completion
+through the protocol: `CANDIDATE_KILL_RETURNCODES` ({-SIGKILL, -SIGSEGV}) →
+candidate-attributed error; timeout → every case TIMEOUT; output limit →
+every case ERROR; other nonzero exit, JSON parse failure, shape violation,
+or unknown/duplicate case IDs → `EvaluationHarnessError` carrying partial
+results. Child side: shipped as resource text and never imported; reads one
+JSON value from stdin; reassigns `sys.stdout` (and `__stdout__`) to stderr
+while keeping a private handle for protocol output, so candidate prints
+cannot corrupt the protocol; per-case `exec` with clipped tracebacks;
+load-phase failure emits error-for-every-case and exits 0. Notable
+properties: exit-code-based payload-versus-executor attribution;
+partial-results-through-exceptions; stdout-protocol protection.
+
+Budget axes — inherits the primitive's budgets wholesale; adds one protocol
+budget:
+
+- Result fields — per-field traceback clipping at 8000 chars
+  (`FIELD_LIMIT`) in the child.
+
 ## whetstone-ai
 
 ## whetstone-envs
