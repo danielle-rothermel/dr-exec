@@ -75,6 +75,61 @@ budget:
 
 ## whetstone-ai
 
+### Codex exec transports
+
+Two sibling shapes for running `codex exec` with model-authored prompts.
+`src/whetstone/optimization/codex_runner.py:256` — codex wired to an MCP
+server spawned as `sys.executable -m whetstone.optimization.mcp_server`
+(which imports its evaluator via `importlib.import_module` on the
+`WS_MCP_EVALUATOR` env var): `stdin=DEVNULL`, environment `{**os.environ}`
+plus MCP config vars (blanket inherit with overlay), `shutil.which`
+pre-check, `check=False` with nonzero → `OpaqueStepError`.
+`src/whetstone/optimization/codex_proposer.py:146` — `codex exec
+--skip-git-repo-check -s read-only --output-last-message <tmpfile>` with
+`cwd=`: the result is read from the temp file rather than stdout (stdout is
+a JSONL event stream too noisy to parse), and `TimeoutExpired` is caught
+into a typed `CodexInvocation(text="", returncode=-1, timed_out=True)`
+rather than raised. Notable properties: the file-delivered result as an
+early spill-to-disk instance; the proposer's never-raises timeout envelope;
+sandbox posture pinned in argv (`-s read-only`). Testing seam: no
+injection — tests fake the codex CLI itself with `#!/bin/sh` stub scripts
+on PATH, including a `sleep 5` stub to force the timeout path
+(`tests/optimization/test_codex_proposer.py`).
+
+Budget axes — wall-clock only, leader-only enforcement:
+
+- Wall-clock — runner 600 s; proposer per-call timeout (caught into the
+  typed result); live smoke test 30 s. `subprocess.run`'s timeout kills
+  only the direct child.
+- Output — unbounded capture; the runner slices the JSONL stream to its
+  last 2000 chars after completion (post-hoc selection, not a cap); the
+  proposer's file delivery is disk-backed and unbounded.
+- Termination — none: no process-group handling, no escalation.
+
+### HumanEval oracle driver (broken)
+
+`src/whetstone/envs/ed1m_oracle.py` and `envs/ed1_scoring.py` — a driver
+program (`_DRIVER_SOURCE`, :46-63) that reads a JSON request from stdin,
+`exec`s a model-produced reconstruction, and writes single-line JSON to
+stdout, intended to run under dr-code's bounded primitive. Currently
+nonfunctional twice over: both files import
+`dr_code.humaneval.subprocess_runner`, a module path that no longer exists
+(moved to `dr_code.execution.subprocess`), `dr_code` is not installed in
+the repo's venv, and the call site passes `input_json=` where the current
+signature takes `input_text=`. Notable as prior art for the batch-driver
+protocol shape, and as the fleet's clearest example of cross-repo drift
+against an unpinned execution dependency.
+
+Budget axes — none of its own: intended to inherit the dr-code primitive's
+budgets wholesale; the driver protocol itself imposes no field or result
+bounds.
+
+### Docker availability probe
+
+`src/whetstone/runner/execution_mode.py:106` — `docker info` in bytes mode,
+`shutil.which` pre-check, returncode collapsed to a boolean. Budget axes:
+wall-clock 10 s; nothing else applicable.
+
 ## whetstone-envs
 
 ## fchord
