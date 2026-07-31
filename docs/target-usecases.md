@@ -18,7 +18,8 @@
 - **Captured** — output buffered by the executor and returned as part of the result at exit.
 - **Streamed** — output delivered to the calling code incrementally as it is produced; still budgeted.
 - **Stdio passthrough** — child output forwarded live to the operator's own stdio rather than to calling code.
-- **Executor** — our machinery on the parent side of the process boundary: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
+- **Driver** — executor machinery that runs inside a child to conduct payload work: it receives work items, executes them, and emits results. Part of the executor for attribution purposes despite its address.
+- **Executor** — our machinery around the payload, whichever side of the process boundary it runs on: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
 - **Run result** — the structured record of a completed run: exit status, delivered output, and measurements (duration, budget consumption). Exists whenever the child ran, however it exited; executor failure is precisely the case where no run result exists.
 - **Exit policy** — the caller-declared mapping from exit status to success, failure, or domain data. The default policy is report-only.
 
