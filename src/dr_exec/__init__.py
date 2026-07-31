@@ -1,5 +1,18 @@
 """Canonical subprocess execution primitives for the dr-* fleet."""
 
+from dr_exec.batch import (
+    BODY_HOOK_NAME,
+    PROTOCOL_VERSION,
+    BatchItem,
+    BatchRequest,
+    BatchResult,
+    ItemResult,
+    ProtocolChannelBudget,
+    WireKey,
+    WireKind,
+    config_digest_of,
+    run_batch,
+)
 from dr_exec.declare import (
     HERMETIC,
     INVOCATION_AGGREGATE_BOUND_BYTES,
@@ -21,9 +34,15 @@ from dr_exec.declare import (
     PythonRuntime,
     Records,
     RecordsKind,
+    StreamBounds,
     contents_digest_of,
 )
-from dr_exec.errors import DeclarationError, DrExecError, ExecutorFailure
+from dr_exec.errors import (
+    DeclarationError,
+    DrExecError,
+    ExecutorFailure,
+    ProtocolFailure,
+)
 from dr_exec.record import (
     EXECUTOR_IDENTITY,
     FAKE_EXECUTOR_IDENTITY,
@@ -49,12 +68,14 @@ from dr_exec.record import (
 from dr_exec.run import run_tool, run_untrusted_command, run_untrusted_python
 
 __all__ = [
+    "BODY_HOOK_NAME",
     "EXECUTOR_IDENTITY",
     "FAKE_EXECUTOR_IDENTITY",
     "HERMETIC",
     "INVOCATION_AGGREGATE_BOUND_BYTES",
     "IPC_JOIN_SELF_BUDGET_SECONDS",
     "PROCESS_BOUNDARY_ONLY",
+    "PROTOCOL_VERSION",
     "RECORD_SCHEMA_VERSION",
     "REPORT_ONLY",
     "SOURCE_BOUND_BYTES",
@@ -63,6 +84,9 @@ __all__ = [
     "UNBUDGETED",
     "UNBUDGETED_WIRE_VALUE",
     "Attribution",
+    "BatchItem",
+    "BatchRequest",
+    "BatchResult",
     "BudgetAxis",
     "Budgets",
     "ContainmentProfile",
@@ -73,11 +97,14 @@ __all__ = [
     "ExitPolicy",
     "ExitVerdict",
     "GrantKind",
+    "ItemResult",
     "Measurements",
     "Outcome",
     "OutputBudget",
     "OutputsLocation",
     "OverflowPolicy",
+    "ProtocolChannelBudget",
+    "ProtocolFailure",
     "PythonRuntime",
     "RecordKey",
     "RecordStatus",
@@ -85,12 +112,17 @@ __all__ = [
     "RecordsKind",
     "RunRecord",
     "RunResult",
+    "StreamBounds",
     "TruncationMark",
     "TrustCategory",
+    "WireKey",
+    "WireKind",
+    "config_digest_of",
     "contents_digest_of",
     "format_record_timestamp",
     "new_run_id",
     "record_filename",
+    "run_batch",
     "run_tool",
     "run_untrusted_command",
     "run_untrusted_python",

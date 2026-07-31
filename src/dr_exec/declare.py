@@ -109,6 +109,30 @@ class OutputBudget:
             raise ValueError("output budget requires an OverflowPolicy")
 
 
+@dataclass(frozen=True, slots=True)
+class StreamBounds:
+    """Per-stream capture bounds, for the one case a protocol demands them.
+
+    Plain runs keep the single shared output bound; a run whose streams
+    carry different contracts — a protocol channel on stdout, payload on
+    stderr — declares a bound per stream so a flood on one can never consume
+    the other's budget. ``None`` on an axis means that stream is bounded only
+    by the run's declared output budget. The overflow policy stays the
+    caller's declared one; these bounds change where the bound sits, never
+    what crossing it means.
+    """
+
+    stdout_bytes: int | None = None
+    stderr_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("stdout_bytes", "stderr_bytes"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            object.__setattr__(self, name, _validate_positive_bytes(value, name))
+
+
 type WallClockBudget = float | _Unbudgeted
 type SharedOutputBudget = OutputBudget | _Unbudgeted
 type InputBudget = int | _Unbudgeted

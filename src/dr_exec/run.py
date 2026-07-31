@@ -23,6 +23,7 @@ from dr_exec.declare import (
     ExitPolicy,
     PythonRuntime,
     Records,
+    StreamBounds,
 )
 from dr_exec.engine import Declaration, Invocation, execute
 from dr_exec.errors import DeclarationError
@@ -76,12 +77,18 @@ def run_untrusted_python(
     input_text: str = "",
     environment: EnvironmentGrant = _NO_ENVIRONMENT,
     exit_policy: ExitPolicy = REPORT_ONLY,
+    stream_bounds: StreamBounds | None = None,
 ) -> RunResult:
     """Run untrusted Python source in a declared runtime.
 
     ``HERMETIC`` runs ``interpreter -I -c <source>``: source is delivered
     as argv so child-observable state is run-invariant, and the child's
     environment is solely the caller's grant — the runtime injects nothing.
+
+    ``stream_bounds`` is for source that speaks a protocol on one stream and
+    payload on the other: it moves where each stream's capture bound sits,
+    never what crossing it means. Left unset, both streams share the run's
+    single output bound.
     """
     if not isinstance(source, str):
         raise DeclarationError("source must be text")
@@ -106,6 +113,7 @@ def run_untrusted_python(
             records=records,
             environment=environment,
             exit_policy=exit_policy,
+            stream_bounds=stream_bounds,
         )
     )
 

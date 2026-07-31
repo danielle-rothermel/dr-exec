@@ -8,6 +8,12 @@ never runnable, or the executor's own machinery broke.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dr_exec.batch import ItemResult
+    from dr_exec.record import RunResult
+
 
 class DrExecError(Exception):
     """Base for the executor's two exception paths."""
@@ -29,3 +35,25 @@ class ExecutorFailure(DrExecError):
     outlived the termination self-budget, or IPC threads that would not
     join. Payload misbehavior is never an executor failure.
     """
+
+
+class ProtocolFailure(ExecutorFailure):
+    """A batch transcript could not be accounted for: the driver broke.
+
+    The driver is the executor's agent inside the child, so a transcript
+    fault is executor-attributed even though it happened across the process
+    boundary. Results validated before the fault ride along on ``results``:
+    a result once delivered is never lost, and the ``run`` the child produced
+    stays available for the consumer's own diagnosis.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        results: tuple[ItemResult, ...],
+        run: RunResult,
+    ) -> None:
+        super().__init__(message)
+        self.results = results
+        self.run = run

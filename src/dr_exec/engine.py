@@ -42,6 +42,7 @@ from dr_exec.declare import (
     PythonRuntime,
     Records,
     RecordsKind,
+    StreamBounds,
     contents_digest_of,
 )
 from dr_exec.errors import DeclarationError, ExecutorFailure
@@ -92,13 +93,20 @@ class Invocation:
 
 @dataclass(frozen=True, slots=True)
 class Declaration:
-    """The full call-scoped declaration the engine executes."""
+    """The full call-scoped declaration the engine executes.
+
+    ``stream_bounds`` is the one place per-stream capture bounds exist: a
+    run whose stdout carries a protocol channel and whose stderr carries
+    payload declares them so a flood on one cannot void the other. Plain
+    runs leave it ``None`` and keep the single shared output bound.
+    """
 
     invocation: Invocation
     budgets: Budgets
     records: Records
     environment: EnvironmentGrant
     exit_policy: ExitPolicy
+    stream_bounds: StreamBounds | None = None
 
 
 @dataclass(slots=True)
@@ -107,9 +115,17 @@ class _Capture:
 
     ``produced`` keeps counting past the bound so a consumer can size a
     bound from an overflowing run; ``retained`` is what capture kept.
+
+    ``limit_bytes`` is the shared bound both streams draw from.
+    ``stdout_limit_bytes`` and ``stderr_limit_bytes`` are the per-stream
+    bounds a protocol run declares; where one is set it replaces the shared
+    bound for that stream, so a flood on one stream cannot consume the
+    other's budget.
     """
 
     limit_bytes: int | None
+    stdout_limit_bytes: int | None = None
+    stderr_limit_bytes: int | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     overflow: threading.Event = field(default_factory=threading.Event)
     retained_bytes: int = 0
@@ -209,7 +225,12 @@ def _spawn_and_supervise(
             input_bytes=len(input_payload),
         )
 
-    capture = _Capture(limit_bytes=_output_limit(declaration.budgets))
+    bounds = declaration.stream_bounds
+    capture = _Capture(
+        limit_bytes=_output_limit(declaration.budgets),
+        stdout_limit_bytes=None if bounds is None else bounds.stdout_bytes,
+        stderr_limit_bytes=None if bounds is None else bounds.stderr_bytes,
+    )
     enforcement = _Enforcement()
     ipc_errors: list[BaseException] = []
     threads = _start_ipc_threads(
@@ -442,9 +463,19 @@ def _drain(
 
 
 def _account(capture: _Capture, chunk: bytes, *, is_stdout: bool) -> None:
-    """Byte-denominated accounting under the shared bound. Holds the lock."""
+    """Byte-denominated accounting under the bounds in force. Holds the lock.
+
+    A stream with its own declared bound is measured against that bound
+    alone; a stream without one draws from the shared bound, as every plain
+    run's two streams do.
+    """
     destination = capture.stdout if is_stdout else capture.stderr
-    if capture.limit_bytes is None:
+    stream_limit = (
+        capture.stdout_limit_bytes if is_stdout else capture.stderr_limit_bytes
+    )
+    if stream_limit is not None:
+        remaining = max(stream_limit - len(destination), 0)
+    elif capture.limit_bytes is None:
         remaining = len(chunk)
     else:
         remaining = max(capture.limit_bytes - capture.retained_bytes, 0)
@@ -452,7 +483,8 @@ def _account(capture: _Capture, chunk: bytes, *, is_stdout: bool) -> None:
     dropped = len(chunk) - kept
 
     destination.extend(chunk[:kept])
-    capture.retained_bytes += kept
+    if stream_limit is None:
+        capture.retained_bytes += kept
     if is_stdout:
         capture.stdout_produced += len(chunk)
         capture.stdout_dropped += dropped
