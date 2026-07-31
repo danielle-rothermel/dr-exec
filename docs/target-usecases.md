@@ -18,6 +18,8 @@
 - **Streamed** — output delivered to the calling code incrementally as it is produced; still budgeted.
 - **Stdio passthrough** — child output forwarded live to the operator's own stdio rather than to calling code.
 - **Executor** — our machinery on the parent side of the process boundary: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
+- **Run result** — the structured record of a completed run: exit status, delivered output, and measurements (duration, budget consumption). Exists whenever the child ran, however it exited; executor failure is precisely the case where no run result exists.
+- **Exit policy** — the caller-declared mapping from exit status to success, failure, or domain data. The default policy is report-only.
 
 ## Use cases
 
@@ -28,6 +30,7 @@
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 2. **Untrusted command, call-scoped** — same, argv-general: compiled artifacts of generated code, headless agent CLIs.
+   - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
    - Environment by explicit grant — the child inherits nothing by default; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
@@ -35,6 +38,9 @@
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 4. **Trusted tool invocation** — hardened calls to known programs (git, uv, linters, docker) with the lifecycle rigor ad-hoc call sites never have.
    - Stdio passthrough is first-class — streaming a trusted tool's output to the operator is a supported mode, not a reason to bypass the executor.
+   - Outcomes are data, not control flow — a completed run yields a run result; exceptions are reserved for executor failure, never for a tool's exit status.
+   - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
+   - Exit interpretation is caller policy — the executor reports raw exit status; what counts as failure is declared per call, never assumed.
 5. **Sandboxes** — real containment (filesystem/network/resource) for untrusted execution; mechanism to be researched (not necessarily docker); replaces and decommissions dr-docker.
    - Containment is verified, not assumed — execution refuses rather than silently degrading when the promised containment is unavailable.
 6. **Supervised long-lived processes** — children that outlive the call (agent servers, stdio RPC); a fully targeted use case with its own distinct set of concerns (liveness, restart, streaming I/O, reaping across calls), designed as its own contract — never a mode of the call-scoped runners.
