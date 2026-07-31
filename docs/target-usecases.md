@@ -13,6 +13,7 @@
 - **Supervised** — a child whose owner observes liveness and exit and is accountable for teardown; the opposite of fire-and-forget.
 - **Liveness** — verified evidence that a process is still the child we spawned: identity, not a bare pid check.
 - **Slot** — a supervised child's declared logical position (gpu 3, worker 1): stable across replacements while process identity changes.
+- **Fleet** — a set of supervised children declared as one slot map and operated on by collective verbs (spawn, drain, stop); the supervised analogue of a batch.
 - **Reap** — collect a dead child's exit status so it cannot linger as a zombie.
 - **Hermetic** — no undeclared inputs: the runtime includes only what was declared. Distinct from containment (restricting what a payload can reach) and from POSIX session isolation (process-group lifecycle).
 - **Budgeted** — a resource axis carries a budget when one is declared; every budget in force is visible, finite, and attributable to who declared it, and exceeding one is a distinguishable outcome, never silent. Per-axis names (deadline, output cap) refer to a single budget; the axes and default rules live in the Budgets section.
@@ -186,5 +187,11 @@ intermediate is lost data, not lost convenience.
    - Incremental observation — output is observable as it is produced, not only at exit; observation itself stays budgeted.
    - Deadlock-free bidirectional exchange — when stdin and stdout are both live, the executor owns the concurrency; a caller cannot wedge on the executor's own pipes.
    - No silent replacement — a restarted child is a new child occupying the same declared slot, visibly; slot identity is first-class, never reconstructed from names, and supervision never swaps the process behind a handle.
+7. **Supervised worker fleets** — many supervised children as one first-class unit: a slot map over resources, collective lifecycle, aggregate observability. Fleet is to supervised what batch is to call-scoped; experiment orchestration (job queues, sweeps, submission) consumes this contract and is never part of it.
+   - The fleet is a slot map, not a list of children — its shape is declared against discovered or declared resources (N workers per GPU, M per CPU); each child occupies a slot, and every supervised behavior applies to each unreduced.
+   - Resource discovery is an input, not an assumption — the slot map binds to the resources actually present, so the same declaration is the same fleet on different hardware.
+   - Collective verbs are atomic — spawn, drain, and stop apply to the fleet as single operations with per-slot attribution; the caller never loops over children.
+   - Aggregate health is first-class — fleet-level state (slots alive, restarts per slot, work remaining) is queryable and durably recorded as one current view, a different question from any child's liveness.
+   - Restart meets the work supply — per-slot restart policy is gated on remaining work, so a fleet winds down as work drains instead of respawning idle workers.
 
 For more info: subprocess usage audit results at /Users/daniellerothermel/drotherm/repos/dr-exec/docs/subprocess-usage-audit.md
