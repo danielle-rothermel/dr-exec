@@ -17,6 +17,10 @@
 - [ ] It would be nice to have a way to limit read/write to the filesystem and
       network interactions in this v1, especially if we can do it in a way that
       isn't expensive in terms of setup and teardown.
+- [ ] Flesh out the design in a dedicated document showing the proposed Python
+      dataclasses, types, and protocols—including which parts of the residual
+      API design should be protocols—then identify whether any other high-level
+      design should be settled before implementation planning begins.
 
 ## Contract contradiction notes
 
