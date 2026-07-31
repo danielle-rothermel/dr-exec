@@ -21,7 +21,6 @@ from dr_exec.declare import (
     PROCESS_BOUNDARY_ONLY,
     REPORT_ONLY,
     SOURCE_BOUND_BYTES,
-    STARTUP_SELF_BUDGET_SECONDS,
     TERMINATION_SELF_BUDGET_SECONDS,
     UNBUDGETED,
     Budgets,
@@ -35,7 +34,6 @@ from dr_exec.declare import (
     PythonRuntime,
     Records,
     RecordsKind,
-    StreamBounds,
     contents_digest_of,
 )
 from dr_exec.errors import (
@@ -90,7 +88,6 @@ __all__ = [
     "RECORD_SCHEMA_VERSION",
     "REPORT_ONLY",
     "SOURCE_BOUND_BYTES",
-    "STARTUP_SELF_BUDGET_SECONDS",
     "TERMINATION_SELF_BUDGET_SECONDS",
     "UNBUDGETED",
     "UNBUDGETED_WIRE_VALUE",
@@ -129,7 +126,6 @@ __all__ = [
     "RunResult",
     "ScriptError",
     "ScriptedBatch",
-    "StreamBounds",
     "TruncationMark",
     "TrustCategory",
     "UnscriptedCall",

@@ -29,6 +29,26 @@ handshake is outside it, so an exactness assertion allows only these.
 """
 
 
+_OPEN_DESCRIPTOR_PROBE = (
+    "import json, os\n"
+    "open_fds = []\n"
+    "for fd in range(64):\n"
+    "    try:\n"
+    "        os.fstat(fd)\n"
+    "    except OSError:\n"
+    "        continue\n"
+    "    open_fds.append(fd)\n"
+    "print(json.dumps(open_fds))\n"
+)
+"""The child's whole descriptor table, asserted without a filter.
+
+``fstat`` over a fixed range answers for every number a leak could occupy.
+A ``/dev/fd`` listing would need its own handle excluded, and excluding it
+by numeric threshold discards exactly the region a leak lands in — which is
+how a descriptor-probe test comes to prove nothing.
+"""
+
+
 class TestDescriptorTable:
     def test_the_child_starts_with_exactly_descriptors_zero_one_and_two(
         self, run_python: Callable[..., RunResult]
@@ -45,14 +65,29 @@ class TestDescriptorTable:
     def test_the_child_sees_no_extra_open_descriptors(
         self, run_python: Callable[..., RunResult]
     ) -> None:
-        # /dev/fd on macOS reports the directory handle the listing itself
-        # opens, so the probe drops any descriptor above its own duplicate.
-        result = run_python(
-            "import json, os\n"
-            "duplicate = os.dup(1)\n"
-            "entries = sorted(int(name) for name in os.listdir('/dev/fd'))\n"
-            "print(json.dumps([fd for fd in entries if fd < duplicate]))\n"
-        )
+        result = run_python(_OPEN_DESCRIPTOR_PROBE)
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [0, 1, 2]
+
+    def test_a_parent_side_inheritable_descriptor_never_reaches_the_child(
+        self, tmp_path: Path, run_python: Callable[..., RunResult]
+    ) -> None:
+        # The realistic future edit: an executor descriptor opened without
+        # O_CLOEXEC before the spawn. `close_fds=True` is what keeps it out
+        # of the child, and this is the test that observes the child rather
+        # than the Popen keywords.
+        leaked = os.open(tmp_path / "leak", os.O_CREAT | os.O_RDWR)
+        # A high number too, so a leak that lands above the descriptors the
+        # child opens for itself is caught as readily as a contiguous one.
+        high = os.dup2(leaked, 31)
+        os.set_inheritable(leaked, True)
+        os.set_inheritable(high, True)
+        try:
+            result = run_python(_OPEN_DESCRIPTOR_PROBE)
+        finally:
+            os.close(high)
+            os.close(leaked)
 
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == [0, 1, 2]

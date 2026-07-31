@@ -112,7 +112,7 @@ class TestChannelBounds:
 
 class TestStreamBoundsDeclaration:
     def test_a_nonpositive_bound_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="positive integer of bytes"):
+        with pytest.raises(DeclarationError, match="positive integer of bytes"):
             StreamBounds(stdout_bytes=0)
 
     def test_unset_axes_mean_the_shared_output_bound_still_governs(self) -> None:

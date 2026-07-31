@@ -16,6 +16,8 @@ from enum import StrEnum, unique
 from pathlib import Path
 from typing import Final, Literal, Self
 
+from dr_exec.errors import DeclarationError
+
 SOURCE_BOUND_BYTES: Final[int] = 96 * 1024
 """Pre-spawn ceiling on untrusted Python source delivered as one argument.
 
@@ -31,9 +33,6 @@ TERMINATION_SELF_BUDGET_SECONDS: Final[float] = 5.0
 
 IPC_JOIN_SELF_BUDGET_SECONDS: Final[float] = 1.0
 """Executor self-budget bounding the join of the feed and drain threads."""
-
-STARTUP_SELF_BUDGET_SECONDS: Final[float] = 30.0
-"""Executor self-budget bounding the spawn attempt itself."""
 
 
 class _Unbudgeted:
@@ -76,17 +75,17 @@ class OverflowPolicy(StrEnum):
 
 def _validate_positive_seconds(value: float, axis: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError(f"{axis} budget must be a finite positive number")
+        raise DeclarationError(f"{axis} budget must be a finite positive number")
     if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{axis} budget must be a finite positive number")
+        raise DeclarationError(f"{axis} budget must be a finite positive number")
     return float(value)
 
 
 def _validate_positive_bytes(value: int, axis: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{axis} budget must be a positive integer of bytes")
+        raise DeclarationError(f"{axis} budget must be a positive integer of bytes")
     if value <= 0:
-        raise ValueError(f"{axis} budget must be a positive integer of bytes")
+        raise DeclarationError(f"{axis} budget must be a positive integer of bytes")
     return value
 
 
@@ -106,7 +105,7 @@ class OutputBudget:
             self, "limit_bytes", _validate_positive_bytes(self.limit_bytes, "output")
         )
         if not isinstance(self.overflow_policy, OverflowPolicy):
-            raise ValueError("output budget requires an OverflowPolicy")
+            raise DeclarationError("output budget requires an OverflowPolicy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +158,9 @@ class Budgets:
                 _validate_positive_seconds(self.wall_clock, "wall_clock"),
             )
         if self.output is not UNBUDGETED and not isinstance(self.output, OutputBudget):
-            raise ValueError("output budget must be an OutputBudget or UNBUDGETED")
+            raise DeclarationError(
+                "output budget must be an OutputBudget or UNBUDGETED"
+            )
         if self.input is not UNBUDGETED:
             object.__setattr__(
                 self, "input", _validate_positive_bytes(self.input, "input")
@@ -182,7 +183,7 @@ class GrantKind(StrEnum):
 
 def _validate_name(name: str) -> str:
     if not isinstance(name, str) or not name or "=" in name or "\0" in name:
-        raise ValueError(
+        raise DeclarationError(
             "environment variable names must be nonempty, without '=' or NUL"
         )
     return name
@@ -190,7 +191,7 @@ def _validate_name(name: str) -> str:
 
 def _validate_value(value: str, name: str) -> str:
     if not isinstance(value, str) or "\0" in value:
-        raise ValueError(f"environment value for {name} must be text without NUL")
+        raise DeclarationError(f"environment value for {name} must be text without NUL")
     return value
 
 
@@ -364,12 +365,12 @@ class Records:
     """
 
     kind: RecordsKind
-    directory: Path | None = None
+    path: Path | None = None
 
     @classmethod
-    def directory_at(cls, path: Path | str) -> Self:
+    def directory(cls, path: Path | str) -> Self:
         """Write one JSON record file per run into ``path``."""
-        return cls(kind=RecordsKind.DIRECTORY, directory=Path(path))
+        return cls(kind=RecordsKind.DIRECTORY, path=Path(path))
 
     @classmethod
     def none(cls) -> Self:
@@ -379,15 +380,16 @@ class Records:
 
 @dataclass(frozen=True, slots=True)
 class PythonRuntime:
-    """The declared interpreter and importable package set for Python source.
+    """The declared interpreter for Python source, and how it is isolated.
 
     ``interpreter=None`` means the running interpreter, resolved at spawn.
+    ``isolated`` selects the ``-I`` invocation shape, and the record carries
+    the resulting argv, so which shape ran is auditable after the fact.
     """
 
     name: str
     interpreter: str | None = None
     isolated: bool = True
-    packages: tuple[str, ...] = ()
 
 
 HERMETIC: Final[PythonRuntime] = PythonRuntime(name="hermetic")

@@ -55,7 +55,7 @@ result = run_untrusted_python(
         ),
         input=4096,
     ),
-    records=Records.directory_at("runs/"),
+    records=Records.directory("runs/"),
     input_text="1\n2\n3\n",
     environment=EnvironmentGrant.fixed({"OPENBLAS_NUM_THREADS": "1"}),
 )

@@ -8,7 +8,21 @@ rename is a failure here first.
 
 from __future__ import annotations
 
-from dr_exec.declare import ExitVerdict, GrantKind, OverflowPolicy, RecordsKind
+from dr_exec.batch import (
+    DEFAULT_FRAME_BOUND_BYTES,
+    DEFAULT_ITEM_RESULT_BOUND_BYTES,
+    ProtocolChannelBudget,
+)
+from dr_exec.declare import (
+    INVOCATION_AGGREGATE_BOUND_BYTES,
+    IPC_JOIN_SELF_BUDGET_SECONDS,
+    SOURCE_BOUND_BYTES,
+    TERMINATION_SELF_BUDGET_SECONDS,
+    ExitVerdict,
+    GrantKind,
+    OverflowPolicy,
+    RecordsKind,
+)
 from dr_exec.record import (
     UNBUDGETED_WIRE_VALUE,
     Attribution,
@@ -109,10 +123,12 @@ def test_record_status_literals() -> None:
     assert RecordStatus.SPAWNED.value == "spawned"
     assert RecordStatus.FINALIZED.value == "finalized"
     assert RecordStatus.WRITE_FAILED.value == "write_failed"
+    assert RecordStatus.EXECUTOR_FAILED.value == "executor_failed"
     assert {member.value for member in RecordStatus} == {
         "spawned",
         "finalized",
         "write_failed",
+        "executor_failed",
     }
 
 
@@ -208,3 +224,28 @@ def test_containment_profile_and_runtime_names() -> None:
 
     assert PROCESS_BOUNDARY_ONLY.name == "process_boundary_only"
     assert HERMETIC.name == "hermetic"
+
+
+def test_exec_derived_bounds_are_pinned_as_literals() -> None:
+    """The two bounds derived from platform exec limits, at exact value.
+
+    Written out rather than computed: a test that derives its expectation
+    from the constant moves with the constant and pins nothing. These are
+    machine protection, not interior defaults, so they change only by
+    contract revision.
+    """
+    assert SOURCE_BOUND_BYTES == 98304
+    assert INVOCATION_AGGREGATE_BOUND_BYTES == 1048576
+
+
+def test_executor_self_budgets_are_pinned_as_literals() -> None:
+    """The self-budgets that bound every call's wall time beyond its deadline."""
+    assert TERMINATION_SELF_BUDGET_SECONDS == 5.0
+    assert IPC_JOIN_SELF_BUDGET_SECONDS == 1.0
+
+
+def test_batch_channel_defaults_are_pinned_as_literals() -> None:
+    """Caller-overridable defaults, but defaults a consumer sizes shards from."""
+    assert DEFAULT_ITEM_RESULT_BOUND_BYTES == 65536
+    assert DEFAULT_FRAME_BOUND_BYTES == 8192
+    assert ProtocolChannelBudget().channel_bytes_for(4) == 2 * 8192 + 4 * 65536

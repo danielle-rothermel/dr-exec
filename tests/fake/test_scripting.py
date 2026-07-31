@@ -48,7 +48,7 @@ class TestBehavioralScript:
             return payload_result(
                 stdout=f"saw {call.source}",
                 input_bytes=len(call.input_text.encode("utf-8")),
-                exit_verdict=ExitVerdict.SUCCESS.value,
+                exit_verdict=ExitVerdict.SUCCESS,
             )
 
         fake.script_with(script)

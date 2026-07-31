@@ -85,6 +85,11 @@ def untrusted_python_declaration(
     The source bound is checked here, so it binds every executor that builds
     its declarations this way — the bound is the contract's, not the spawn
     path's.
+
+    ``stream_bounds`` lives on this builder and not on the entry point: v1
+    scopes per-stream capture bounds to the one place a protocol demands
+    them, the batch channel, so the in-package caller that needs them names
+    them here while the public declaration surface stays the shared one.
     """
     _validate_source(source)
     return Declaration(
@@ -165,18 +170,12 @@ def run_untrusted_python(
     input_text: str = "",
     environment: EnvironmentGrant = _NO_ENVIRONMENT,
     exit_policy: ExitPolicy = REPORT_ONLY,
-    stream_bounds: StreamBounds | None = None,
 ) -> RunResult:
     """Run untrusted Python source in a declared runtime.
 
     ``HERMETIC`` runs ``interpreter -I -c <source>``: source is delivered
     as argv so child-observable state is run-invariant, and the child's
     environment is solely the caller's grant — the runtime injects nothing.
-
-    ``stream_bounds`` is for source that speaks a protocol on one stream and
-    payload on the other: it moves where each stream's capture bound sits,
-    never what crossing it means. Left unset, both streams share the run's
-    single output bound.
     """
     return execute(
         untrusted_python_declaration(
@@ -188,7 +187,6 @@ def run_untrusted_python(
             input_text=input_text,
             environment=environment,
             exit_policy=exit_policy,
-            stream_bounds=stream_bounds,
         )
     )
 

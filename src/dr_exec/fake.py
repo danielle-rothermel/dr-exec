@@ -40,11 +40,13 @@ from dr_exec.batch import (
 from dr_exec.declare import (
     HERMETIC,
     REPORT_ONLY,
+    UNBUDGETED,
     Budgets,
     ContainmentProfile,
     EnvironmentGrant,
     ExitPolicy,
     OutputBudget,
+    OverflowPolicy,
     PythonRuntime,
     Records,
     StreamBounds,
@@ -55,6 +57,8 @@ from dr_exec.record import (
     EXECUTOR_IDENTITY,
     FAKE_EXECUTOR_IDENTITY,
     Attribution,
+    BudgetAxis,
+    Outcome,
     RunResult,
     TrustCategory,
 )
@@ -297,7 +301,6 @@ class FakeExecutor:
         input_text: str = "",
         environment: EnvironmentGrant = _NO_ENVIRONMENT,
         exit_policy: ExitPolicy = REPORT_ONLY,
-        stream_bounds: StreamBounds | None = None,
     ) -> RunResult:
         return self._answer(
             EntryPoint.RUN_UNTRUSTED_PYTHON,
@@ -310,7 +313,6 @@ class FakeExecutor:
                 input_text=input_text,
                 environment=environment,
                 exit_policy=exit_policy,
-                stream_bounds=stream_bounds,
             ),
         )
 
@@ -512,18 +514,59 @@ def _validate_result(result: RunResult, declaration: Declaration) -> None:
         )
 
     if attribution is Attribution.PAYLOAD:
-        expected = declaration.exit_policy.verdict_for(result.returncode).value
-        if outcome.exit_verdict != expected:
+        expected = declaration.exit_policy.verdict_for(result.returncode)
+        if outcome.exit_verdict is not expected:
             raise ScriptError(
                 f"the declared exit policy makes returncode {result.returncode} "
-                f"{expected!r}, not {outcome.exit_verdict!r}"
+                f"{expected.value!r}, not {outcome.exit_verdict!r}"
             )
-    elif outcome.exit_verdict is not None:
+
+    _validate_budget_axis(outcome, declaration)
+    _validate_capture(result, declaration)
+
+
+def _validate_budget_axis(outcome: Outcome, declaration: Declaration) -> None:
+    """A budget outcome names an axis the declaration actually budgeted.
+
+    The engine enforces exactly the axes a caller declared, so a budget
+    outcome on an undeclared axis is a shape no run can produce — and a
+    consumer scripting one would be writing a green test against behavior
+    production never exhibits.
+    """
+    if outcome.attribution is not Attribution.BUDGET:
+        return
+    budgets = declaration.budgets
+
+    if outcome.violated_axis is BudgetAxis.INPUT:
         raise ScriptError(
-            f"an exit verdict belongs to a payload outcome, not {attribution.value!r}"
+            "an input budget is enforced before any spawn, so it raises "
+            "DeclarationError and never reaches an outcome"
+        )
+    if outcome.violated_axis is BudgetAxis.WALL_CLOCK and budgets.wall_clock is (
+        UNBUDGETED
+    ):
+        raise ScriptError(
+            "a wall-clock budget outcome requires a declared wall-clock budget"
+        )
+    if outcome.violated_axis is BudgetAxis.OUTPUT and not _enforces_output(budgets):
+        raise ScriptError(
+            "an output budget outcome requires a declared output budget whose "
+            f"overflow policy is {OverflowPolicy.FAIL.value!r}: under "
+            f"{OverflowPolicy.MARKED_TRUNCATION.value!r} the run completes and "
+            "the drop is marked instead"
         )
 
-    _validate_capture(result, declaration)
+
+def _enforces_output(budgets: Budgets) -> bool:
+    """Whether crossing the output bound is the thing that ends a run.
+
+    ``MARKED_TRUNCATION`` marks and continues, so only ``FAIL`` can make an
+    output crossing the run's attributed outcome.
+    """
+    return (
+        isinstance(budgets.output, OutputBudget)
+        and budgets.output.overflow_policy is OverflowPolicy.FAIL
+    )
 
 
 def _validate_capture(result: RunResult, declaration: Declaration) -> None:

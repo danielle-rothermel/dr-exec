@@ -116,10 +116,10 @@ class TestRecording:
         fake.run_tool(
             ["/bin/echo"],
             budgets=QUICK,
-            records=Records.directory_at(str(tmp_path)),
+            records=Records.directory(str(tmp_path)),
         )
 
-        assert fake.last_call.records.directory is not None
+        assert fake.last_call.records.path is not None
 
     def test_the_untrusted_python_call_records_source_and_argv(self) -> None:
         fake = _fake_answering_everything()
@@ -183,9 +183,7 @@ class TestAddingADeclarationIsVisibleNotBreaking:
         fake = FakeExecutor()
         # The scripted verdict follows the newly declared policy: the fake
         # refuses a result the declared policy could not have produced.
-        fake.script_with(
-            lambda call: payload_result(exit_verdict=ExitVerdict.SUCCESS.value)
-        )
+        fake.script_with(lambda call: payload_result(exit_verdict=ExitVerdict.SUCCESS))
 
         fake.run_untrusted_command(
             ["/bin/candidate"],

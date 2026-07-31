@@ -19,6 +19,7 @@ from dr_exec.batch import (
     ProtocolChannelBudget,
     account_transcript,
 )
+from dr_exec.declare import ExitVerdict
 from dr_exec.errors import DeclarationError, ProtocolFailure
 from dr_exec.record import (
     Attribution,
@@ -53,7 +54,9 @@ def _run(stdout: str) -> RunResult:
             stderr_bytes_produced=0,
             input_bytes=0,
         ),
-        outcome=Outcome(attribution=Attribution.PAYLOAD, exit_verdict="report_only"),
+        outcome=Outcome(
+            attribution=Attribution.PAYLOAD, exit_verdict=ExitVerdict.REPORT_ONLY
+        ),
     )
 
 

@@ -24,8 +24,9 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum, unique
 from pathlib import Path
-from typing import IO, Final
+from typing import IO, Any, Final
 
 from dr_exec.declare import (
     INVOCATION_AGGREGATE_BOUND_BYTES,
@@ -121,13 +122,19 @@ class _Capture:
     bounds a protocol run declares; where one is set it replaces the shared
     bound for that stream, so a flood on one stream cannot consume the
     other's budget.
+
+    Overflow is flagged per stream for the same reason: a stream that never
+    crossed its own bound keeps draining to EOF under every policy, so a
+    flood on the payload stream can never abandon result bytes already
+    produced on the protocol stream.
     """
 
     limit_bytes: int | None
     stdout_limit_bytes: int | None = None
     stderr_limit_bytes: int | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
-    overflow: threading.Event = field(default_factory=threading.Event)
+    stdout_overflow: threading.Event = field(default_factory=threading.Event)
+    stderr_overflow: threading.Event = field(default_factory=threading.Event)
     retained_bytes: int = 0
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
@@ -136,6 +143,55 @@ class _Capture:
     stdout_dropped: int = 0
     stderr_dropped: int = 0
 
+    def overflow_for(self, *, is_stdout: bool) -> threading.Event:
+        return self.stdout_overflow if is_stdout else self.stderr_overflow
+
+    @property
+    def any_overflow(self) -> bool:
+        """Whether either stream crossed the bound in force for it."""
+        return self.stdout_overflow.is_set() or self.stderr_overflow.is_set()
+
+
+@unique
+class _IpcSide(StrEnum):
+    """Which of the run's three pipes a fault happened on."""
+
+    STDIN = "stdin"
+    STDOUT = "stdout"
+    STDERR = "stderr"
+
+
+@dataclass(frozen=True, slots=True)
+class _IpcFault:
+    """One fault on the executor's own plumbing, kept as attribution evidence.
+
+    A drain fault is evidence for a ``CHANNEL`` claim: the pipe carrying the
+    payload's bytes broke, which is neither payload misbehavior nor an
+    executor bug. A feed fault is unknown-cause, so it is ``EXECUTOR`` — the
+    payload is never blamed by elimination.
+    """
+
+    side: _IpcSide
+    error: BaseException
+
+    @property
+    def attribution(self) -> Attribution:
+        return (
+            Attribution.EXECUTOR if self.side is _IpcSide.STDIN else Attribution.CHANNEL
+        )
+
+
+class _IpcThread(threading.Thread):
+    """A feed or drain thread that knows which pipe it serves.
+
+    The side travels with the thread so a join that expires names the pipe
+    it could not finish, which is what makes the fault attributable.
+    """
+
+    def __init__(self, *, side: _IpcSide, **thread_arguments: Any) -> None:
+        super().__init__(**thread_arguments)
+        self.side: Final[_IpcSide] = side
+
 
 @dataclass(slots=True)
 class _Enforcement:
@@ -143,6 +199,7 @@ class _Enforcement:
 
     deadline_expired: bool = False
     output_overflowed: bool = False
+    ipc_fault: _IpcFault | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +276,14 @@ def execute(declaration: Declaration) -> RunResult:
             child_environment=child_environment,
             scratch=scratch,
         )
+    except ExecutorFailure as executor_failure:
+        # Kept regardless of outcome: an executor failure is an outcome in
+        # this contract's vocabulary, and the durable twin is exactly the
+        # artifact that has to survive when no in-memory result does. Left
+        # at `spawned`, the record could not be told apart from a parent
+        # that died mid-run.
+        record_state.mark_executor_failure(executor_failure)
+        raise
     finally:
         _remove_scratch(scratch)
 
@@ -263,12 +328,11 @@ def _spawn_and_supervise(
         stderr_limit_bytes=None if bounds is None else bounds.stderr_bytes,
     )
     enforcement = _Enforcement()
-    ipc_errors: list[BaseException] = []
+    ipc_errors: list[_IpcFault] = []
     threads = _start_ipc_threads(
         process=process,
         input_payload=input_payload,
         capture=capture,
-        overflow_policy=_overflow_policy(declaration.budgets),
         ipc_errors=ipc_errors,
     )
 
@@ -284,8 +348,7 @@ def _spawn_and_supervise(
     try:
         _terminate_group(process)
     finally:
-        for thread in threads:
-            thread.join(timeout=IPC_JOIN_SELF_BUDGET_SECONDS)
+        _join_ipc_threads(threads, ipc_errors=ipc_errors)
     reaped_at = time.monotonic()
     teardown_seconds = reaped_at - teardown_started
     duration_seconds = reaped_at - spawn_started
@@ -296,8 +359,7 @@ def _spawn_and_supervise(
         duration_seconds,
     )
 
-    if any(thread.is_alive() for thread in threads):
-        raise ExecutorFailure("IPC threads outlived the join self-budget")
+    enforcement.ipc_fault = _first_ipc_fault(ipc_errors)
 
     with capture.lock:
         stdout_bytes = bytes(capture.stdout)
@@ -337,7 +399,13 @@ def _supervise(
     enforcement: _Enforcement,
     spawn_started: float,
 ) -> None:
-    """Poll to exit, deadline, or enforcing overflow, whichever lands first."""
+    """Poll to exit, deadline, or enforcing overflow, whichever lands first.
+
+    Enforcement reads *any* stream's crossing: killing on a crossing is the
+    caller's declared ``FAIL`` policy, whichever stream's bound was the one
+    crossed. Where the crossing does not reach — which stream keeps draining
+    — is the drain's business, not the kill's.
+    """
     deadline = (
         None if budgets.wall_clock is UNBUDGETED else spawn_started + budgets.wall_clock
     )
@@ -345,7 +413,7 @@ def _supervise(
 
     _logger.debug("waiting on pid %d", process.pid)
     while process.poll() is None:
-        if enforcing_overflow and capture.overflow.is_set():
+        if enforcing_overflow and capture.any_overflow:
             enforcement.output_overflowed = True
             _logger.info("output budget exceeded; killing pid %d", process.pid)
             return
@@ -357,7 +425,7 @@ def _supervise(
 
     # A violation recorded during the final poll window wins over the exit
     # that raced it: the payload still crossed a declared bound.
-    if enforcing_overflow and capture.overflow.is_set():
+    if enforcing_overflow and capture.any_overflow:
         enforcement.output_overflowed = True
     if deadline is not None and time.monotonic() >= deadline:
         enforcement.deadline_expired = True
@@ -373,7 +441,10 @@ def _decide_attribution(
 
     Absence is decided at spawn, so the order here resumes at the output
     budget: an overflow that expired the deadline while draining is an
-    output outcome, never a timeout.
+    output outcome, never a timeout. A fault on the executor's own plumbing
+    sits below both — the bounds the caller declared were still the thing
+    that ended the run — and above exit-status interpretation, because a
+    payload is never blamed by elimination for bytes the channel lost.
     """
     if enforcement.output_overflowed:
         return Outcome(attribution=Attribution.BUDGET, violated_axis=BudgetAxis.OUTPUT)
@@ -381,9 +452,11 @@ def _decide_attribution(
         return Outcome(
             attribution=Attribution.BUDGET, violated_axis=BudgetAxis.WALL_CLOCK
         )
+    if enforcement.ipc_fault is not None:
+        return Outcome(attribution=enforcement.ipc_fault.attribution)
     return Outcome(
         attribution=Attribution.PAYLOAD,
-        exit_verdict=exit_policy.verdict_for(returncode).value,
+        exit_verdict=exit_policy.verdict_for(returncode),
     )
 
 
@@ -420,24 +493,26 @@ def _start_ipc_threads(
     process: subprocess.Popen[bytes],
     input_payload: bytes,
     capture: _Capture,
-    overflow_policy: OverflowPolicy | None,
-    ipc_errors: list[BaseException],
-) -> tuple[threading.Thread, ...]:
+    ipc_errors: list[_IpcFault],
+) -> tuple[_IpcThread, ...]:
     """Feed and drain concurrently: a caller can never deadlock a run."""
     threads = (
-        threading.Thread(
+        _IpcThread(
+            side=_IpcSide.STDIN,
             target=_feed_input,
             args=(process.stdin, input_payload, ipc_errors),
             daemon=True,
         ),
-        threading.Thread(
+        _IpcThread(
+            side=_IpcSide.STDOUT,
             target=_drain,
-            args=(process.stdout, True, capture, overflow_policy, ipc_errors),
+            args=(process.stdout, True, capture, ipc_errors),
             daemon=True,
         ),
-        threading.Thread(
+        _IpcThread(
+            side=_IpcSide.STDERR,
             target=_drain,
-            args=(process.stderr, False, capture, overflow_policy, ipc_errors),
+            args=(process.stderr, False, capture, ipc_errors),
             daemon=True,
         ),
     )
@@ -446,12 +521,62 @@ def _start_ipc_threads(
     return threads
 
 
+def _join_ipc_threads(
+    threads: tuple[_IpcThread, ...], *, ipc_errors: list[_IpcFault]
+) -> None:
+    """Join within one shared self-budget; a thread that outlives it is data.
+
+    An escaped descendant holding an inherited write end keeps a drain
+    blocked in ``read1`` forever. That is payload behavior, not broken
+    machinery: the child was reaped and its captured bytes exist, so the run
+    has a result. The stranded thread is abandoned — it is a daemon and its
+    capture is already accounted under the lock — and the unread tail is
+    recorded as a channel fault so the outcome says the capture is
+    incomplete rather than claiming a clean payload exit.
+
+    One shared deadline, not one per thread: the pinned bound is the
+    deadline plus the termination and join self-budgets, singular.
+    """
+    join_deadline = time.monotonic() + IPC_JOIN_SELF_BUDGET_SECONDS
+    for thread in threads:
+        thread.join(timeout=max(join_deadline - time.monotonic(), 0.0))
+    for thread in threads:
+        if not thread.is_alive():
+            continue
+        ipc_errors.append(
+            _IpcFault(
+                side=thread.side,
+                error=ExecutorFailure(
+                    f"the {thread.side.value} pipe never reached EOF within the "
+                    "join self-budget"
+                ),
+            )
+        )
+
+
+def _first_ipc_fault(ipc_errors: list[_IpcFault]) -> _IpcFault | None:
+    """The fault that decides attribution, narrated so it is never silent."""
+    if not ipc_errors:
+        return None
+    for fault in ipc_errors:
+        _logger.warning(
+            "fault on the run's %s pipe: %r — capture is incomplete",
+            fault.side.value,
+            fault.error,
+        )
+    return ipc_errors[0]
+
+
 def _feed_input(
     stream: IO[bytes] | None,
     payload: bytes,
-    ipc_errors: list[BaseException],
+    ipc_errors: list[_IpcFault],
 ) -> None:
-    """Write exactly the declared input, then close: the child sees EOF."""
+    """Write exactly the declared input, then close: the child sees EOF.
+
+    A payload closing its own stdin is ordinary and benign; anything else is
+    recorded so the outcome can say the child never saw its declared input.
+    """
     if stream is None:
         return
     try:
@@ -460,37 +585,48 @@ def _feed_input(
         stream.close()
     except BrokenPipeError:
         return
-    except (OSError, ValueError) as write_error:
-        ipc_errors.append(write_error)
+    except BaseException as write_error:
+        # Broad by design: a thread that dies silently is a capture the
+        # outcome would claim as clean, so every way this can fail is
+        # recorded and attributed rather than lost with the thread.
+        ipc_errors.append(_IpcFault(side=_IpcSide.STDIN, error=write_error))
 
 
 def _drain(
     stream: IO[bytes] | None,
     is_stdout: bool,
     capture: _Capture,
-    overflow_policy: OverflowPolicy | None,
-    ipc_errors: list[BaseException],
+    ipc_errors: list[_IpcFault],
 ) -> None:
-    """Read to EOF, retaining up to the shared bound and counting all bytes.
+    """Read to EOF, retaining up to the bound in force and counting all bytes.
 
-    Under ``MARKED_TRUNCATION`` the loop keeps reading past the bound and
-    discards the excess: the pipe is never closed early, so an
-    executor-side capture decision cannot change how the payload dies.
+    The loop keeps reading past the bound under every policy and discards the
+    excess: the pipe is never closed early, so an executor-side capture
+    decision cannot change how the payload dies, and bytes a payload already
+    produced on this stream are never abandoned because some *other* stream
+    crossed its bound. Under ``FAIL``, :func:`_supervise` reads the crossing
+    and kills; ending the drain is the kill's consequence, never its cause.
     """
     if stream is None:
         return
     # read1 delivers whatever a single pipe read returns; read() would block
     # for a full chunk, so a payload that writes past the bound and then
     # sleeps would not be accounted until it exited.
-    read_available = getattr(stream, "read1", stream.read)
     try:
+        read_available = getattr(stream, "read1", stream.read)
         while chunk := read_available(_READ_CHUNK_BYTES):
             with capture.lock:
                 _account(capture, chunk, is_stdout=is_stdout)
-                if capture.overflow.is_set() and overflow_policy is OverflowPolicy.FAIL:
-                    return
-    except (OSError, ValueError) as read_error:
-        ipc_errors.append(read_error)
+    except BaseException as read_error:
+        # Broad by design, and the read primitive is looked up inside the
+        # try: a drain thread that dies silently leaves a truncated capture
+        # that every integrity field would report as complete.
+        ipc_errors.append(
+            _IpcFault(
+                side=_IpcSide.STDOUT if is_stdout else _IpcSide.STDERR,
+                error=read_error,
+            )
+        )
 
 
 def _account(capture: _Capture, chunk: bytes, *, is_stdout: bool) -> None:
@@ -523,7 +659,7 @@ def _account(capture: _Capture, chunk: bytes, *, is_stdout: bool) -> None:
         capture.stderr_produced += len(chunk)
         capture.stderr_dropped += dropped
     if dropped:
-        capture.overflow.set()
+        capture.overflow_for(is_stdout=is_stdout).set()
 
 
 def _terminate_group(process: subprocess.Popen[bytes]) -> None:
@@ -603,7 +739,7 @@ class _RecordState:
     def write_spawn(self) -> None:
         if not self.enabled:
             return
-        directory = self.records.directory
+        directory = self.records.path
         assert directory is not None
         self.path = directory / record_filename(
             started_at=self.started_at, run_id=self.record.run_id
@@ -619,6 +755,46 @@ class _RecordState:
             result=result, finished_at=datetime.now(UTC)
         )
         self._write(self.record)
+        self._mark_write_failure()
+
+    def mark_executor_failure(self, failure: ExecutorFailure) -> None:
+        """Write the terminal status for a run the executor could not finish.
+
+        No :class:`RunResult` exists — that is what an executor failure means
+        — so there is nothing to finalize *with*; the status alone is what
+        distinguishes "the executor gave up here" from "this run is still in
+        flight" for anyone reading the directory afterwards.
+        """
+        if not self.enabled or self.write_failed:
+            return
+        _record_logger.warning(
+            "run record %s marks an executor failure: %s", self.path, failure
+        )
+        self.record = self.record.model_copy(
+            update={
+                "finished_at": format_record_timestamp(datetime.now(UTC)),
+                "attribution": Attribution.EXECUTOR,
+                "record_status": RecordStatus.EXECUTOR_FAILED,
+            }
+        )
+        self._write(self.record)
+        self._mark_write_failure()
+
+    def _mark_write_failure(self) -> None:
+        """Best-effort second write so a failed write is itself recorded.
+
+        The first write is what failed, so this one may fail too; when it
+        does, the narration is all that is left. Attempting it is what keeps
+        ``write_failed`` a status a reader can actually find on disk rather
+        than a value only the dead in-memory record ever held.
+        """
+        if not self.write_failed:
+            return
+        assert self.path is not None
+        try:
+            self.path.write_text(_render_record(self.record), encoding="utf-8")
+        except OSError:
+            return
 
     def _write(self, record: RunRecord) -> None:
         assert self.path is not None
@@ -659,7 +835,12 @@ def _spawn_record(
         executor_identity=EXECUTOR_IDENTITY,
         trust_category=invocation.trust_category,
         run_id=run_id,
-        argv=argv,
+        # Argv *or* source digest: for a source-carrying invocation the
+        # source is argv's last element, so recording both would persist the
+        # payload body verbatim beside the digest that exists to represent
+        # it — and untrusted source routinely embeds credentials. The
+        # digest plus the runtime is what identifies a source run.
+        argv=None if invocation.source is not None else argv,
         source_digest=(
             None if invocation.source is None else contents_digest_of(invocation.source)
         ),

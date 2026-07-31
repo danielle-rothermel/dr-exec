@@ -3,6 +3,10 @@
 Plain runs keep the single shared bound; a run that declares per-stream
 bounds measures each stream against its own, so a flood on one can never
 consume the other's budget.
+
+These drive the declaration builder rather than the public entry point: v1
+scopes per-stream bounds to the one place a protocol demands them, so the
+declaration surface a caller sees does not carry them.
 """
 
 from __future__ import annotations
@@ -17,8 +21,9 @@ from dr_exec.declare import (
     Records,
     StreamBounds,
 )
+from dr_exec.engine import execute
 from dr_exec.record import Attribution, BudgetAxis
-from dr_exec.run import run_untrusted_python
+from dr_exec.run import untrusted_python_declaration
 
 _BOTH_STREAMS_SOURCE = (
     "import sys\n"
@@ -30,12 +35,14 @@ _BOTH_STREAMS_SOURCE = (
 
 
 def _run(source: str, *, budgets: Budgets, stream_bounds: StreamBounds | None):
-    return run_untrusted_python(
-        source,
-        profile=PROCESS_BOUNDARY_ONLY,
-        budgets=budgets,
-        records=Records.none(),
-        stream_bounds=stream_bounds,
+    return execute(
+        untrusted_python_declaration(
+            source,
+            profile=PROCESS_BOUNDARY_ONLY,
+            budgets=budgets,
+            records=Records.none(),
+            stream_bounds=stream_bounds,
+        )
     )
 
 
@@ -105,6 +112,36 @@ class TestPerStreamBounds:
 
         assert len(result.stdout) == 4000
         assert len(result.stderr) == 500
+
+    def test_a_stderr_crossing_under_fail_never_abandons_the_stdout_capture(
+        self,
+    ) -> None:
+        # Unequal bounds under FAIL: stderr crosses its small bound while
+        # stdout stays far inside its large one. The stream that never
+        # crossed keeps draining to EOF, so bytes the payload already
+        # produced on it are not lost to the other stream's crossing.
+        result = _run(
+            "import sys\n"
+            "sys.stderr.write('e' * 8000)\n"
+            "sys.stderr.flush()\n"
+            "sys.stdout.write('o' * 30000)\n"
+            "sys.stdout.flush()\n"
+            "raise SystemExit(0)\n",
+            budgets=Budgets(
+                wall_clock=10.0,
+                output=OutputBudget(
+                    limit_bytes=1024, overflow_policy=OverflowPolicy.FAIL
+                ),
+            ),
+            stream_bounds=StreamBounds(stdout_bytes=500000, stderr_bytes=1024),
+        )
+
+        assert len(result.stdout) == 30000
+        assert result.measurements.stdout_bytes_produced == 30000
+        assert result.truncation.stdout_bytes_dropped == 0
+        assert result.truncation.stderr_bytes_dropped > 0
+        assert result.outcome.attribution is Attribution.BUDGET
+        assert result.outcome.violated_axis is BudgetAxis.OUTPUT
 
     def test_crossing_a_per_stream_bound_under_fail_is_an_output_budget_outcome(
         self,

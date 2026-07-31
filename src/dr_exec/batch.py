@@ -37,9 +37,10 @@ from dr_exec.declare import (
     Records,
     StreamBounds,
 )
+from dr_exec.engine import execute
 from dr_exec.errors import DeclarationError, ProtocolFailure
 from dr_exec.record import RunResult
-from dr_exec.run import run_untrusted_python
+from dr_exec.run import untrusted_python_declaration
 
 PROTOCOL_VERSION: Final[int] = 1
 """The wire protocol's pinned version, echoed in every prelude."""
@@ -293,16 +294,20 @@ def run_batch(
     unknown item id, or a shape-invalid line. The failure carries whatever
     results were validated before the fault.
     """
-    source = validated_driver_source(request)
-    run = run_untrusted_python(
-        source,
-        profile=profile,
-        budgets=budgets,
-        records=records,
-        runtime=runtime,
-        environment=environment,
-        exit_policy=exit_policy,
-        stream_bounds=channel_bounds_for(request, budgets),
+    # The declaration is built here and executed directly rather than routed
+    # through the public entry point: per-stream bounds are scoped to the
+    # protocol channel, so declaring them stays in-package.
+    run = execute(
+        untrusted_python_declaration(
+            validated_driver_source(request),
+            profile=profile,
+            budgets=budgets,
+            records=records,
+            runtime=runtime,
+            environment=environment,
+            exit_policy=exit_policy,
+            stream_bounds=channel_bounds_for(request, budgets),
+        )
     )
     return account_transcript(request=request, run=run)
 

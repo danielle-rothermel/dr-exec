@@ -20,9 +20,11 @@ from dr_exec.declare import (
     GrantKind,
     OutputBudget,
     OverflowPolicy,
+    PythonRuntime,
     Records,
     RecordsKind,
 )
+from dr_exec.errors import DeclarationError
 
 
 class TestUnbudgeted:
@@ -44,11 +46,11 @@ class TestUnbudgeted:
 class TestBudgetValidation:
     @pytest.mark.parametrize("bad", [0, -1, -0.5, float("inf"), float("nan")])
     def test_wall_clock_must_be_finite_and_positive(self, bad: float) -> None:
-        with pytest.raises(ValueError, match="wall_clock"):
+        with pytest.raises(DeclarationError, match="wall_clock"):
             Budgets(wall_clock=bad)
 
     def test_wall_clock_rejects_bool(self) -> None:
-        with pytest.raises(ValueError, match="wall_clock"):
+        with pytest.raises(DeclarationError, match="wall_clock"):
             Budgets(wall_clock=True)
 
     def test_wall_clock_accepts_int_seconds_as_float(self) -> None:
@@ -56,20 +58,20 @@ class TestBudgetValidation:
 
     @pytest.mark.parametrize("bad", [0, -1, True, 2.5])
     def test_input_must_be_a_positive_int_of_bytes(self, bad: object) -> None:
-        with pytest.raises(ValueError, match="input"):
+        with pytest.raises(DeclarationError, match="input"):
             Budgets(input=bad)
 
     @pytest.mark.parametrize("bad", [0, -1, True, 2.5])
     def test_output_limit_must_be_a_positive_int_of_bytes(self, bad: object) -> None:
-        with pytest.raises(ValueError, match="output"):
+        with pytest.raises(DeclarationError, match="output"):
             OutputBudget(limit_bytes=bad, overflow_policy=OverflowPolicy.FAIL)
 
     def test_output_requires_a_policy_object(self) -> None:
-        with pytest.raises(ValueError, match="OverflowPolicy"):
+        with pytest.raises(DeclarationError, match="OverflowPolicy"):
             OutputBudget(limit_bytes=1024, overflow_policy="fail")
 
     def test_output_axis_rejects_a_bare_int(self) -> None:
-        with pytest.raises(ValueError, match="OutputBudget"):
+        with pytest.raises(DeclarationError, match="OutputBudget"):
             Budgets(output=1024)
 
     def test_declared_budgets_round_trip(self) -> None:
@@ -135,11 +137,11 @@ class TestEnvironmentGrantShapes:
 
     @pytest.mark.parametrize("bad", ["", "HAS=EQUALS", "HAS\0NUL"])
     def test_invalid_names_are_rejected(self, bad: str) -> None:
-        with pytest.raises(ValueError, match="names"):
+        with pytest.raises(DeclarationError, match="names"):
             EnvironmentGrant.fixed({bad: "value"})
 
     def test_values_with_nul_are_rejected(self) -> None:
-        with pytest.raises(ValueError, match="NUL"):
+        with pytest.raises(DeclarationError, match="NUL"):
             EnvironmentGrant.fixed({"NAME": "has\0nul"})
 
 
@@ -216,7 +218,7 @@ class TestGrantContentsDigest:
         # The canonicalization is unambiguous precisely because NUL cannot
         # appear in a name or value, so no single entry can forge a pair
         # boundary and collide with a two-entry grant.
-        with pytest.raises(ValueError, match="NUL"):
+        with pytest.raises(DeclarationError, match="NUL"):
             EnvironmentGrant.fixed({"A": "1\0B=2"})
 
     def test_equals_in_a_value_cannot_forge_a_name_boundary(self) -> None:
@@ -261,17 +263,17 @@ class TestExitPolicy:
 
 class TestRecords:
     def test_directory_declaration(self, tmp_path: Path) -> None:
-        records = Records.directory_at(tmp_path)
+        records = Records.directory(tmp_path)
         assert records.kind is RecordsKind.DIRECTORY
-        assert records.directory == tmp_path
+        assert records.path == tmp_path
 
     def test_directory_accepts_a_string_path(self) -> None:
-        assert Records.directory_at("/tmp/records").directory == Path("/tmp/records")
+        assert Records.directory("/tmp/records").path == Path("/tmp/records")
 
     def test_none_declaration_has_no_directory(self) -> None:
         records = Records.none()
         assert records.kind is RecordsKind.NONE
-        assert records.directory is None
+        assert records.path is None
 
 
 class TestPythonRuntime:
@@ -279,5 +281,10 @@ class TestPythonRuntime:
         assert HERMETIC.interpreter is None
         assert HERMETIC.isolated is True
 
-    def test_hermetic_injects_no_packages(self) -> None:
-        assert HERMETIC.packages == ()
+    def test_a_non_isolated_runtime_drops_the_isolation_flag(self) -> None:
+        from dr_exec.run import _python_argv
+
+        loose = PythonRuntime(name="loose", isolated=False)
+
+        assert _python_argv("pass", loose)[1:] == ("-c", "pass")
+        assert _python_argv("pass", HERMETIC)[1:] == ("-I", "-c", "pass")

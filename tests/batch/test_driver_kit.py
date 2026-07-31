@@ -255,6 +255,34 @@ class TestChannelBudgetIsolation:
         assert [item.item_id for item in result.results] == ["quiet"]
         assert result.missing_item_ids == ("loud", "later")
 
+    def test_results_produced_after_a_stderr_flood_trips_fail_still_arrive(
+        self, execute_batch: Callable[..., BatchResult]
+    ) -> None:
+        # The first item crosses the payload stream's FAIL bound, then every
+        # item runs to completion and the child exits on its own terms. The
+        # protocol channel's own bound was never the constraint, so every
+        # result line the child produced has to reach the parent: a flood on
+        # one stream costs only the noisy item, never the batch.
+        result = execute_batch(
+            "import sys\n"
+            "def run_item(item_id, payload):\n"
+            "    if item_id == 'loud':\n"
+            "        sys.stderr.write('z' * 8000)\n"
+            "        sys.stderr.flush()\n"
+            "    return {'ok': item_id}\n",
+            batch_items=items("loud", "after-one", "after-two"),
+            budgets=payload_budgets(2000, OverflowPolicy.FAIL),
+        )
+
+        assert [item.item_id for item in result.results] == [
+            "loud",
+            "after-one",
+            "after-two",
+        ]
+        assert result.complete is True
+        assert result.run.truncation.stdout_bytes_dropped == 0
+        assert result.run.measurements.stdout_bytes_produced > 0
+
     def test_an_over_budget_item_result_becomes_that_items_error_result(
         self, execute_batch: Callable[..., BatchResult]
     ) -> None:

@@ -80,6 +80,56 @@ class TestSignatures:
         assert parameters["environment"].default == EnvironmentGrant.none()
         assert parameters["exit_policy"].default is REPORT_ONLY
 
+    @pytest.mark.parametrize(
+        ("entry_point", "expected"),
+        [
+            (
+                run_tool,
+                (
+                    "command",
+                    "budgets",
+                    "records",
+                    "input_text",
+                    "environment",
+                    "exit_policy",
+                ),
+            ),
+            (
+                run_untrusted_python,
+                (
+                    "source",
+                    "profile",
+                    "budgets",
+                    "records",
+                    "runtime",
+                    "input_text",
+                    "environment",
+                    "exit_policy",
+                ),
+            ),
+            (
+                run_untrusted_command,
+                (
+                    "command",
+                    "profile",
+                    "budgets",
+                    "records",
+                    "input_text",
+                    "environment",
+                    "exit_policy",
+                ),
+            ),
+        ],
+        ids=["run_tool", "run_untrusted_python", "run_untrusted_command"],
+    )
+    def test_the_parameter_set_is_exactly_the_declaration_surface(
+        self, entry_point: object, expected: tuple[str, ...]
+    ) -> None:
+        # Asymmetries between the three are limited to the trust parameters,
+        # so a capture-shaping knob on one of them and not the others is a
+        # divergence this pins rather than lets pass.
+        assert tuple(inspect.signature(entry_point).parameters) == expected  # type: ignore[arg-type]
+
     def test_the_python_runtime_defaults_to_hermetic(self) -> None:
         parameter = inspect.signature(run_untrusted_python).parameters["runtime"]
 
@@ -91,7 +141,7 @@ class TestTrustCategoryIsRecorded:
         run_tool(
             [sys.executable, "-I", "-c", "pass"],
             budgets=_QUICK,
-            records=Records.directory_at(tmp_path),
+            records=Records.directory(tmp_path),
         )
 
         assert (
@@ -106,7 +156,7 @@ class TestTrustCategoryIsRecorded:
             "pass",
             profile=PROCESS_BOUNDARY_ONLY,
             budgets=_QUICK,
-            records=Records.directory_at(tmp_path),
+            records=Records.directory(tmp_path),
         )
 
         wire = _sole_record(tmp_path)
@@ -122,7 +172,7 @@ class TestTrustCategoryIsRecorded:
             [sys.executable, "-I", "-c", "pass"],
             profile=PROCESS_BOUNDARY_ONLY,
             budgets=_QUICK,
-            records=Records.directory_at(tmp_path),
+            records=Records.directory(tmp_path),
         )
 
         wire = _sole_record(tmp_path)
@@ -286,7 +336,7 @@ class TestExitPolicy:
             exit_policy=policy,
         )
 
-        assert result.outcome.exit_verdict == ExitVerdict.SUCCESS.value
+        assert result.outcome.exit_verdict is ExitVerdict.SUCCESS
         assert result.outcome.attribution is Attribution.PAYLOAD
 
     def test_an_undeclared_status_takes_the_default_verdict(self) -> None:
@@ -299,7 +349,7 @@ class TestExitPolicy:
             exit_policy=policy,
         )
 
-        assert result.outcome.exit_verdict == ExitVerdict.REPORT_ONLY.value
+        assert result.outcome.exit_verdict is ExitVerdict.REPORT_ONLY
 
     def test_a_budget_outcome_carries_no_exit_verdict(self) -> None:
         result = run_tool(

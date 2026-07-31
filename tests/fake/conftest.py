@@ -28,7 +28,7 @@ def payload_result(
     stdout: str = "",
     stderr: str = "",
     input_bytes: int = 0,
-    exit_verdict: str = ExitVerdict.REPORT_ONLY.value,
+    exit_verdict: ExitVerdict = ExitVerdict.REPORT_ONLY,
     truncation: TruncationMark | None = None,
     stdout_bytes_produced: int | None = None,
     stderr_bytes_produced: int | None = None,

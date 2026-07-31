@@ -14,6 +14,43 @@
   cutover binds to it. Both land with the implementation stack that
   amended them; this note keeps the design branch's rationale complete.
 
+## 2026-07-31 (adversarial review fixes)
+
+- Attribution: `CHANNEL` and `EXECUTOR` are now reachable outcomes. A
+  drain fault or a drain that never reaches EOF within the join budget is
+  a channel outcome on the result; a fault feeding the child its declared
+  input is an executor outcome. Both sit below the budget axes and above
+  exit-status interpretation, so a payload is never blamed by elimination
+  for bytes the executor's own plumbing lost. IPC faults are narrated.
+- A payload that leaves a descendant holding an inherited pipe no longer
+  turns a completed, budget-compliant run into `ExecutorFailure`: the join
+  budget is one shared deadline, a stranded daemon drain is abandoned, and
+  the result the reaped child produced is returned.
+- Overflow is flagged per stream and drains always read to EOF, so a flood
+  on the payload stream can never abandon protocol result lines already
+  produced on the protocol stream. `FAIL` still kills on either crossing.
+- The record: a source-carrying invocation records its `source_digest` and
+  no `argv`, so untrusted source and batch item payloads never persist
+  verbatim. `RecordStatus.EXECUTOR_FAILED` is written when the executor
+  aborts a run, and a finalize-write failure is re-attempted as
+  `write_failed`, so `spawned` means only "still in flight".
+- `Records.directory(path)` replaces `Records.directory_at`; the field is
+  `Records.path`. `Outcome.exit_verdict` and `RunRecord.exit_verdict` are
+  `ExitVerdict`, and an exit verdict on a non-payload outcome is
+  unconstructable. Declaration types raise `DeclarationError`, not bare
+  `ValueError`.
+- Removed `STARTUP_SELF_BUDGET_SECONDS` (no enforcement site) and
+  `PythonRuntime.packages` (no read site). `stream_bounds` left the public
+  entry point and the fake: per-stream bounds stay scoped to the batch
+  protocol channel, declared through `untrusted_python_declaration`.
+- The fake rejects budget outcomes on axes the declaration never budgeted,
+  including `INPUT` (a pre-spawn error) and `OUTPUT` outside `FAIL`.
+- Tests: descriptor-table probes assert the child's whole table by
+  `fstat` rather than a numeric filter, attribution precedence is pinned
+  over both-flags-set states, record identity fields are asserted against
+  independently computed hashes, and the exec-derived bounds, self-budgets
+  and batch channel defaults are pinned at exact literal value.
+
 ## 2026-07-31 (declaration and record layers)
 
 - Added `dr_exec.declare`: `Budgets` over the three v1 axes with the

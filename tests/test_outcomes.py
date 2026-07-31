@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from dr_exec.errors import DeclarationError
 from dr_exec.record import (
     Attribution,
     BudgetAxis,
@@ -23,11 +24,11 @@ class TestOutcome:
         assert outcome.violated_axis is BudgetAxis.WALL_CLOCK
 
     def test_budget_attribution_without_an_axis_is_unconstructable(self) -> None:
-        with pytest.raises(ValueError, match="violated axis"):
+        with pytest.raises(DeclarationError, match="violated axis"):
             Outcome(attribution=Attribution.BUDGET)
 
     def test_non_budget_attribution_with_an_axis_is_unconstructable(self) -> None:
-        with pytest.raises(ValueError, match="violated axis"):
+        with pytest.raises(DeclarationError, match="violated axis"):
             Outcome(attribution=Attribution.PAYLOAD, violated_axis=BudgetAxis.OUTPUT)
 
     def test_machine_attribution_preserves_the_spawn_errno(self) -> None:

@@ -22,9 +22,13 @@ class DrExecError(Exception):
 class DeclarationError(DrExecError):
     """A pre-spawn caller error: the declaration was never runnable.
 
-    Raised before any child exists — invalid argv, oversized source or
-    input, a relative program with no granted ``PATH``, an overlay
-    exclusion present in the parent environment.
+    Raised before any child exists, and raised by the declaration types
+    themselves as well as by the entry points — a budget that is not a
+    positive number is as unrunnable as an oversized source, so both arrive
+    as the same type. Callers catch one exception hierarchy for every way a
+    call can be wrong before it starts: invalid argv, oversized source or
+    input, a malformed budget or grant, a relative program with no granted
+    ``PATH``, an overlay exclusion present in the parent environment.
     """
 
 

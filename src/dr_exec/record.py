@@ -20,7 +20,9 @@ from dr_exec.declare import (
     UNBUDGETED,
     Budgets,
     EnvironmentGrant,
+    ExitVerdict,
 )
+from dr_exec.errors import DeclarationError
 
 EXECUTOR_IDENTITY: Final[str] = f"dr-exec@{importlib.metadata.version('dr-exec')}"
 """Which machinery produced a run — for cache keys and dataset provenance.
@@ -93,12 +95,17 @@ class TrustCategory(StrEnum):
 class RecordStatus(StrEnum):
     """How far a record got. A write failure never fails the run.
 
+    ``SPAWNED`` is the mid-flight state and nothing else: every path out of
+    the executor writes a terminal status, so a record still reading
+    ``spawned`` means the calling process itself died.
+
     Persisted format; never iterate to build a payload.
     """
 
     SPAWNED = "spawned"
     FINALIZED = "finalized"
     WRITE_FAILED = "write_failed"
+    EXECUTOR_FAILED = "executor_failed"
 
 
 @unique
@@ -164,17 +171,26 @@ class Outcome:
 
     ``violated_axis`` is set exactly when the attribution is ``BUDGET``;
     ``spawn_errno`` is preserved for ``MACHINE`` spawn failures so EACCES
-    and ENOEXEC stay distinguishable.
+    and ENOEXEC stay distinguishable. ``exit_verdict`` is set exactly when
+    the attribution is ``PAYLOAD``: interpreting an exit status is only
+    meaningful for a run whose exit status is the thing being judged.
     """
 
     attribution: Attribution
     violated_axis: BudgetAxis | None = None
     spawn_errno: int | None = None
-    exit_verdict: str | None = None
+    exit_verdict: ExitVerdict | None = None
 
     def __post_init__(self) -> None:
         if (self.attribution is Attribution.BUDGET) != (self.violated_axis is not None):
-            raise ValueError("a budget attribution names exactly one violated axis")
+            raise DeclarationError(
+                "a budget attribution names exactly one violated axis"
+            )
+        if (
+            self.exit_verdict is not None
+            and self.attribution is not Attribution.PAYLOAD
+        ):
+            raise DeclarationError("an exit verdict belongs to a payload attribution")
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,7 +297,9 @@ class RunRecord(BaseModel):
         default=None, alias=RecordKey.VIOLATED_AXIS.value
     )
     spawn_errno: int | None = Field(default=None, alias=RecordKey.SPAWN_ERRNO.value)
-    exit_verdict: str | None = Field(default=None, alias=RecordKey.EXIT_VERDICT.value)
+    exit_verdict: ExitVerdict | None = Field(
+        default=None, alias=RecordKey.EXIT_VERDICT.value
+    )
     returncode: int | None = Field(default=None, alias=RecordKey.RETURNCODE.value)
 
     duration_seconds: float | None = Field(

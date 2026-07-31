@@ -20,7 +20,10 @@ from dr_exec.declare import (
     SOURCE_BOUND_BYTES,
     Budgets,
     EnvironmentGrant,
+    OutputBudget,
+    OverflowPolicy,
     Records,
+    StreamBounds,
 )
 from dr_exec.errors import DeclarationError
 from dr_exec.fake import FakeExecutor
@@ -124,6 +127,60 @@ _INVALID_CALLS: list[tuple[str, dict[str, Any]]] = [
         },
     ),
 ]
+
+
+class TestTheDeclarationTypesRaiseTheSameError:
+    """A malformed declaration *value* is the same error as a malformed call.
+
+    A budget that is not a positive number is as unrunnable as an oversized
+    source, so a caller catching the executor's own pre-spawn error type
+    catches both. These constructors are reached from entry-point call sites
+    directly, so a different exception type there would escape a consumer's
+    handler entirely.
+    """
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: Budgets(wall_clock=-1),
+            lambda: Budgets(wall_clock=float("inf")),
+            lambda: Budgets(input=0),
+            lambda: Budgets(output=4096),
+            lambda: OutputBudget(limit_bytes=0, overflow_policy=OverflowPolicy.FAIL),
+            lambda: OutputBudget(limit_bytes=64, overflow_policy="fail"),
+            lambda: StreamBounds(stdout_bytes=0),
+            lambda: EnvironmentGrant.fixed({"HAS=EQUALS": "x"}),
+            lambda: EnvironmentGrant.fixed({"NAME": "has\0nul"}),
+        ],
+        ids=[
+            "negative-wall-clock",
+            "infinite-wall-clock",
+            "zero-input",
+            "bare-int-output",
+            "zero-output-limit",
+            "policy-that-is-a-string",
+            "zero-stream-bound",
+            "name-with-equals",
+            "value-with-nul",
+        ],
+    )
+    def test_a_malformed_declaration_value_is_a_declaration_error(
+        self, build: Callable[[], object]
+    ) -> None:
+        with pytest.raises(DeclarationError):
+            build()
+
+    def test_a_stream_bound_on_an_entry_point_raises_inside_the_call(self) -> None:
+        # StreamBounds is an entry-point keyword, so its validation happens
+        # within the call a consumer wrapped in its own error handling.
+        with pytest.raises(DeclarationError, match="positive integer of bytes"):
+            run_untrusted_python(
+                "pass",
+                profile=PROCESS_BOUNDARY_ONLY,
+                budgets=QUICK,
+                records=Records.none(),
+                stream_bounds=StreamBounds(stdout_bytes=0),
+            )
 
 
 def _real(entry_point: str) -> Callable[..., Any]:

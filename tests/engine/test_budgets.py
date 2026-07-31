@@ -7,14 +7,17 @@ from collections.abc import Callable
 
 import pytest
 
+from dr_exec import engine
 from dr_exec.declare import (
+    REPORT_ONLY,
     Budgets,
+    ExitVerdict,
     OutputBudget,
     OverflowPolicy,
     Records,
 )
 from dr_exec.errors import DeclarationError
-from dr_exec.record import Attribution, BudgetAxis, RunResult
+from dr_exec.record import Attribution, BudgetAxis, Outcome, RunResult
 from dr_exec.run import run_tool
 
 from .conftest import output_budget
@@ -132,6 +135,94 @@ class TestOutputBudgetMarkedTruncation:
         assert result.measurements.stdout_bytes_produced == 200000
 
 
+class TestAttributionPrecedenceOrder:
+    """The pinned order, over the flag states that discriminate it.
+
+    ``_supervise`` returns on the first enforcement hit, so both flags set
+    at once is reachable only through the post-loop race re-check — a state
+    no timing-based test can construct reliably. Deciding attribution is a
+    pure function of the recorded flags, so the order is pinned here
+    directly, where the discriminating state can simply be built.
+    """
+
+    @staticmethod
+    def _decide(
+        *, deadline_expired: bool, output_overflowed: bool, returncode: int = 0
+    ) -> Outcome:
+        return engine._decide_attribution(
+            returncode=returncode,
+            enforcement=engine._Enforcement(
+                deadline_expired=deadline_expired,
+                output_overflowed=output_overflowed,
+            ),
+            exit_policy=REPORT_ONLY,
+        )
+
+    def test_an_overflow_that_also_expired_the_deadline_is_an_output_outcome(
+        self,
+    ) -> None:
+        outcome = self._decide(deadline_expired=True, output_overflowed=True)
+
+        assert outcome.attribution is Attribution.BUDGET
+        assert outcome.violated_axis is BudgetAxis.OUTPUT
+
+    def test_an_overflow_alone_is_an_output_outcome(self) -> None:
+        outcome = self._decide(deadline_expired=False, output_overflowed=True)
+
+        assert outcome.violated_axis is BudgetAxis.OUTPUT
+
+    def test_a_deadline_alone_is_a_wall_clock_outcome(self) -> None:
+        outcome = self._decide(deadline_expired=True, output_overflowed=False)
+
+        assert outcome.violated_axis is BudgetAxis.WALL_CLOCK
+
+    def test_a_recorded_violation_beats_a_clean_exit(self) -> None:
+        outcome = self._decide(
+            deadline_expired=False, output_overflowed=True, returncode=0
+        )
+
+        assert outcome.attribution is Attribution.BUDGET
+        assert outcome.exit_verdict is None
+
+    def test_neither_flag_is_exit_status_interpretation(self) -> None:
+        outcome = self._decide(
+            deadline_expired=False, output_overflowed=False, returncode=3
+        )
+
+        assert outcome.attribution is Attribution.PAYLOAD
+        assert outcome.exit_verdict is ExitVerdict.REPORT_ONLY
+
+    def test_a_channel_fault_sits_below_the_budget_axes(self) -> None:
+        # The bound the caller declared is what ended the run; a stranded
+        # drain is that kill's consequence, never the attribution.
+        outcome = engine._decide_attribution(
+            returncode=-9,
+            enforcement=engine._Enforcement(
+                output_overflowed=True,
+                ipc_fault=engine._IpcFault(
+                    side=engine._IpcSide.STDOUT, error=OSError("severed")
+                ),
+            ),
+            exit_policy=REPORT_ONLY,
+        )
+
+        assert outcome.attribution is Attribution.BUDGET
+
+    def test_a_channel_fault_sits_above_exit_status_interpretation(self) -> None:
+        outcome = engine._decide_attribution(
+            returncode=0,
+            enforcement=engine._Enforcement(
+                ipc_fault=engine._IpcFault(
+                    side=engine._IpcSide.STDOUT, error=OSError("severed")
+                )
+            ),
+            exit_policy=REPORT_ONLY,
+        )
+
+        assert outcome.attribution is Attribution.CHANNEL
+        assert outcome.exit_verdict is None
+
+
 class TestAttributionPrecedence:
     def test_a_recorded_overflow_beats_a_clean_exit_that_raced_it(
         self, run_python: Callable[..., RunResult]
@@ -147,9 +238,12 @@ class TestAttributionPrecedence:
         assert result.outcome.attribution is Attribution.BUDGET
         assert result.outcome.violated_axis is BudgetAxis.OUTPUT
 
-    def test_an_overflow_that_expires_the_deadline_is_an_output_outcome(
+    def test_an_overflow_under_a_short_deadline_is_an_output_outcome(
         self, run_python: Callable[..., RunResult]
     ) -> None:
+        # An integration companion to the flag-level ordering tests: the
+        # overflow lands first here, so this pins the reachable arm, not the
+        # both-flags-set state.
         result = run_python(
             "import sys, time\n"
             "sys.stdout.buffer.write(b'x' * 400000)\n"

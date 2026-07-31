@@ -16,6 +16,7 @@ from dr_exec.declare import (
     PROCESS_BOUNDARY_ONLY,
     Budgets,
     EnvironmentGrant,
+    ExitVerdict,
     OutputBudget,
     OverflowPolicy,
     contents_digest_of,
@@ -100,12 +101,42 @@ def _finalized_record() -> RunRecord:
         outcome=Outcome(
             attribution=Attribution.BUDGET,
             violated_axis=BudgetAxis.OUTPUT,
-            exit_verdict="report_only",
         ),
     )
     return _fully_populated_record().finalized_with(
         result=result, finished_at=FIXED_FINISHED_AT
     )
+
+
+def _payload_finalized_record() -> RunRecord:
+    """A payload outcome, which is the shape that carries an exit verdict."""
+    result = RunResult(
+        returncode=0,
+        stdout="",
+        stderr="",
+        truncation=TruncationMark(),
+        measurements=Measurements(
+            duration_seconds=0.5,
+            teardown_seconds=0.001,
+            stdout_bytes_produced=0,
+            stderr_bytes_produced=0,
+            input_bytes=13,
+        ),
+        outcome=Outcome(
+            attribution=Attribution.PAYLOAD, exit_verdict=ExitVerdict.SUCCESS
+        ),
+    )
+    return _fully_populated_record().finalized_with(
+        result=result, finished_at=FIXED_FINISHED_AT
+    )
+
+
+def test_an_exit_verdict_serializes_as_its_pinned_literal() -> None:
+    wire = _payload_finalized_record().to_wire()
+
+    assert wire["exit_verdict"] == "success"
+    assert wire["attribution"] == "payload"
+    assert wire["violated_axis"] is None
 
 
 def test_wire_key_set_is_exact() -> None:
@@ -159,7 +190,9 @@ def test_wire_values_are_pinned() -> None:
     assert wire["run_id"] == "0123456789abcdef0123456789abcdef"
     assert wire["argv"] is None
     assert wire["source_digest"] == hashlib.sha256(b"print('hi')").hexdigest()
-    assert wire["input_digest"] == contents_digest_of("stdin payload")
+    # A literal, not the helper that built the field: comparing a value to
+    # the call that produced it pins nothing about the digest algorithm.
+    assert wire["input_digest"] == hashlib.sha256(b"stdin payload").hexdigest()
     assert wire["grant_kind"] == "fixed"
     assert wire["grant_names"] == ["OPENBLAS_NUM_THREADS"]
     assert wire["grant_exclusions"] == []
@@ -176,7 +209,7 @@ def test_wire_values_are_pinned() -> None:
     assert wire["attribution"] == "budget"
     assert wire["violated_axis"] == "output"
     assert wire["spawn_errno"] is None
-    assert wire["exit_verdict"] == "report_only"
+    assert wire["exit_verdict"] is None
     assert wire["returncode"] == -9
     assert wire["duration_seconds"] == 1.334444
     assert wire["teardown_seconds"] == 0.002
