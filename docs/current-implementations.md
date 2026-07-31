@@ -261,6 +261,29 @@ accumulated rather than surfaced live; no narration, no durable record.
 
 ## codearc
 
+### Git fixture and query helpers
+
+~35 sites across `tests/test_cli.py`, `tests/test_miner.py`, and
+`scripts/demo_miner.py` — git invoked with `cwd=`, `check=True`, captured,
+to build test fixture repos and query them; plus a `run_git` helper
+(`scripts/local_loc_stats_t1.py:64`) using `git -C`, and a
+`git config --global` read (`:74`) with `check=False` where empty stdout is
+interpreted as "unset" — returncode-and-empty-output as data, a small
+exit-policy example. Production code executes nothing: mining goes through
+pydriller and libcst. Budget axes — none: no timeouts, no output bounds.
+Observability — none; nothing beyond `check=True` exceptions.
+
+### Secret retrieval via gh
+
+`scripts/github_loc_stats_t1.py:125` — `gh auth token` with
+`capture_output=True`, `check=True`: a credential deliberately transported
+through captured stdout. Budget axes — none. Observability — flags a
+design tension rather than a gap: a secret in captured output is exactly
+what verbose-by-default narration and durable run records must never
+persist, so the observability contract needs a redaction stance for runs
+whose *output is itself sensitive* (llmflow's in-flight `redactToken` is
+the fleet's one prior-art instance).
+
 ## dr-queues
 
 ### Detached stage-worker spawning
