@@ -137,8 +137,9 @@ edit that happens to pass tests.
   bounded by the declared deadline plus the executor self-budgets for
   termination and joining. Callers may hold leases and heartbeats around
   calls.
-- Descriptor table — the child starts with exactly file descriptors 0,
-  1, 2 (the run's pipes); the executor's own descriptors (records,
+- Descriptor table — the child starts with exactly file descriptors 0
+  (stdin), 1 (stdout), and 2 (stderr), each connected to the run's pipes;
+  the executor's own descriptors (records,
   scratch, narration) are never inheritable, so `os.dup(1)` in a
   payload deterministically returns 3. Anti-spoofing protocols count on
   this; it is golden-tested with a descriptor-probe child.

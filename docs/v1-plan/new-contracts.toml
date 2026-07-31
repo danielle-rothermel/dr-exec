@@ -1,0 +1,107 @@
+# Standing rules introduced by the v1 design rather than direct refinements of
+# a current repository contract.
+
+[baseline]
+source = ".defs/contracts.toml"
+commit = "fda5f1102914b93c40617c4206311e80818a8f6e"
+date = "2026-07-31"
+
+[[contracts]]
+title = "One canonical engine owns call-scoped execution"
+statement = """
+Every v1 public execution entry point routes through `dr_exec.engine`, the \
+single internal implementation of spawn, I/O, lifecycle, budget enforcement, \
+attribution, and recording; consumers do not import the engine directly."""
+rationale = """
+One internal path prevents trust-specific, batch, and tool entry points from \
+drifting on the invariants that make execution safe and attributable, while a \
+private module boundary keeps consumers on the stable declaration surface."""
+date = "2026-07-31"
+enforcement_modes = ["constructed_invariant", "governance"]
+enforcement = "Public modules delegate execution to the engine, the engine is excluded from the supported consumer API, and repository review rejects alternate spawn or lifecycle implementations."
+
+[[contracts]]
+title = "Representation type follows the data boundary"
+statement = """
+V1 uses frozen slotted dataclasses for internal value objects and serialization \
+models for values that cross a process, persistence, fixture, or untrusted-input \
+boundary."""
+rationale = """
+The representation itself should reveal where validation and schema stability \
+are required; internal values need immutability, while boundary data needs \
+explicit parsing and serialization semantics."""
+date = "2026-07-31"
+enforcement_modes = ["constructed_invariant", "governance"]
+enforcement = "Declaration and internal result values use frozen slotted dataclasses, boundary schemas use serialization models, and design review treats crossing the boundary with an internal value type as a contract violation."
+
+[[contracts]]
+title = "Public calls are thread-safe"
+statement = """
+Every v1 public execution call is safe to invoke concurrently from threads in \
+one parent process without sharing mutable per-run state or ambient \
+configuration."""
+rationale = """
+Consumers hold leases, heartbeats, and parallel evaluation work around executor \
+calls; process-global state or shared workspaces would make otherwise valid \
+concurrency nondeterministic."""
+date = "2026-07-31"
+enforcement_modes = ["runtime_guarantee"]
+enforcement = "The implementation keeps run state call-local, snapshots declarations before use, allocates distinct scratch and record paths, and tests concurrent calls for isolation and collision freedom."
+
+[[contracts]]
+title = "Pinned semantics change only through contract revision"
+statement = """
+V1 semantics used in persisted identity, protocol interpretation, scoring, or \
+child-observable behavior change only through an explicit contract revision and \
+are golden-tested at the exact-literal level where a literal exists."""
+rationale = """
+Small locally plausible changes to bytes, invocation shape, attribution order, \
+wire keys, or canonicalization can silently invalidate caches and experimental \
+comparisons even when ordinary tests still pass."""
+date = "2026-07-31"
+enforcement_modes = ["governance"]
+enforcement = "Persisted and child-observable literals have explicit contract markers and golden tests, and review accepts a semantic change only alongside a standing-contract revision."
+
+[[contracts]]
+title = "Unsupported consumers do not partially adopt v1"
+statement = """
+Consumers whose required behavior depends on a deferred v1 surface remain on \
+their existing execution path until that complete surface exists; they do not \
+wrap v1 to emulate arbitrary cwd, passthrough delivery, supervision, readiness, \
+or interactive multi-process orchestration."""
+rationale = """
+Partial adoption would create competing lifecycle and containment semantics \
+outside the canonical engine and make a deliberate scope boundary look like an \
+accidental missing convenience."""
+date = "2026-07-31"
+enforcement_modes = ["scope_exclusion", "governance"]
+enforcement = "The cutover inventory names deferred consumers, their call sites remain unchanged, and review rejects v1 adapters that reconstruct an excluded surface."
+
+[[contracts]]
+title = "Consumers adopt dr-exec through pinned releases"
+statement = """
+Consumers depend on an explicit released dr-exec version; a local path \
+dependency is allowed only during coordinated cutover development and is \
+replaced by a pinned release before the cutover is complete."""
+rationale = """
+A pinned package makes changes to foundational execution machinery loud and \
+reviewable, preserves experimental reproducibility, and prevents consumers from \
+silently tracking repository state."""
+date = "2026-07-31"
+enforcement_modes = ["governance"]
+enforcement = "Consumer dependency manifests and lockfiles pin a released version at cutover completion; local path sources are limited to the coordinated development phase and are removed before release adoption is declared complete."
+
+[[contracts]]
+title = "The design governs cutover adjudication"
+statement = """
+During the v1 cutover, the accepted dr-exec contract determines target behavior; \
+each divergence in an existing consumer is classified as a real obligation or \
+an incidental artifact, and consumer tests, schemas, and persisted formats are \
+repinned to the resulting verdict."""
+rationale = """
+Treating every existing implementation detail as a requirement would preserve \
+collapsed attribution, duplicated lifecycle machinery, and obsolete wire shapes \
+instead of establishing one deliberate execution contract."""
+date = "2026-07-31"
+enforcement_modes = ["governance"]
+enforcement = "The cutover plan records a requirement-versus-artifact verdict for every divergence, preserves accepted obligations in contract vocabulary, and updates or removes consumer artifacts that conflict with the verdict."
