@@ -1,13 +1,15 @@
 [project]
 name = "dr-exec"
 version = "0.1.0"
-description = "Execution utils with carefully chosen defaults"
+description = "Canonical subprocess execution primitives for the dr-* fleet."
 readme = "README.md"
 authors = [
     { name = "Danielle Rothermel", email = "danielle.rothermel@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.7",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.25,<0.12.0"]
@@ -26,6 +28,13 @@ testpaths = ["tests"]
 [tool.ruff]
 include = ["scripts/**/*.py", "src/**/*.py"]
 line-length = 79
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# SIM300 reads `actual == expected` as a Yoda condition; golden tests assert
+# in exactly that order, and its rewrite inverts them.
+ignore = ["SIM300"]
 
 [tool.ty.src]
 include = ["scripts", "src"]

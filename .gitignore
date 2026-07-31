@@ -4,8 +4,13 @@ node_modules/
 viewer/packages/*/dist/
 .runs/
 .scratch/
-
 *.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
 *.cache
 .DS_Store
 *.swp
