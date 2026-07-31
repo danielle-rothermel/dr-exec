@@ -85,6 +85,10 @@ Axes and their default rules:
   defaults.
 - Per-item result size — protocol budget, declared by the batch protocol.
 
+Budgets cross the process boundary as data: a child (driver or worker)
+learns its budgets from the same declared contract object the caller
+wrote, never from parallel constants maintained on each side.
+
 ## Amortization
 
 The unit of containment and the unit of work are different units. A test
@@ -195,6 +199,8 @@ remote-execution mode.
    - Failure scope follows dimensions — a payload failure fells its own sub-batch (one candidate's cases), never the whole batch; partial results are partial per dimension, and attribution names the level that failed.
    - The driver is the executor's agent inside the child — attribution splits within the child process: driver failure is executor failure, payload failure is payload failure, even when they die together.
    - Every item is accounted for — exactly one result per item; missing, duplicate, unknown, or shape-invalid results are executor-side protocol failures, detected at the boundary.
+   - Item failures are data, batch failures are exceptions — a failing item becomes a result row and the sweep continues; only executor- and protocol-level faults raise.
+   - The response echoes the request — the driver returns the identity of what it was asked (items, config), verified before any result is trusted.
    - A result once produced is never lost — results leave the child incrementally, so a death at item N costs items N onward, not the batch.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 4. **Trusted tool invocation** — hardened calls to known programs (git, uv, linters, docker) with the lifecycle rigor ad-hoc call sites never have.
