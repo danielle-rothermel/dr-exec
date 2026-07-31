@@ -26,7 +26,8 @@
 - **Executor** — our machinery around the payload, whichever side of the process boundary it runs on: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
 - **Run result** — the structured record of a completed run: exit status, delivered output, and measurements (duration, budget consumption). Exists whenever the child ran, however it exited; executor failure is precisely the case where no run result exists.
 - **Run record** — the durable twin of the run result: persisted while the run is live, kept regardless of outcome, surviving the process that made it.
-- **Attribution** — the determination of which party a failure belongs to: payload, executor (driver included), budget, or machine. Every failure carries exactly one.
+- **Attribution** — the determination of which party a failure belongs to: payload, executor (driver included), channel, budget, or machine. Every failure carries exactly one. A channel claim requires evidence; unknown defaults to executor, never to payload — the payload is never blamed by elimination.
+- **Channel** — the mechanism carrying bytes and enforcement between executor and payload: pipes, container daemons, sandbox runtimes, wired-in services. Channel failures are the retriable class — neither payload misbehavior nor executor bug.
 - **Exit policy** — the caller-declared mapping from exit status to success, failure, or domain data. The default policy is report-only.
 - **Dimension** — one direction of a batch cross-product (candidates, tasks, cases): results are indexed by dimensions and failure scopes bind to them. Distinct from budget axes, which are resource kinds.
 - **Narration** — the executor's own progress logging: lifecycle events emitted as they happen, on the executor's channel, never the payload's.
