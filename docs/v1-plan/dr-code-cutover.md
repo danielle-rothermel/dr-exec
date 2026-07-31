@@ -57,10 +57,10 @@ here as "scored against", never as "attributed to".
    returncode and captured stderr (the classifier lane's bounded
    diagnostics). Honored: outcomes are data; every spawned run returns a
    full `RunResult`.
-4. **Absence is distinct, and finer than "spawn failed".** Missing
+4. **Spawn absence is distinct, and finer than "spawn failed".** Missing
    executable (ENOENT) is distinguished from other start failures
-   (EACCES et al.). Honored: absence attribution exactly on ENOENT;
-   other spawn errnos land as machine attribution with the errno
+   (EACCES et al.). Honored: spawn absence attribution exactly on
+   ENOENT; other spawn errnos land as machine attribution with the errno
    preserved.
 5. **Never-raising decode.** Hostile bytes on either stream must still
    yield a scoreable string. Honored as pinned semantics
@@ -69,11 +69,11 @@ here as "scored against", never as "attributed to".
    including a child that reads stdin only after writing. Honored as an
    engine invariant.
 7. **Group teardown including descendants, race-safe, budgeted.**
-   Grandchildren observably dead within the termination self-budget on
-   every exit path. Honored; both the `os.killpg` reap-race
-   fault-injection suite *and* the real-descendant liveness tests
-   (deadline, overflow, and normal-exit paths) migrate into dr-exec's
-   engine suite.
+   Grandchildren observably dead within the executor self-budget for
+   termination on every exit path. Honored; both the `os.killpg`
+   reap-race fault-injection suite *and* the real-descendant liveness
+   tests (deadline, overflow, and normal-exit paths) migrate into
+   dr-exec's engine suite.
 8. **Protocol-stdout protection.** Payload prints must not corrupt
    protocol output. Honored in the driver kit; the fd-level hole stays a
    declared profile limit.
@@ -223,8 +223,8 @@ here as "scored against", never as "attributed to".
     `max_infrastructure_retries`. → The retriable set is rebuilt from
     two sources and its membership deliberately changes: retry on
     channel and machine attributions and on raised executor failures;
-    never retry absence (a missing interpreter is not transient) or
-    budget attributions. See accepted changes for the observable
+    never retry spawn absence (a missing interpreter is not transient)
+    or budget attributions. See accepted changes for the observable
     consequence.
 
 ### Accepted behavior changes (the validation list)
@@ -263,7 +263,7 @@ complete list:
   path-source-to-pinned-release swap; generations produced during the
   development phase are not reproducible after the swap and are
   archived.
-- Spawn-absence failures are no longer retried (previously retried as
+- Spawn absence failures are no longer retried (previously retried as
   `SubprocessStartError` infrastructure attempts): `attempt_count` and
   terminal `record_status` change for missing-interpreter scenarios.
 - Children run in per-run scratch directories with explicitly granted
@@ -278,9 +278,9 @@ complete list:
   branch. Persisted skip-reason literals in generated datasets are
   re-pinned. Regenerated datasets are new datasets, not corrupted old
   ones.
-- The parity/oracle test suites run on the real engine with
-  `Records.none()` (sanctioned by the contract's testing rule); logic
-  tests move to `FakeExecutor`. In-child driver-body code
+- The parity and real-engine oracle test suites run on the real engine
+  with `Records.none()` (sanctioned by the contract's testing rule);
+  logic tests move to `FakeExecutor`. In-child driver-body code
   (`failure_metadata`'s re-execution, clipping, per-case timing) keeps
   real-execution coverage in dr-code. Driver tracebacks persisted into
   eval records (`File "<string>", line N` frames) shift line numbers
@@ -346,10 +346,10 @@ the known non-obvious ones.
   per adjudication artifact 6 with a golden test);
   `metrics/operators/code_test.py`'s outcome interpretation; and
   `metrics/engine/engine.py`'s executor seam. Test doubles replaced by
-  `FakeExecutor`; parity/oracle suites onto the real engine with
-  `Records.none()`; lifecycle fault-injection and descendant-liveness
-  tests deleted here (they live in dr-exec). Call sites declare
-  budgets, environment passthrough, records.
+  `FakeExecutor`; parity and real-engine oracle suites move onto the
+  real engine with `Records.none()`; lifecycle fault-injection and
+  descendant-liveness tests are deleted here (they live in dr-exec).
+  Call sites declare budgets, environment passthrough, records.
 - **cutover/02** ← rebuild/02: test-suite baseline; the `python -m`
   module-runner fixture rides `run_tool` with the
   `overlay(COLUMNS, NO_COLOR, PYTHONHASHSEED)` environment passthrough

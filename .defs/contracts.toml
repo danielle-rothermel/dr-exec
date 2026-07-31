@@ -61,8 +61,9 @@ Every resource axis is visibly budgeted or visibly unbudgeted: wall-clock and \
 CPU limits are declared only; output caps are contract-derived or per-run \
 machine-scale aggregates; RAM and disk have per-run aggregate machine-scale \
 protection by default; process, file-size, and open-file limits are declared \
-only; startup, termination, narration-volume, and record-volume self-budgets \
-have built-in defaults; and per-item result size is declared by the protocol. \
+only; startup, termination, narration-volume, and record-volume executor \
+self-budgets have built-in defaults; and per-item result size is declared by \
+the protocol. \
 Per-run machine protection never implicitly multiplies across concurrent runs, \
 and every active budget crosses the process boundary in the same declared \
 contract object rather than in parallel constants."""
@@ -70,7 +71,7 @@ rationale = """
 Interior defaults guess at research workloads and manufacture failures, while \
 unstated absence hides exposure. Contract budgets reflect downstream meaning, \
 machine protection turns chaotic capacity failures into attributed outcomes, \
-and self-budgets keep executor operations such as startup and teardown from \
+and executor self-budgets keep operations such as startup and teardown from \
 hanging. Batch- and fleet-level protection must be declared independently of \
 per-run limits, and parallel parent and child constants inevitably drift."""
 date = "2026-07-31"
@@ -108,19 +109,19 @@ date = "2026-07-31"
 title = "Completed runs are data with one failure owner"
 statement = """
 Every completed execution attempt produces a run result, including recognized \
-spawn outcomes such as absence where no child ran; only executor machinery \
-failure that prevents a trustworthy result produces none. Absence remains \
-distinct from other spawn failures, exit interpretation is caller policy with \
-a report-only default, and every failure receives exactly one evidence-based \
-attribution without blaming payload by elimination; only evidence-attributed \
-channel failures form the retriable class. Aggregating trusted-tool calls \
-preserves per-call durable artifacts and collects ordinary statuses without \
-failing fast."""
+outcomes such as spawn absence where no child ran; only executor machinery \
+failure that prevents a trustworthy result produces none. Spawn absence \
+remains distinct from other spawn failures, exit interpretation is caller \
+policy with a report-only default, and every failure receives exactly one \
+evidence-based attribution without blaming payload by elimination; only \
+evidence-attributed channel failures form the retriable class. Aggregating \
+trusted-tool calls preserves per-call durable artifacts and collects ordinary \
+statuses without failing fast."""
 rationale = """
-Using exceptions or sentinel values for ordinary exits collapses absence, \
-crash, kill, timeout, overflow, and nonzero exit into unusable control flow. \
-Raw outcome data plus explicit policy keeps domain interpretation with the \
-caller while preserving retry and debugging evidence."""
+Using exceptions or sentinel values for ordinary exits collapses spawn \
+absence, crash, kill, timeout, overflow, and nonzero exit into unusable \
+control flow. Raw outcome data plus explicit policy keeps domain \
+interpretation with the caller while preserving retry and debugging evidence."""
 date = "2026-07-31"
 
 [[contracts]]

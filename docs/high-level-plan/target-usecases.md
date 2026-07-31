@@ -6,7 +6,8 @@
 - **Trusted payload** — content we authored or pinned (first-party code, known tools with first-party arguments). Failures are bugs, not adversarial behavior.
 - **Untrusted payload** — content from outside our control, above all model-generated: generated source, compiled artifacts of it, model-authored prompts or commands. Assumed arbitrary; runs only under an explicitly declared containment profile.
 - **Inherited state** — what a child process receives automatically from its parent: environment variables (and any credentials in them), working directory, open file descriptors. Inheritance is never the default; it is always an explicit grant.
-- **Environment passthrough** — an explicit grant of parent environment to the child, named-variable or overlay; the only route by which inherited environment reaches a child. An overlay grant may carry named exclusions, verified absent before spawn.
+- **Environment passthrough** — the complete declaration of the environment visible to a child: none, named parent variables, a fixed replacement, or the parent environment overlaid with additions and named exclusions. It is the only route by which environment reaches a child; parent-derived values are frozen at declaration construction, and exclusions are verified absent before spawn.
+- **Scratch workspace** — an executor-owned working directory dedicated to one run and used as its default cwd, isolated from concurrent and prior runs. Distinct from caller-owned artifact paths and an explicitly granted cwd; its filesystem location and backing mechanism are implementation details.
 - **Containment** — the declared restrictions on what a payload can reach (filesystem, network, processes, resources): a spectrum from bare process boundary to full sandbox, always stated, never implied.
 - **Containment profile** — the complete declared containment for a run: per-axis reach grants, resource backing, and the enforcement's known limits. A named, reusable object independent of the mechanism that enforces it and of the lifetime it wraps.
 - **Call-scoped** — the child's entire lifetime, spawn through reap, falls within a single executor call. Contrast: supervised long-lived processes, which outlive the call.
@@ -15,13 +16,16 @@
 - **Slot** — a supervised child's declared logical position (gpu 3, worker 1): stable across replacements while process identity changes.
 - **Fleet** — a set of supervised children declared as one slot map and operated on by collective verbs (spawn, drain, stop); the supervised analogue of a batch.
 - **Reap** — collect a dead child's exit status so it cannot linger as a zombie.
+- **Runtime** — the declared interpreter or execution machinery and importable package set that give a payload its execution semantics. The payload is the content; the runtime executes or interprets it. Distinct from containment, which restricts what the execution may reach.
 - **Hermetic** — no undeclared inputs: the runtime includes only what was declared. Distinct from containment (restricting what a payload can reach) and from POSIX session isolation (process-group lifecycle).
 - **Budgeted** — a resource axis is budgeted or visibly unbudgeted; there is no unstated third case. Every budget in force is visible, finite, and attributable to who declared it, and exceeding one is a distinguishable outcome, never silent. Per-axis names (deadline, output cap, …) refer to a single budget; the axes and default rules live in the Budgets section. "Bounded" is not a synonym.
+- **Executor self-budget** — a built-in finite bound on the executor's own potentially blocking operations or observability work, such as startup, termination, joining, narration, and recording. It protects the caller from stuck executor machinery and is independent of caller-declared workload budgets.
 - **Interior default** — a default budget set below machine scale without derivation from the workload or a real downstream constraint: the Budgets section's central prohibition.
 - **Sharing boundary** — the declared dimension crossing at which children are shared versus refreshed: the batch's central design decision, and the boundary containment setup amortizes over.
 - **Warm child** — a child reused across work items inside a declared sharing boundary rather than respawned per item.
 - **Group-targeted** — a lifecycle action addressed to the child's entire process group or tree. Its opposite, leader-only, signals just the direct child — which is how survivors happen.
-- **Collapsed attribution** — the antipattern of folding distinct failure kinds (absence, timeout, crash, nonzero exit) into one sentinel value, losing the attribution the executor owes.
+- **Collapsed attribution** — the antipattern of folding distinct failure kinds (spawn absence, timeout, crash, nonzero exit) into one sentinel value, losing the attribution the executor owes.
+- **Spawn absence** — the recognized spawn outcome in which no child starts because the spawn attempt reports ENOENT, including a missing executable or missing shebang interpreter. Excludes other spawn errors and pre-spawn caller validation; its persisted attribution literal is `absence`.
 - **Captured** — output buffered by the executor and returned as part of the result at exit.
 - **Streamed** — output delivered to the calling code incrementally as it is produced; still budgeted.
 - **Spooled** — output written directly to a caller-designated file as it is produced: the disk-backed delivery mode that makes permissive output budgets cheap, and the natural mode for long-lived children.
@@ -31,7 +35,7 @@
 - **Executor** — our machinery around the payload, whichever side of the process boundary it runs on: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
 - **Run result** — the structured record of a completed run: exit status, delivered output, and measurements (duration, budget consumption). Exists whenever the child ran, however it exited; executor failure is precisely the case where no run result exists.
 - **Run record** — the durable twin of the run result: persisted while the run is live, kept regardless of outcome, surviving the process that made it.
-- **Attribution** — the determination of which party a failure belongs to: payload, executor (driver included), channel, budget, machine, or absence (the program was never there to run). Every failure carries exactly one. A channel claim requires evidence; unknown defaults to executor, never to payload — the payload is never blamed by elimination.
+- **Attribution** — the determination of which party a failure belongs to: payload, executor (driver included), channel, budget, machine, or spawn absence (the program was never there to run). Every failure carries exactly one. A channel claim requires evidence; unknown defaults to executor, never to payload — the payload is never blamed by elimination.
 - **Channel** — the mechanism carrying bytes and enforcement between executor and payload: pipes, container daemons, sandbox runtimes, wired-in services. Channel failures are the retriable class — neither payload misbehavior nor executor bug.
 - **Exit policy** — the caller-declared mapping from exit status to success, failure, or domain data. The default policy is report-only.
 - **Dimension** — one direction of a batch cross-product (candidates, tasks, cases): results are indexed by dimensions and failure scopes bind to them. Distinct from budget axes (resource kinds) and from reach axes (containment grant directions).
@@ -205,7 +209,7 @@ nothing, in any use case, is ever interpreted by a shell.
    - No wedging on the executor's pipes — input feeding and output draining are concurrent whenever both are live; a caller can never deadlock a run through the executor's own plumbing.
    - No survivors — when a call-scoped run ends, by any path, the child's entire process tree is gone before the call returns; supervised children get the same guarantee through deliberate shutdown (use case 6).
 2. **Untrusted command, call-scoped** — same, argv-general: compiled artifacts of generated code, headless agent CLIs.
-   - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
+   - Spawn absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
    - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible; overlay grants may carry named exclusions, verified absent before spawn.
    - Concurrent runs never collide — each run works in its own scratch workspace by default; shared assets are read-only views, never shared mutable state.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
@@ -227,7 +231,7 @@ nothing, in any use case, is ever interpreted by a shell.
 4. **Trusted tool invocation** — hardened calls to known programs (git, uv, linters, docker) with the lifecycle rigor ad-hoc call sites never have.
    - Stdio passthrough is first-class — streaming a trusted tool's output to the operator is a supported mode, not a reason to bypass the executor.
    - Outcomes are data, not control flow — a completed run yields a run result; exceptions are reserved for executor failure, never for a tool's exit status.
-   - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
+   - Spawn absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
    - Exit interpretation is caller policy — the executor reports raw exit status; what counts as failure is declared per call, never assumed.
    - Budget discipline applies — trusted tools hang and flood too; every call's budgets are declared or visibly absent, never unstated.
    - Multi-call aggregation is a supported shape — many trusted-tool calls with per-call durable artifacts and non-fail-fast status aggregation (the pre-check pattern), not a reason to bypass the executor for shell.
@@ -243,7 +247,7 @@ nothing, in any use case, is ever interpreted by a shell.
 6. **Supervised long-lived processes** — children that outlive the call (agent servers, stdio RPC); a fully targeted use case with its own distinct set of concerns (liveness, restart, streaming I/O, reaping across calls), designed as its own contract — never a mode of the call-scoped runners.
    - Supervised, never orphaned — every child has an accountable owner; spawn-and-forget with nobody responsible for observing exit and reaping does not exist.
    - Exit is an observed event — child death is detected and surfaced promptly with attribution (crash vs clean exit vs killed), not discovered as a broken pipe on next use.
-   - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
+   - Spawn absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
    - Liveness is verified identity, not a pid probe — "still running" means verified to be the child we spawned, so pid reuse cannot impersonate a dead child.
    - Shutdown is deliberate and complete — stop means the whole process tree terminated, escalated, and reaped within a budget, with the same rigor as call-scoped teardown.
    - Drain is distinct from stop — a supervisor can stop accepting work and let in-flight work finish; abandoning paid-for work is never the only shutdown. Drain carries its own budget: exhaustion escalates drain to stop, with the truncation recorded and attributed.

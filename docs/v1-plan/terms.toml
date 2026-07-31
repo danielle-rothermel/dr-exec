@@ -35,3 +35,44 @@ in every run record for cache keys and provenance. Production and fake \
 executors have distinct identities; executor identity is independent of \
 callable object identity and is not runtime identity, which describes the \
 platform and interpreter environment."""
+
+[[terms]]
+name = "batch request"
+definition = """
+The v1 declaration of one flat item list, its caller-supplied driver body and \
+item schema, and the budgets governing their execution in one warm child. \
+Items inside one batch request share that child; parent-side fan-out creates \
+separate batch requests at each dimension boundary where the child is \
+refreshed."""
+
+[[terms]]
+name = "batch protocol"
+definition = """
+The v1 child-to-parent NDJSON wire contract for a batch request: one initial \
+prelude carrying the batch request identity, one result line per item as it \
+completes, and one terminal completion line when the child finishes on its own \
+terms. Its incremental shape preserves already delivered item results after a \
+later child failure or truncation."""
+
+[[terms]]
+name = "batch protocol channel"
+definition = """
+The driver-owned byte channel that carries the batch protocol separately from \
+payload output. In v1 it is protected protocol stdout with its own declared \
+budget, so payload output cannot consume the protocol budget or invalidate \
+completed item results."""
+
+[[terms]]
+name = "batch request identity"
+definition = """
+The item ids and configuration digest that identify one batch request, echoed \
+in the batch protocol prelude before any item result is trusted. It binds the \
+child's incremental result stream to the exact request the parent issued."""
+
+[[terms]]
+name = "real-engine oracle test"
+definition = """
+A consumer test whose expected meaning depends on genuinely executing a \
+payload through the production engine, such as a parity suite or driver-body \
+test. It uses the real engine rather than `FakeExecutor`, because scripting \
+the execution result would assume the behavior the test exists to establish."""

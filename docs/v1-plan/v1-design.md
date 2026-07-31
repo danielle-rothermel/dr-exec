@@ -65,8 +65,8 @@ point routes through it.
   no NULs); nothing is ever interpreted by a shell.
 - Lifecycle: fresh session per spawn; group-targeted teardown on every
   exit path with a completion-race-safe kill, escalation, and reap inside
-  the termination self-budget — the run's process group is gone before
-  the call returns. The one residual, declared as a limit of
+  the executor self-budget for termination — the run's process group is
+  gone before the call returns. The one residual, declared as a limit of
   `PROCESS_BOUNDARY_ONLY` (below) rather than left silent: a descendant
   that itself calls `setsid`/`start_new_session` after the leader exits
   reparents to init and leaves the group, so group teardown cannot reach
@@ -134,24 +134,25 @@ edit that happens to pass tests.
   executor-inflicted `-SIGKILL` can never masquerade as a payload crash.
 - Thread-safe, duration-bounded calls — the engine is safe under
   concurrent calls from one process, and every call's wall time is
-  bounded by the declared deadline plus the termination and join
-  self-budgets. Callers may hold leases and heartbeats around calls.
+  bounded by the declared deadline plus the executor self-budgets for
+  termination and joining. Callers may hold leases and heartbeats around
+  calls.
 - Descriptor table — the child starts with exactly file descriptors 0,
   1, 2 (the run's pipes); the executor's own descriptors (records,
   scratch, narration) are never inheritable, so `os.dup(1)` in a
   payload deterministically returns 3. Anti-spoofing protocols count on
   this; it is golden-tested with a descriptor-probe child.
-- Absence and spawn-errno rules — argv[0] is resolved execvp-style
+- Spawn absence and spawn-errno rules — argv[0] is resolved execvp-style
   against the *granted* environment's `PATH` (with no `PATH` granted,
   only absolute argv[0] resolves; a relative argv[0] under `none()` is
-  a pre-spawn caller error). Absence attribution is assigned exactly on
-  ENOENT from the spawn attempt; any advisory pre-check never changes
-  the outcome. Every other spawn errno (EACCES, ENOEXEC, …) lands as
-  machine attribution with the errno preserved — distinguishable, per
-  the collapsed-attribution prohibition.
+  a pre-spawn caller error). Spawn absence attribution is assigned
+  exactly on ENOENT from the spawn attempt; any advisory pre-check never
+  changes the outcome. Every other spawn errno (EACCES, ENOEXEC, …)
+  lands as machine attribution with the errno preserved —
+  distinguishable, per the collapsed-attribution prohibition.
 - Attribution precedence — exactly one attribution, decided once after
-  teardown from recorded enforcement flags, in pinned order: absence,
-  then output budget, then wall-clock budget, then exit-status
+  teardown from recorded enforcement flags, in pinned order: spawn
+  absence, then output budget, then wall-clock budget, then exit-status
   interpretation. A recorded violation wins over a clean exit that
   raced it (a child that flooded past a `FAIL` bound and exited 0
   before the kill landed is still a budget outcome), and an overflow
@@ -184,12 +185,13 @@ process or persistence boundary is a serialization model.
   a declared budget or the explicit `UNBUDGETED` sentinel; there is no
   unset state. The output budget is a single bound shared across stdout
   and stderr (a deliberate shape: it bounds the executor's total capture
-  memory, and a noisy stderr consuming the protocol channel's budget is a
-  visible, attributed outcome rather than a hidden coupling), denominated
-  in bytes on the raw streams before decoding. Output budgets carry a
-  caller-declared output overflow policy: `FAIL` (the run is killed and
-  the outcome attributed to the budget; output captured so far is
-  retained and marked truncated — diagnostics are never discarded) or
+  memory, and a noisy stderr consuming a plain run's shared output budget
+  is a visible, attributed outcome rather than a hidden coupling),
+  denominated in bytes on the raw streams before decoding. Output budgets
+  carry a caller-declared output overflow policy: `FAIL` (the run is
+  killed and the outcome attributed to the budget; output captured so
+  far is retained and marked truncated — diagnostics are never
+  discarded) or
   `MARKED_TRUNCATION` (the run continues to completion; capture stops at
   the bound and the truncation is marked). Under `MARKED_TRUNCATION` the
   executor keeps draining both streams to EOF and discards bytes past
@@ -200,8 +202,8 @@ process or persistence boundary is a serialization model.
   policy a consumer branches on the outcome before parsing captured
   output, so truncation can never masquerade as a protocol violation.
   Input budgets are enforced before spawn (a caller error, never a
-  wasted spawn). Termination and startup self-budgets have built-in
-  defaults and are not caller-facing in v1.
+  wasted spawn). Executor self-budgets for termination and startup have
+  built-in defaults and are not caller-facing in v1.
 - `EnvironmentGrant` — declares environment passthrough as `none()`
   (default), `named(vars)` (listed parent variables), `fixed(mapping)`
   (a literal replacement environment; nothing is read from the parent
@@ -244,8 +246,8 @@ break under concurrent callers in one process).
 - `run_tool(command, *, budgets, records, input_text="",
   environment=EnvironmentGrant.none(), exit_policy=REPORT_ONLY)
   -> RunResult` — trusted payloads: known programs with first-party
-  arguments, including stdin-fed tools. Absence (unresolvable program)
-  is a distinct outcome in the result, not a start failure.
+  arguments, including stdin-fed tools. Spawn absence (unresolvable
+  program) is a distinct outcome in the result, not a start failure.
 - `run_untrusted_python(source, *, profile, budgets, records,
   runtime=HERMETIC, input_text="",
   environment=EnvironmentGrant.none(), exit_policy=REPORT_ONLY)
@@ -260,8 +262,8 @@ break under concurrent callers in one process).
   exit_policy=REPORT_ONLY) -> RunResult` — the argv-general untrusted
   form (use case 2): compiled artifacts of generated code, agent CLIs
   driven by model-authored prompts. Same engine, same invariants as
-  `run_tool`, plus the undefaultable `profile` parameter and absence as
-  a distinct outcome.
+  `run_tool`, plus the undefaultable `profile` parameter and spawn
+  absence as a distinct outcome.
 
 Outcomes are data: every entry point returns a `RunResult` for every run
 that spawned, including budget violations and signal deaths. Exceptions
@@ -278,12 +280,12 @@ dr-code's batch_runner currently hand-rolls).
   signal values, captured stdout/stderr with any truncation marked as
   metadata (never in-band), measurements (duration, budget consumption),
   and an `Attribution` field: payload, executor, channel, budget,
-  machine, or absence. Exactly one. Attribution values are a pinned
-  `StrEnum` whose literals are persisted-format strings (consumers write
-  them into durable artifacts and cache keys), golden-tested per the
-  wire-format rule. A budget attribution names the violated axis
-  (wall-clock, output, input) — three-way discrimination is data, never
-  exception type.
+  machine, or spawn absence (`absence` in the persisted enum). Exactly
+  one. Attribution values are a pinned `StrEnum` whose literals are
+  persisted-format strings (consumers write them into durable artifacts
+  and cache keys), golden-tested per the wire-format rule. A budget
+  attribution names the violated axis (wall-clock, output, input) —
+  three-way discrimination is data, never exception type.
 - `RunRecord` (serialized) — the durable twin: invocation (argv or
   source digest *and* input digest — a trusted driver over untrusted
   stdin is the supported use-case-3 shape, and the record identifies
@@ -339,23 +341,23 @@ obligations its ancestor lacks.
   `BatchRequest`); an opaque per-item payload; a caller-supplied driver
   body plus the item schema. Budgets cross the boundary as data: the
   child rehydrates the same declared contract object the caller wrote.
-- Wire protocol (child → parent): newline-delimited JSON, pinned at the
-  same fidelity as the record schema (exact line-shape key literals,
-  golden-tested). The driver's *first* protocol line is a prelude that
-  echoes the request identity (item ids, config digest — SHA-256 over
-  canonical sorted-key UTF-8 JSON, the canonicalization pinned), so
-  results are trustable incrementally and a later truncation or death
-  can never retroactively invalidate results already delivered. Then
-  one result line *per item as it completes* — a result once produced
-  is never lost — and a terminal completion line signaling the child
-  finished on its own terms.
-- Protocol channel budget — the driver's protocol stdout carries its
-  own declared contract budget (per-item result size, prelude/terminal
-  size), separate from the payload-stream output budget that bounds
-  payload stderr. A payload that floods its own streams can therefore
-  never consume the protocol channel's budget and void completed
-  results — the noisy-payload case is the common case for generated
-  code, and it costs only the noisy items, never the batch.
+- Batch protocol wire format (child → parent): newline-delimited JSON,
+  pinned at the same fidelity as the record schema (exact line-shape key
+  literals, golden-tested). The driver's *first* protocol line is a
+  prelude that echoes the batch request identity (item ids, config digest
+  — SHA-256 over canonical sorted-key UTF-8 JSON, the canonicalization
+  pinned), so results are trustable incrementally and a later truncation
+  or death can never retroactively invalidate results already delivered.
+  Then one result line *per item as it completes* — a result once
+  produced is never lost — and a terminal completion line signaling the
+  child finished on its own terms.
+- Batch protocol channel budget — the driver's protocol stdout carries
+  its own declared contract budget (per-item result size,
+  prelude/terminal size), separate from the payload-stream output budget
+  that bounds payload stderr. A payload that floods its own streams can
+  therefore never consume the batch protocol channel's budget and void
+  completed results — the noisy-payload case is the common case for
+  generated code, and it costs only the noisy items, never the batch.
 - Driver kit — the executor's agent inside the child: protocol-stdout
   protection (private handle captured before `sys.stdout` reassignment;
   the known fd-level hole is documented in the profile's limits),
@@ -398,12 +400,13 @@ obligations its ancestor lacks.
   and budget enforcement are the engine suite's job, seeded by porting
   dr-code's `os.killpg` fault-injection tests (the reap-race coverage)
   and the real-descendant liveness tests (grandchild observably dead
-  within the termination self-budget on the deadline, overflow, and
-  normal-exit paths) into this repo. Consumer *oracle* tests — parity
-  suites and driver-body tests whose meaning depends on genuinely
-  executing a payload — are a sanctioned real-engine use, run with
-  `Records.none()` and quiet narration; the fake is for logic tests,
-  never a mandate to make oracle tests tautological.
+  within the executor self-budget for termination on the deadline,
+  overflow, and normal-exit paths) into this repo. Consumer real-engine
+  oracle tests — parity suites and driver-body tests whose meaning
+  depends on genuinely executing a payload — are a sanctioned
+  real-engine use, run with `Records.none()` and quiet narration; the
+  fake is for logic tests, never a mandate to make real-engine oracle
+  tests tautological.
 
 ## Packaging and the dr-code cutover
 
