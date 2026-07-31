@@ -5,8 +5,10 @@ section per repo, one subsection per implementation. Companion to
 `current-uses.md` — that doc records the needs dr-exec must serve; this one
 records the mechanisms that exist today (anatomy, notable properties,
 weaknesses) so design can mine prior art deliberately, including from
-implementations that are clearly bad. Repos ordered by most recent PR
-activity.
+implementations that are clearly bad. Every filled section pulls out four
+categories for cross-implementation comparison — Budget axes,
+Observability, Lifecycle, Attribution — plus two only where they exist:
+Testing seam and Amortization. Repos ordered by most recent PR activity.
 
 ## dr-code
 
@@ -20,19 +22,9 @@ activity.
 sequence, no NULs, never a shell); environment inherited (`None`) or full
 validated replacement; `Popen` with `start_new_session=True` plus three
 daemon IPC threads (stdin writer, two bounded stream readers sharing a
-lock and overflow event); a monotonic-deadline poll loop; on every exit
-path `os.killpg(SIGKILL)` with a completion-race retry after reaping the
-leader. Typed errors: `SubprocessError` → `Timeout` / `OutputLimit` /
-`Infrastructure` (→ `Start`); nonzero exit never raises — the raw
-returncode (including negative signal values) returns in a frozen
-`SubprocessCompletedProcess(returncode, stdout, stderr)`; text-only, UTF-8
-decode with `errors="replace"`. Injection seam: `PythonSubprocessRunner`
-Protocol — with two near-identical ~25-line test doubles at
-`tests/metrics/helpers.py:153` and
-`tests/humaneval/test_humaneval_primitives.py:167` (unbounded, no group
-kill). Notable properties: the only fleet implementation combining session
-isolation, whole-group kill, and a bounded termination wait; the
-completion-race retry on group signaling. Weaknesses: no cwd, env overlay,
+lock and overflow event); a monotonic-deadline poll loop; text-only, UTF-8
+decode with `errors="replace"`; results in a frozen
+`SubprocessCompletedProcess(returncode, stdout, stderr)`. Weaknesses: no cwd, env overlay,
 bytes mode, per-stream caps, truncate mode, streaming or passthrough,
 optional stdin, or absence pre-check (a missing program surfaces as
 `SubprocessStartError`).
@@ -55,16 +47,31 @@ record; the run result is in-memory only and dies with the caller. Channel
 separation is trivially safe (the executor emits nothing). A run that hangs
 inside its deadline is indistinguishable from one making progress.
 
+Lifecycle — the fleet's reference: fresh session per spawn
+(`start_new_session=True`); on every exit path `os.killpg(SIGKILL)` with a
+completion-race retry after reaping the leader; 5 s bounded termination
+wait and 1 s bounded IPC-thread joins. The only fleet implementation
+combining session isolation, whole-group kill, and a bounded wait —
+no-survivors compliant.
+
+Attribution — typed tree `SubprocessError` → `Timeout` / `OutputLimit` /
+`Infrastructure` (→ `Start`): bounds and infrastructure raise; outcomes
+are data — nonzero exit never raises, and the raw returncode including
+negative signal values is returned for the caller to interpret.
+
+Testing seam — `PythonSubprocessRunner` Protocol, with two near-identical
+~25-line doubles at `tests/metrics/helpers.py:153` and
+`tests/humaneval/test_humaneval_primitives.py:167` (unbounded, no group
+kill): the double-divergence problem a first-class fake story must
+prevent.
+
 ### HumanEval batch protocol machinery
 
 `src/dr_code/humaneval/batch_runner.py` plus `batch_runner_script.py` — the
 adapter/driver pair over the primitive. Parent side: builds a JSON payload
-(candidate code, support code, checks) for stdin and interprets completion
-through the protocol: `CANDIDATE_KILL_RETURNCODES` ({-SIGKILL, -SIGSEGV}) →
-candidate-attributed error; timeout → every case TIMEOUT; output limit →
-every case ERROR; other nonzero exit, JSON parse failure, shape violation,
-or unknown/duplicate case IDs → `EvaluationHarnessError` carrying partial
-results. Child side: shipped as resource text and never imported; reads one
+(candidate code, support code, checks) for stdin and validates the
+per-case results against expected case IDs. Child side: shipped as
+resource text and never imported; reads one
 JSON value from stdin; reassigns `sys.stdout` (and `__stdout__`) to stderr
 while keeping a private handle for protocol output, so candidate prints
 cannot corrupt the protocol; per-case `exec` with clipped tracebacks;
@@ -83,7 +90,22 @@ properties: channel separation is the design's centerpiece (the child
 reassigns `sys.stdout` to stderr so candidate prints cannot corrupt
 protocol output), and per-case `elapsed_seconds` measurements plus
 partial-results-through-exceptions preserve what happened in-memory even on
-failure. Nothing survives the calling process.
+failure. Nothing survives the calling process — and the child emits all
+results at exit, so a late-item crash loses the batch: noncompliant with
+the results-leave-the-child-incrementally behavior.
+
+Lifecycle — delegated wholesale to the primitive.
+
+Attribution — the fleet's most developed: `CANDIDATE_KILL_RETURNCODES`
+({-SIGKILL, -SIGSEGV}) → candidate-attributed error; timeout → every case
+TIMEOUT; output limit → every case ERROR; other nonzero exit, JSON parse
+failure, shape violation, or unknown/duplicate case IDs →
+`EvaluationHarnessError` carrying partial results. The working prototype
+of the driver trust split and item accounting.
+
+Amortization — one child per (candidate, task), shared across that task's
+cases: an existing declared sharing boundary, with interpreter startup
+amortized over the case dimension only.
 
 ## whetstone-ai
 
@@ -103,10 +125,7 @@ a JSONL event stream too noisy to parse), and `TimeoutExpired` is caught
 into a typed `CodexInvocation(text="", returncode=-1, timed_out=True)`
 rather than raised. Notable properties: the file-delivered result as an
 early spill-to-disk instance; the proposer's never-raises timeout envelope;
-sandbox profile pinned in argv (`-s read-only`). Testing seam: no
-injection — tests fake the codex CLI itself with `#!/bin/sh` stub scripts
-on PATH, including a `sleep 5` stub to force the timeout path
-(`tests/optimization/test_codex_proposer.py`).
+sandbox profile pinned in argv (`-s read-only`).
 
 Budget axes — wall-clock only, leader-only enforcement:
 
@@ -123,6 +142,19 @@ narration that the runner captures but never consumes during the run: it is
 inspected only post-hoc, sliced to the last 2000 chars, so in-flight
 progress is effectively discarded. No executor narration, no durable
 record (the proposer's result tmpfile is transient).
+
+Lifecycle — none beyond `subprocess.run` defaults: leader-only timeout
+kill, no group, no escalation, no reap concern.
+
+Attribution — split between the two shapes: the runner maps nonzero exit
+to `OpaqueStepError` (exception-as-outcome); the proposer maps timeout to
+a typed never-raises `CodexInvocation(timed_out=True)`; both pre-check
+absence with `shutil.which`.
+
+Testing seam — no injection: tests fake the codex CLI itself with
+`#!/bin/sh` stub scripts on PATH, including a `sleep 5` stub to force the
+timeout path (`tests/optimization/test_codex_proposer.py`) — a third fake
+pattern alongside Protocol injection and monkeypatching.
 
 ### HumanEval oracle driver (broken)
 
@@ -146,13 +178,18 @@ Observability — none: the single-line JSON response is the only artifact,
 and the breakage itself demonstrates the cost — nothing recorded the drift
 until the call site failed.
 
+Lifecycle and attribution — moot while broken; the intended design
+inherits both from the dr-code primitive.
+
 ### Docker availability probe
 
 `src/whetstone/runner/execution_mode.py:106` — `docker info` in bytes mode,
 `shutil.which` pre-check, returncode collapsed to a boolean. Budget axes:
 wall-clock 10 s; nothing else applicable. Observability: the boolean
 collapse discards all diagnostic detail — a missing daemon, a permission
-error, and a hung docker all report identically.
+error, and a hung docker all report identically. Lifecycle:
+`subprocess.run` defaults. Attribution: the boolean collapse, nothing
+finer.
 
 ## whetstone-envs
 
@@ -177,10 +214,8 @@ allowlisted type graph (nesting depth 32) with results pickled before
 `queue.put` so serialization failures surface synchronously; an explicit
 `trust_untrusted_code` gate raising `SafeExecTrustRequiredError`; a
 persistent reusable worker with its own startup timeout; spawn-bootstrap
-diagnostics; six-type error taxonomy. Weaknesses: `_set_process_group`
-swallows `os.setsid()` failures so group kill silently degrades to
-leader-only; `_terminate_process_tree` swallows signaling failures; no
-stdin path (inputs travel as pickled args, unbounded). The AST layer is
+diagnostics; six-type error taxonomy. Weaknesses: no stdin path (inputs
+travel as pickled args, unbounded). The AST layer is
 shape-policing rather than reach-restriction: it forbids what generated
 code may *look like* (no classes, no globals), a posture the target
 principles reject for research code.
@@ -200,6 +235,20 @@ Budget axes:
 Observability — no capture of worker output at all (accidental passthrough
 to the parent's fds, not a chosen delivery mode); spawn-bootstrap
 diagnostics give good startup-failure attribution; nothing durable.
+
+Lifecycle — TERM→KILL escalation with 0.2 s joins, but degradable:
+`_set_process_group` swallows `os.setsid()` failures so group kill
+silently falls back to leader-only, and `_terminate_process_tree` swallows
+signaling failures — escalation that cannot prove it happened.
+`atexit`/`__del__` cleanup for persistent workers.
+
+Attribution — six-type error taxonomy; the `trust_untrusted_code` gate
+fails as its own error class; spawn-bootstrap diagnostics attribute
+startup failures precisely. No exit-code attribution of payload kills.
+
+Amortization — `_PersistentWorker`/`_IsolatedFunction` reuse one
+containment-bearing worker across calls, with a separate startup budget:
+the fleet's clearest existing warm-worker amortization.
 
 ## dr-platform
 
@@ -249,6 +298,16 @@ envelope is diagnosis-friendly: `tool_found`, `timed_out`, `duration_s`,
 and timeout-recovered partial output all arrive as data, so a failed run
 explains itself in-memory. Nothing persists.
 
+Lifecycle — `subprocess.run` defaults: leader-only timeout kill, no group
+handling.
+
+Attribution — the never-raises envelope is the attribution story: absence
+(`tool_found`), timeout (`timed_out`), and exit status all data, nothing
+exceptional. No payload-vs-executor split beyond that.
+
+Testing seam — constructed `SubprocessRunner` instances passed to
+consumers: configuration-as-injection, no monkeypatching.
+
 ## symphony-lite
 
 ## dr-notion
@@ -281,6 +340,17 @@ Observability — crash diagnosis only (exit code plus stderr on failure);
 no narration, no durable record; silent restart of a dead sandbox is
 exactly the silent-replacement pattern the supervised behaviors forbid.
 
+Lifecycle — persistent child with restart-on-death (`_ensure_deno_process`
+polls before each use); no kill path, no escalation, no reap of the
+replaced process.
+
+Attribution — crash surfaces exit code plus stderr; in-sandbox permission
+denials arrive as Deno errors through the RPC channel — reach violations
+attributed by the mechanism itself.
+
+Amortization — the design's purpose: Deno+Pyodide startup (seconds) paid
+once, executions (milliseconds) amortized across the persistent sandbox.
+
 ## llmflow
 
 ### Bash tool executor (TypeScript)
@@ -307,6 +377,12 @@ record in the executor itself; approval-before-execution surfaces each
 command to the operator ahead of time, which is a form of pre-execution
 visibility.
 
+Lifecycle — SIGTERM → 1 s → SIGKILL, leader only: escalation present,
+group absent.
+
+Attribution — output and exit code returned to the model as data; timeout
+distinguishable via the kill path; no finer taxonomy.
+
 ### Codex CLI transport (TypeScript)
 
 `packages/providers/src/codex.ts` — `spawn("codex", ["exec", "--json", ...,
@@ -322,6 +398,11 @@ Budget axes — wall-clock only:
 Observability — `--json` gives a structured event stream, but it is
 accumulated rather than surfaced live; no narration, no durable record.
 
+Lifecycle — SIGTERM only, leader only: no escalation, no group.
+
+Attribution — timeout and AbortSignal cancellation distinguishable from
+exit; otherwise raw.
+
 ## codearc
 
 ### Git fixture and query helpers
@@ -334,7 +415,10 @@ to build test fixture repos and query them; plus a `run_git` helper
 interpreted as "unset" — returncode-and-empty-output as data, a small
 exit-policy example. Production code executes nothing: mining goes through
 pydriller and libcst. Budget axes — none: no timeouts, no output bounds.
-Observability — none; nothing beyond `check=True` exceptions.
+Observability — none; nothing beyond `check=True` exceptions. Lifecycle —
+`subprocess.run` defaults. Attribution — raise-on-nonzero for fixtures;
+the config read's empty-stdout-as-unset is caller-side exit policy in
+miniature.
 
 ### Secret retrieval via gh
 
@@ -345,7 +429,8 @@ the faithful-record posture: output that is itself sensitive is a domain
 fact only the caller can know, so redaction is caller-side and
 post-capture; the executor records verbatim. (llmflow's in-flight
 `redactToken` is the fleet's one executor-side redaction instance — the
-approach dr-exec deliberately does not take.)
+approach dr-exec deliberately does not take.) Lifecycle and attribution —
+`check=True` defaults, nothing finer.
 
 ## dr-queues
 
@@ -370,6 +455,14 @@ all three stdio streams to DEVNULL, so a worker's entire life is invisible
 by construction; the startup `poll()` is the only progress signal that will
 ever exist. No narration, no record, nothing to consult when a worker
 dies.
+
+Lifecycle — spawn-only: `start_new_session` detaches the worker and then
+no kill, escalation, or reap path exists anywhere in the module — workers
+are orphaned by design the moment the spawner exits.
+
+Attribution — none: exit is never observed, so nothing is ever attributed.
+
+Testing seam — monkeypatched `Popen` in `tests/test_lifecycle.py`.
 
 ## marimo_utils
 
@@ -402,6 +495,18 @@ Budget axes — layered across three parties:
 Observability — error envelopes carry structured codes with a `retriable`
 flag (failure as diagnosable data); otherwise no narration or durable
 record at this layer.
+
+Lifecycle — delegated to the dr-docker adapter (leader-only, see there);
+inside the worker, per-item SIGALRM timers are the only lifecycle control.
+
+Attribution — three-way: the container gate refuses with its own error
+before execution; AST rejection is a pre-execution payload verdict; the
+adapter's error envelope translates to
+`CodeExecutionInfrastructureError` — executor-side by construction.
+
+Amortization — one container per batch with per-item timers inside it: a
+declared sharing boundary (container at the batch dimension, deadline at
+the item dimension).
 
 ## dr_exp
 
@@ -446,6 +551,23 @@ spawn, restart, kill, and signal logged. One durable-record flaw: the
 status file is deleted on clean exit, so the final heartbeat survives only
 crashes.
 
+Lifecycle — `setsid` process groups per worker; shutdown is group SIGTERM
+→ fixed 5 s sleep → group SIGKILL for survivors, with external signals
+routed into the same path; drain exists as a first-class mode
+(`finish_current`). Flaws: the grace period is a sleep, not a bounded
+wait, and kills are never followed by a reap.
+
+Attribution — worker exits recorded as `exited(returncode)` status
+strings; restart accounting per slot; error attribution is log-derived
+(the periodic error-marker grep) rather than protocol-level.
+
+Amortization — workers pull jobs from a shared queue, so process startup
+amortizes across all jobs a worker lives through: amortization at the
+worker dimension.
+
+Testing seam — `subprocess.run`/`Popen` mocked in
+`tests/integration/test_worker_launcher.py`.
+
 ### CLI self-invocation job submission
 
 `scripts/submission/*.py` (~a dozen sites) — job submission drives the
@@ -455,7 +577,8 @@ the process boundary substitutes for a library call, with string-parsing
 where a return value should be. No timeouts anywhere; mixed `check=`
 postures. Budget axes — none. Observability — captured output is consumed
 only for the parsed line; no narration or record beyond each script's own
-prints.
+prints. Lifecycle — `subprocess.run` defaults. Attribution — success
+determined by string-matching stdout; mixed `check=` postures.
 
 ## deconCNN
 
@@ -497,6 +620,17 @@ force, so a capped stream is never mistaken for a complete one. The
 cidfile is a durable artifact, but only for cleanup — no run record. A
 module logger exists; lifecycle narration is minimal.
 
+Lifecycle — split-brain: container-side teardown is the strength (cidfile
+tracked, `docker rm -f` in `finally`, CID validated) while client-side is
+weak (bare `proc.kill()` leader-only, no escalation, unbounded wait,
+writer thread joined without timeout).
+
+Attribution — `ErrorEnvelope(code, retriable)`: structured failure codes
+with retriability as data, the fleet's only retriability-aware taxonomy.
+
+Amortization — none: a cold container per call, seconds of setup however
+small the payload — the shape that motivated the amortization principle.
+
 ## dr-util
 
 ## parse_claude
@@ -524,7 +658,9 @@ Observability — inherited stdio makes live progress fully visible on the
 operator's terminal (stdio passthrough doing narration duty), and the
 snapshot name embeds `git describe` output — a durable provenance record
 of exactly what workspace state each cluster job ran from. Nothing records
-the execution itself.
+the execution itself. Lifecycle — `check_call` defaults; nothing outlives
+the call except the slurm job itself. Attribution —
+`CalledProcessError` or nothing.
 
 ### Job babysitting and coreutils-by-shell
 
@@ -542,7 +678,9 @@ Observability — the babysitter loops are themselves observers (their whole
 job is polling run state), but their own actions — checkpoint deletions,
 scancels, resubmissions — leave no record beyond their side effects, and
 the fire-and-forget `redis-server` has no narration, handle, or log
-destination at all.
+destination at all. Lifecycle — none: the redis child has no handle, no
+kill path, no reap; everything else is `check_output` defaults.
+Attribution — none; side effects are the only record.
 
 ## scripts
 
@@ -565,4 +703,5 @@ Observability — the repo's purpose is observability of cluster jobs
 (squeue polling, gnuplot renderings of run metrics), and submission parses
 and reports the job directory from slurm's stdout — a small durable
 pointer to where results will land. The execution mechanism itself adds no
-narration or record.
+narration or record. Lifecycle — `check_output` defaults throughout.
+Attribution — raise on nonzero plus parsed stdout; uniform.
