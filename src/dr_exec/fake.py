@@ -357,6 +357,7 @@ class FakeExecutor:
             budgets=budgets,
             records=records,
             runtime=runtime,
+            input_text=request.items_input_text(),
             environment=environment,
             exit_policy=exit_policy,
             stream_bounds=channel_bounds_for(request, budgets),
@@ -425,7 +426,9 @@ def _transcribed(request: BatchRequest, scripted: ScriptedBatch) -> RunResult:
 
     The protocol channel's byte count is the transcript's own, not the
     script's: the fake wrote those bytes, so it is the fake that reports
-    them. A script declares the *payload* stream's counts, which it owns.
+    them. The input byte count is the item payload the batch feeds as stdin —
+    also the fake's, since a batch's input *is* its items, not a script
+    axis. A script declares the *payload* stream's counts, which it owns.
     """
     lines = [json.dumps(request.prelude(), sort_keys=True, separators=(",", ":"))]
     for result in scripted.results:
@@ -460,6 +463,7 @@ def _transcribed(request: BatchRequest, scripted: ScriptedBatch) -> RunResult:
         )
     transcript = "".join(f"{line}\n" for line in lines)
     transcript_bytes = len(transcript.encode("utf-8"))
+    input_bytes = len(request.items_input_text().encode("utf-8"))
     return replace(
         scripted.run,
         stdout=transcript,
@@ -468,6 +472,7 @@ def _transcribed(request: BatchRequest, scripted: ScriptedBatch) -> RunResult:
             stdout_bytes_produced=max(
                 scripted.run.measurements.stdout_bytes_produced, transcript_bytes
             ),
+            input_bytes=input_bytes,
         ),
     )
 

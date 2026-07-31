@@ -85,6 +85,95 @@ class TestComposedSource:
         assert result.results[0].payload == payload
 
 
+class TestLargeBatchesCrossViaStdin:
+    def test_a_batch_far_past_the_source_bound_runs_end_to_end(
+        self, execute_batch: Callable[..., BatchResult]
+    ) -> None:
+        # 300 items each carrying ~1 KiB of payload is ~300 KiB of item data —
+        # over three times the source bound. Inlined in the driver source this
+        # was a DeclarationError before the child ever spawned; delivered on
+        # stdin it is bounded only by the input budget, so the real child
+        # sweeps every item.
+        blob = "x" * 1024
+        batch_items = tuple(
+            BatchItem(item_id=f"i{n}", payload={"blob": blob, "n": n})
+            for n in range(300)
+        )
+        assert (
+            len(_request(items=batch_items).items_input_text().encode("utf-8"))
+            > SOURCE_BOUND_BYTES
+        )
+
+        result = execute_batch(
+            "def run_item(item_id, payload):\n    return {'n': payload['n']}\n",
+            batch_items=batch_items,
+            channel_budget=ProtocolChannelBudget(),
+        )
+
+        assert result.completion_seen is True
+        assert result.complete is True
+        assert result.missing_item_ids == ()
+        assert len(result.results) == 300
+        assert result.results_by_item_id["i0"].payload == {"n": 0}
+        assert result.results_by_item_id["i299"].payload == {"n": 299}
+
+    def test_the_composed_source_is_independent_of_payload_size(self) -> None:
+        small = items("a", "b", payload={"k": 1})
+        large = items("a", "b", payload={"k": "x" * 100_000})
+
+        assert len(_request(items=small).driver_source().encode("utf-8")) == len(
+            _request(items=large).driver_source().encode("utf-8")
+        )
+
+    def test_the_composed_source_stays_under_the_bound_for_a_large_batch(
+        self,
+    ) -> None:
+        # Only the item-id list rides in the prelude the source binds; the
+        # payloads — the bulk of a real batch — cross on stdin, so even a
+        # 2000-item batch composes to a source far under the bound.
+        batch_items = items(*[f"item-{n:04d}" for n in range(2000)])
+
+        source_bytes = len(_request(items=batch_items).driver_source().encode("utf-8"))
+
+        assert source_bytes < SOURCE_BOUND_BYTES
+
+
+class TestInputBudgetBoundsTheBatch:
+    def test_an_over_input_budget_batch_is_a_clean_pre_spawn_declaration_error(
+        self,
+    ) -> None:
+        batch_items = tuple(
+            BatchItem(item_id=f"i{n}", payload={"blob": "y" * 512}) for n in range(100)
+        )
+        request = _request(items=batch_items)
+        input_bytes = len(request.items_input_text().encode("utf-8"))
+        budget = input_bytes // 2
+
+        with pytest.raises(DeclarationError, match="input budget"):
+            run_batch(
+                request,
+                profile=PROCESS_BOUNDARY_ONLY,
+                budgets=Budgets(wall_clock=5.0, input=budget),
+                records=Records.none(),
+            )
+
+    def test_a_batch_within_the_declared_input_budget_runs(
+        self, execute_batch: Callable[..., BatchResult]
+    ) -> None:
+        batch_items = items("a", "b", payload={"k": 1})
+        request = _request(items=batch_items)
+        input_bytes = len(request.items_input_text().encode("utf-8"))
+
+        result = execute_batch(
+            _ECHO_BODY,
+            batch_items=batch_items,
+            budgets=Budgets(wall_clock=5.0, input=input_bytes),
+        )
+
+        assert result.complete is True
+        assert [item.item_id for item in result.results] == ["a", "b"]
+
+
 class TestChannelBounds:
     def test_stdout_gets_the_channel_budget_and_stderr_the_run_output_budget(
         self,

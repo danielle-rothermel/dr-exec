@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-07-31 (batch item delivery)
+
+- Batch items now cross to the child as its stdin payload, not inlined
+  in the driver source. The composed driver program is delivered as one
+  argv-carried `-c` argument and validated against the 96 KiB source
+  bound (Linux `MAX_ARG_STRLEN`); binding every item's payload into that
+  source made a real batch — e.g. a HumanEval task with ~1000 candidate
+  cases — compose to hundreds of KiB and fail with a `DeclarationError`
+  before any child spawned, so the batch protocol could not carry its
+  actual load. Item data now rides through the input channel the
+  contract already provides: `run_batch` feeds the item array as the
+  run's `input_text`, the driver kit reads it whole from `sys.stdin`
+  (fd 0, separate from the fd-1 anti-spoofing capture, after the prelude
+  is emitted so identity always reaches the parent first), and batch
+  size is bounded by the declared input budget — machine-scale by
+  default, or the caller's declared input budget — never by the source
+  bound. An over-input-budget batch is a clean pre-spawn
+  `DeclarationError`. The wire shape of the protocol output lines is
+  unchanged; only the delivery channel for item input moved.
+
 ## 2026-07-31 (contract adjudication after review)
 
 - Narrowed the v1 "no survivors" pin to what `PROCESS_BOUNDARY_ONLY`

@@ -173,6 +173,11 @@ class BatchRequest:
     body reads it as ``_KIT_ITEM_SCHEMA`` and may validate its payloads
     against it, so the schema the caller declared is the schema the body
     checks.
+
+    Item data crosses as the child's stdin payload, not inlined in the driver
+    source: :meth:`items_input_text` renders the item array the parent feeds
+    as ``input_text``, so the child reads its items from stdin and the batch
+    size is bounded by the declared input budget, never by the source bound.
     """
 
     items: tuple[BatchItem, ...]
@@ -212,8 +217,32 @@ class BatchRequest:
             WireKey.CONFIG_DIGEST.value: self.config_digest(),
         }
 
+    def items_input_text(self) -> str:
+        """The item array the parent feeds as the child's stdin payload.
+
+        Each item is one wire object of its id and payload; the child reads
+        this whole array from ``sys.stdin`` and sweeps it. This is the batch's
+        stdin contract — the items *are* the input payload, bounded by the
+        declared input budget, so a batch never separately feeds stdin.
+        """
+        return json.dumps(
+            [
+                {
+                    WireKey.ITEM_ID.value: item.item_id,
+                    WireKey.PAYLOAD.value: item.payload,
+                }
+                for item in self.items
+            ],
+            separators=(",", ":"),
+        )
+
     def driver_source(self) -> str:
-        """The composed program: kit preamble, kit body, caller's body text."""
+        """The composed program: kit preamble, kit body, caller's body text.
+
+        The item data is not bound here — it crosses as stdin via
+        :meth:`items_input_text`, so this source is small and roughly constant
+        regardless of item count.
+        """
         return _compose_source(self)
 
 
@@ -289,6 +318,12 @@ def run_batch(
     the run — incremental *production* is what makes partials survive, and
     the kit flushes every line as it emits it.
 
+    The items cross to the child as its stdin payload (the input the child
+    reads whole and sweeps), bounded by the declared input budget. Because
+    input budgets are validated pre-spawn, a batch whose item data exceeds a
+    declared input budget is a clean :class:`~dr_exec.errors.DeclarationError`
+    caller error before any child exists, never a mid-run failure.
+
     Raises :class:`~dr_exec.errors.ProtocolFailure` when the transcript
     cannot be accounted for: a missing or mismatched prelude, a duplicate or
     unknown item id, or a shape-invalid line. The failure carries whatever
@@ -304,6 +339,7 @@ def run_batch(
             budgets=budgets,
             records=records,
             runtime=runtime,
+            input_text=request.items_input_text(),
             environment=environment,
             exit_policy=exit_policy,
             stream_bounds=channel_bounds_for(request, budgets),
@@ -489,22 +525,14 @@ def _compose_source(request: BatchRequest) -> str:
     The body arrives as a string constant the kit ``exec``s, so a syntax
     error in consumer domain code is a load-phase failure the kit fans out
     as one error result per item — never a spawn-time surprise.
+
+    Item data is *not* bound here: it crosses as the child's stdin payload
+    (see :meth:`BatchRequest.items_input_text`), so this source stays small
+    and its size is independent of the batch's item count.
     """
     bindings = {
         "_KIT_PRELUDE_JSON": json.dumps(
             json.dumps(request.prelude(), separators=(",", ":"), sort_keys=True)
-        ),
-        "_KIT_ITEMS_JSON": json.dumps(
-            json.dumps(
-                [
-                    {
-                        WireKey.ITEM_ID.value: item.item_id,
-                        WireKey.PAYLOAD.value: item.payload,
-                    }
-                    for item in request.items
-                ],
-                separators=(",", ":"),
-            )
         ),
         "_KIT_BODY_SOURCE": json.dumps(request.body_source),
         "_KIT_BODY_HOOK_NAME": json.dumps(BODY_HOOK_NAME),

@@ -155,6 +155,12 @@ discussion settles.
 
 ## Residual batch and fake details
 
+Batch items cross to the child as a whole-read JSON array on stdin, bounded by
+the declared input budget rather than embedded in the driver source. This keeps
+the composed source roughly constant in size and leaves batch size independent
+of the source/ARG_MAX bound; over-budget input is rejected with a pre-spawn
+`DeclarationError` before any child exists.
+
 The batch driver retains a private protocol-output handle before consumer code
 can replace `sys.stdout`; direct file-descriptor writes remain a declared hole
 of the process-boundary-only profile. The driver provides per-item hooks and

@@ -9,6 +9,11 @@ here exist to be read as text by :mod:`dr_exec.batch`.
 The body the composed program expects supplies ``run_item(item_id, payload)``
 returning a JSON-able mapping. Everything else — protocol handle capture,
 prelude emission, per-item failure capture, terminal line — is the kit's.
+
+The item list crosses the boundary as the child's stdin payload, not inlined
+in this source: the parent feeds the item array as ``input_text`` on the
+declaration, bounded by the declared input budget, so a real batch's item
+data never rides in the argv-carried source and never meets the source bound.
 """
 
 from __future__ import annotations
@@ -24,7 +29,6 @@ _sys.stdout = _sys.stderr
 _sys.__stdout__ = _sys.stderr
 
 _PRELUDE = _json.loads(_KIT_PRELUDE_JSON)
-_ITEMS = _json.loads(_KIT_ITEMS_JSON)
 
 
 def _kit_clip(text, limit):
@@ -53,6 +57,8 @@ def _kit_error_payload(text):
 
 
 _kit_emit(_PRELUDE)
+
+_ITEMS = _json.loads(_sys.stdin.read())
 
 try:
     _KIT_LOAD_ERROR = None
@@ -108,6 +114,12 @@ The private protocol handle is captured from ``os.dup(1)`` *before*
 and can never interleave with protocol lines. The fd-level hole — a payload
 writing to fd 1 directly — is a declared limit of the containment profile,
 not something the kit can close.
+
+The item list is read whole from ``sys.stdin`` (fd 0, separate from the
+protocol handle's fd-1 capture) as the JSON array the parent fed as the
+run's input payload — the prelude is still emitted first, before stdin is
+consulted, so request identity reaches the parent even if the item read
+faults.
 
 Every line is flushed as it is produced: a result once emitted survives any
 later death of the child.
