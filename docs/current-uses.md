@@ -11,56 +11,178 @@ recent PR activity.
 
 ## dr-code
 
+### HumanEval batch evaluation
+
+### Self-invocation test probes
+
+### Execution faking in tests
+
+### In-process syntax validation
+
+### Pre-check developer script
+
 ## whetstone-ai
+
+### Codex-driven optimization steps
+
+### HumanEval oracle scoring
+
+### Docker availability probing
 
 ## whetstone-envs
 
+### Parallel-safe vendored-generator invocation
+
 ## fchord
+
+### Sparse git docs pulling
+
+### Codex session scripts
 
 ## dotfiles
 
+### Git-based skill vendoring and merge
+
+### pi extension tool calls
+
 ## whetstone-viewer
+
+### Cross-repo data hydration
+
+### Formatting normalization of task code
+
+### Web API codegen
 
 ## genfxn
 
+### Generated-task validation
+
+### Cross-language parity verification
+
+### Generated-code formatting
+
+### Generated-code quality checks
+
 ## dr-platform
+
+### Crash-recovery boundary testing
 
 ## dr-graph
 
+### Import-hygiene probing
+
 ## dr-providers
+
+### Import-hygiene probing
+
+### Checked-in script loading
 
 ## dr-subs
 
+### Remote peer scanning over ssh
+
+### Host identity and reachability probes
+
 ## dr-diagram
+
+### Headless-browser rendering and capture
+
+### Python validator invocation
+
+### Batch codex runs
 
 ## unitbench
 
+### Sibling-repo schema and API codegen
+
+### Deploy-time dependency install
+
 ## nlae
+
+### Bulk artifact fetching
 
 ## dr-llm
 
+### Headless agent CLI transport
+
+### Dockerized service lifecycle
+
+### Database restore and sync streaming
+
+### Demo CLI self-invocation
+
 ## nl_latents
+
+### Containment verification tripwire
+
+### Provider worker fleets
+
+### Shell-config test oracles
 
 ## dr-cognee
 
+### GitHub docs mirroring
+
 ## symphony-lite
+
+### Detached agent-run supervision
+
+### Codex app-server RPC
+
+### Workspace git operations
 
 ## dr-notion
 
+### GitHub docs mirroring
+
 ## dr-dspy
+
+### HumanEval batch evaluation
+
+### Local model server management
+
+### Sandboxed interpreter execution
 
 ## codearc
 
+### Git fixture building and queries
+
+### GitHub stats collection
+
 ## marimo_utils
+
+### Tailwind CSS build
+
+### Pre-check developer script
 
 ## nl-code
 
+### Containerized generated-code evaluation
+
+### Test-suite self-invocation
+
 ## dr_exp
+
+### GPU worker fleet supervision
+
+### Slurm job submission
+
+### CLI self-invocation job management
 
 ## deconCNN
 
+### Sibling-script re-invocation
+
+### Cross-repo experiment management
+
 ## dr_gen
+
+### Parallel local training runs
 
 ## dr-util
 
+### Slurm cluster queries
+
 ## parse_claude
+
+### CLI end-to-end testing

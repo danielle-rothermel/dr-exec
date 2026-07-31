@@ -63,7 +63,12 @@ Testing seam — `PythonSubprocessRunner` Protocol, with two near-identical
 ~25-line doubles at `tests/metrics/helpers.py:153` and
 `tests/humaneval/test_humaneval_primitives.py:167` (unbounded, no group
 kill): the double-divergence problem a first-class fake story must
-prevent.
+prevent. A third fake shape (`_stub_runner`, fixed
+`SubprocessCompletedProcess`, no process) lives beside the doubles. The
+test suite is also the fleet's only lifecycle-fault-injection suite:
+`os.killpg` is monkeypatched to distinguish stale-group from live-group
+signal errors, pinning the reap-race semantics; env inheritance,
+replacement, and `-I` isolation each have a dedicated test.
 
 ### HumanEval batch protocol machinery
 
@@ -77,7 +82,16 @@ while keeping a private handle for protocol output, so candidate prints
 cannot corrupt the protocol; per-case `exec` with clipped tracebacks;
 load-phase failure emits error-for-every-case and exits 0. Notable
 properties: exit-code-based payload-versus-executor attribution;
-partial-results-through-exceptions; stdout-protocol protection.
+partial-results-through-exceptions; stdout-protocol protection — though
+the child's own docstring records the hole: direct file-descriptor writes
+can still reach the protocol stream. Child-side details the parent
+interpretation depends on: a three-tier exception taxonomy
+(`AssertionError` → failed, `BaseException` → error, metadata-collection
+failures degrade to clipped traceback strings without failing the case);
+`failure_metadata` *re-executes candidate code* once per failed case to
+collect actual/expected reprs — untrusted re-execution inside the timing
+window; load-phase failure fans out one error result per case and exits 0
+so item accounting survives total failure.
 
 Budget axes — inherits the primitive's budgets wholesale; adds one protocol
 budget:
@@ -109,66 +123,79 @@ amortized over the case dimension only.
 
 ## whetstone-ai
 
+Provenance: this repo was rebuilt into a `rebuild/*` branch stack; the
+code below lives on `archive/impl-11-before-eight-pr-rebuild` (partially
+on `rebuild/11`/`12`), not on main, which currently holds only
+`lm`/`eval_failures`.
+
 ### Codex exec transports
 
 Two sibling shapes for running `codex exec` with model-authored prompts.
-`src/whetstone/optimization/codex_runner.py:256` — codex wired to an MCP
-server spawned as `sys.executable -m whetstone.optimization.mcp_server`
-(which imports its evaluator via `importlib.import_module` on the
-`WS_MCP_EVALUATOR` env var): `stdin=DEVNULL`, environment `{**os.environ}`
-plus MCP config vars (blanket inherit with overlay), `shutil.which`
-pre-check, `check=False` with nonzero → `OpaqueStepError`.
-`src/whetstone/optimization/codex_proposer.py:146` — `codex exec
---skip-git-repo-check -s read-only --output-last-message <tmpfile>` with
-`cwd=`: the result is read from the temp file rather than stdout (stdout is
-a JSONL event stream too noisy to parse), and `TimeoutExpired` is caught
-into a typed `CodexInvocation(text="", returncode=-1, timed_out=True)`
-rather than raised. Notable properties: the file-delivered result as an
-early spill-to-disk instance; the proposer's never-raises timeout envelope;
-sandbox profile pinned in argv (`-s read-only`).
+`src/whetstone/optimization/codex_runner.py:256` — codex itself spawns
+the MCP server, wired via `-c mcp_servers.whetstone.command/.args/.env.*`
+TOML overrides threaded one key at a time (so serialized JSON stays a
+TOML string — a cross-process config-transport pattern); the server
+imports its evaluator via a validated `module:callable` spec from
+`WS_MCP_EVALUATOR` and *calls* it — arbitrary code loaded by env-var
+path. `stdin=DEVNULL`, `env={**os.environ}` (a no-op overlay),
+`shutil.which` pre-check, nonzero → `OpaqueStepError` embedding
+`stderr[:2000]` (a *head* slice; the separate `stdout[-2000:]` tail is
+success-path evidence, not error diagnosis). Results return through a
+shared SQLite tool-call store the MCP subprocess reopens from
+`WS_MCP_SQLITE_PATH` — durable-store-as-IPC, the fleet's only instance
+of state rather than output crossing the process boundary.
+`src/whetstone/optimization/codex_proposer.py:146` —
+`--output-last-message <tmpfile>` with a scratch-dir cwd; the invoker
+never raises (timeout → typed `CodexInvocation(timed_out=True)`), but
+the transport layer above it *does*: a three-way `CodexProposerError`
+taxonomy for timeout, nonzero exit, and — notably — exit-0-with-empty
+output, a named, documented failure mode (model-rejection HTTP 400
+exits 0 and writes nothing). No `which` pre-check on the proposer: a
+missing binary is an uncaught `FileNotFoundError`.
 
 Budget axes — wall-clock only, leader-only enforcement:
 
-- Wall-clock — runner 600 s; proposer per-call timeout (caught into the
-  typed result); live smoke test 30 s. `subprocess.run`'s timeout kills
-  only the direct child.
-- Output — unbounded capture; the runner slices the JSONL stream to its
-  last 2000 chars after completion (post-hoc selection, not a cap); the
-  proposer's file delivery is disk-backed and unbounded.
+- Wall-clock — runner 600 s; proposer `_DEFAULT_TIMEOUT_S = 180`; live
+  smoke test 300 s; auth probe (`codex login status`) 30 s.
+  `subprocess.run`'s timeout kills only the direct child.
+- Output — unbounded capture; the proposer's file delivery is disk-backed
+  and unbounded.
 - Termination — none: no process-group handling, no escalation.
 
-Observability — the child's own JSONL event stream is a live progress
-narration that the runner captures but never consumes during the run: it is
-inspected only post-hoc, sliced to the last 2000 chars, so in-flight
-progress is effectively discarded. No executor narration, no durable
-record (the proposer's result tmpfile is transient).
+Observability — the child's JSONL event stream is live progress narration
+the runner captures but never consumes during the run. The SQLite
+tool-call store *is* a durable cross-process record; the proposer's
+result tmpfile is transient.
 
 Lifecycle — none beyond `subprocess.run` defaults: leader-only timeout
 kill, no group, no escalation, no reap concern.
 
-Attribution — split between the two shapes: the runner maps nonzero exit
-to `OpaqueStepError` (exception-as-outcome); the proposer maps timeout to
-a typed never-raises `CodexInvocation(timed_out=True)`; both pre-check
-absence with `shutil.which`.
+Attribution — runner: nonzero → `OpaqueStepError` (exception-as-outcome).
+Proposer: the three-way taxonomy above, with empty-output-as-signal
+proving exit code alone is insufficient attribution.
 
-Testing seam — no injection: tests fake the codex CLI itself with
-`#!/bin/sh` stub scripts on PATH, including a `sleep 5` stub to force the
-timeout path (`tests/optimization/test_codex_proposer.py`) — a third fake
-pattern alongside Protocol injection and monkeypatching.
+Testing seams — three layered shapes: `CodexCliInvoker` is a real
+Protocol seam with a documented contract ("MUST NOT raise on nonzero or
+timeout") and a scripted fake; `#!/bin/sh` stubs on PATH exercise the
+real spawn path, including an argv-recording stub that dumps `$@` and
+asserts the safety flags are present (argv-as-contract testing); and
+`FakeCodexRunner` is a scripted MCP *client* driving the real JSON-RPC
+handshake — a protocol-level fake, not a process-boundary one.
 
 ### HumanEval oracle driver (broken)
 
 `src/whetstone/envs/ed1m_oracle.py` and `envs/ed1_scoring.py` — a driver
 program (`_DRIVER_SOURCE`, :46-63) that reads a JSON request from stdin,
 `exec`s a model-produced reconstruction, and writes single-line JSON to
-stdout, intended to run under dr-code's bounded primitive. Currently
-nonfunctional twice over: both files import
-`dr_code.humaneval.subprocess_runner`, a module path that no longer exists
-(moved to `dr_code.execution.subprocess`), `dr_code` is not installed in
-the repo's venv, and the call site passes `input_json=` where the current
-signature takes `input_text=`. Notable as prior art for the batch-driver
-protocol shape, and as the fleet's clearest example of cross-repo drift
-against an unpinned execution dependency.
+stdout, intended to run under dr-code's bounded primitive (the driver
+lives in `ed1m_oracle.py`; `ed1_scoring.py` only imports the runner
+surface). Currently nonfunctional: `dr_code` *is* installed — pinned to
+commit `5810f30` — but the pinned wheel predates the module move to
+`dr_code.execution.subprocess`, and the call site passes `input_json=`
+where the current signature takes `input_text=`. Notable as prior art for
+the batch-driver protocol shape, and as the fleet's clearest example of
+cross-repo drift: a *pinned but stale* execution dependency, where the
+pin preserved the breakage instead of preventing it.
 
 Budget axes — none of its own: intended to inherit the dr-code primitive's
 budgets wholesale; the driver protocol itself imposes no field or result
@@ -186,8 +213,9 @@ inherits both from the dr-code primitive.
 `src/whetstone/runner/execution_mode.py:106` — `docker info` in bytes mode,
 `shutil.which` pre-check, returncode collapsed to a boolean. Budget axes:
 wall-clock 10 s; nothing else applicable. Observability: the boolean
-collapse discards all diagnostic detail — a missing daemon, a permission
-error, and a hung docker all report identically. Lifecycle:
+collapse discards all diagnostic detail — and `OSError` and
+`SubprocessError` (including the timeout) are also caught into `False`,
+so even the 10 s budget produces no distinguishable signal. Lifecycle:
 `subprocess.run` defaults. Attribution: the boolean collapse, nothing
 finer.
 
@@ -200,14 +228,21 @@ finer.
 filename is fixed, so each call gets a `TemporaryDirectory` populated with
 symlinks into the read-only vendored tree (:143-146) as its `cwd`:
 parallel calls cannot collide, and the shared tree stays untouched. The
-result is read from a file the child wrote (:183-195) — file-delivered,
-not captured. Test-side patterns worth noting: `patch --batch -p1` applied
-against pinned SHA256s (content-pinned mutation of the vendored tree),
-full env replacement with a constructed `PATH`, and `PYTHONHASHSEED`
-pinning for determinism.
+result is read from a file whose name is *reconstructed* from the run
+config (an explicit kept-in-lockstep coupling contract with the vendored
+code) — file-delivered, not captured. (Provenance: this code lives on
+unmerged `envs/*` branches/worktrees, not main.) Test-side patterns, all
+in `tests/c23/test_upstream.py`: a reverse-then-forward `patch --batch`
+round-trip against pinned SHA256s — the strongest vendoring-integrity
+mechanism in the fleet; full env replacement with constructed `PATH`; and
+`PYTHONHASHSEED` *randomization* (not pinning): the subprocess exists
+precisely because the hash seed cannot vary in-process —
+subprocess-as-environment-control. An 8-way ThreadPoolExecutor test pins
+concurrency safety and global-RNG-state preservation.
 
-Budget axes — wall-clock per call; output captured unbounded (the result
-travels by file, disk-backed and unbounded).
+Budget axes — wall-clock is a caller parameter (`timeout_s: float =
+300.0`), rare in the fleet; output captured unbounded (the result travels
+by file, disk-backed and unbounded).
 
 Observability — none live; on failure `UpstreamError` carries
 `stderr[-500:]` — the recurring tail-slice pattern: a post-hoc excerpt
@@ -215,9 +250,10 @@ standing in for a record nothing kept in full.
 
 Lifecycle — `subprocess.run` defaults, leader-only.
 
-Attribution — `check=False` with nonzero mapped to a dedicated
-`UpstreamError` carrying the stderr tail: a typed executor-side verdict,
-no finer split.
+Attribution — two branches, not one: nonzero exit → `UpstreamError` with
+the stderr tail, and exit-0-with-no-output-file → a distinct
+`UpstreamError` — output-presence as an attribution signal, matching the
+whetstone-ai proposer's empty-output case.
 
 Amortization — a fresh symlink farm per call: cheap (symlinks, not
 copies), a deliberate trade of per-call setup for parallel safety.
@@ -380,33 +416,81 @@ principles reject for research code.
 
 Budget axes:
 
-- Memory — `RLIMIT_AS` 256 MB default: a task-scale interior default of
-  exactly the kind the budgets principle prohibits.
-- Result size — 1 MB pickled-result bound (protocol budget).
-- Wall-clock — per-execution timeout plus a separate worker-startup
-  timeout (the fleet's one existing startup self-budget).
-- Termination — SIGTERM→SIGKILL with 0.2 s joins; `killpg` only when group
-  leadership is confirmed.
-- Output — none: child stdout/stderr go to inherited fds, uncaptured and
-  unbounded.
+- Memory — `RLIMIT_AS` 256 MB default: a task-scale interior default —
+  and *best-effort*: the whole setrlimit is try/excepted to a silent
+  return, so a platform where it fails runs unbounded with no signal.
+- Result size — 1 MB pickled-result bound, enforced as three sequential
+  gates (sanitize through the type graph → pre-pickle → size-check), with
+  the stated rationale that pre-serializing prevents queue feeder-thread
+  errors from being *misattributed as timeouts* — the sharpest
+  attribution reasoning in the fleet.
+- Wall-clock — per-execution timeout (default 1.0 s); the "startup
+  timeout" is derived (`max(timeout_sec, 1.0)`), not independent.
+- Input — unbounded: pickled args cross with no size validation, the
+  file's clearest budget gap (1 MB out, unlimited in). Budget parameters
+  themselves are carefully validated (bool rejected, inf/nan rejected).
+- Termination — SIGTERM→SIGKILL with 0.2 s joins; leadership is checked
+  only when the process is still *alive* — on an already-dead process
+  `killpg` fires uncheck'd, a pid-reuse signal hazard in the cleanup
+  path.
 
-Observability — no capture of worker output at all (accidental passthrough
-to the parent's fds, not a chosen delivery mode); spawn-bootstrap
-diagnostics give good startup-failure attribution; nothing durable.
+Observability — no capture of worker output (accidental passthrough to
+the parent's fds); a module logger exists but speaks only DEBUG-level
+swallowed-cleanup breadcrumbs; spawn-bootstrap diagnostics are a
+three-part *inference* (CPython message match + `__main__` introspection
++ start-method check) ending in a remedy-bearing error naming the exact
+env-var fix — the best startup attribution in the fleet, though the
+string match is version-coupled.
 
-Lifecycle — TERM→KILL escalation with 0.2 s joins, but degradable:
-`_set_process_group` swallows `os.setsid()` failures so group kill
-silently falls back to leader-only, and `_terminate_process_tree` swallows
-signaling failures — escalation that cannot prove it happened.
-`atexit`/`__del__` cleanup for persistent workers.
+Lifecycle — TERM→KILL escalation with 0.2 s joins, degradable and
+unprovable: `os.setsid()` failures are swallowed (group kill silently
+becomes leader-only) and every teardown step is individually excepted to
+DEBUG. Forkserver preferred over spawn (a second, unremarked amortization
+axis); the one-shot `_run_isolated` path — including its queue-feeder
+grace drain — is dead code: only the persistent worker is reachable.
 
-Attribution — six-type error taxonomy; the `trust_untrusted_code` gate
-fails as its own error class; spawn-bootstrap diagnostics attribute
-startup failures precisely. No exit-code attribution of payload kills.
+Attribution — six typed classes, but worker *crash* — the case that
+matters most — escapes as bare `RuntimeError` with the exit code
+interpolated into a string; exit-code discrimination exists
+(crashed-with-code vs exited-without-result) but is untyped.
 
-Amortization — `_PersistentWorker`/`_IsolatedFunction` reuse one
-containment-bearing worker across calls, with a separate startup budget:
-the fleet's clearest existing warm-worker amortization.
+Amortization — `_PersistentWorker` reuses one containment-bearing worker
+across calls: the fleet's clearest warm-worker amortization.
+
+In practice — the trust gate is ceremony: all eleven validator call sites
+pass `trust_untrusted_code=True` unconditionally and none passes a
+timeout or memory limit, so every real execution runs at the 1 s/256 MB
+interior defaults. And there are zero tests: 880 lines of signal, group,
+and serialization lifecycle with no test file and no injection seam
+beyond a start-method env var.
+
+### Compiled-parity, formatting, and quality-check execution
+
+Three more execution sites, previously uncataloged.
+`verification/parity.py` — compile-once-run-many: a context manager
+compiles generated Java/Rust once into a prefix-named TemporaryDirectory
+and yields a frozen runner handle whose `command_prefix` the per-case
+loop reuses — a second genuine amortization boundary; `shutil.which`
+preflight raises one error listing *all* missing tools; per-case failures
+are data (`ParityFailure` rows, sweep continues) while compile failures
+raise — item-failures-as-data, artifact-failures-as-exceptions;
+`_format_subprocess_error` distinguishes timeout from nonzero exit and
+echoes the command; one 20 s constant shared by compile and run, no
+output cap. `langs/formatting.py` — `lru_cache`d subprocess memoization
+(2048 entries keyed on source — an amortization mode with no analogue
+elsewhere); tools resolved by `which` at *import time* (PATH snapshotted
+once); every failure — timeout, crash, parse — silently returns the
+unformatted input with no log line: the purest failure-degrades-to-input
+in the fleet; file-as-return-channel via `--replace` + read-back.
+`generated_code_quality.py` (top-level, not under `langs/`) — 30 s
+constant; five-tool preflight whose error names every missing tool *and*
+the exact bypass flag; timeout converted to `SubprocessError` with output
+attached (two-bucket taxonomy: tool-said-no vs tool-didn't-work); lint
+strictness injected into the generated source (`#![deny(warnings)]`)
+rather than the command line; failures accumulate across the sweep and
+raise once, displaying the first 20 with a count of the rest — a rare
+explicit cap on *diagnostic* size. Four uncoordinated wall-clock
+constants now exist across one repo: 1 s, 15 s, 20 s, 30 s.
 
 ## dr-platform
 
@@ -461,32 +545,43 @@ collection error, not a test failure. No timeouts anywhere.
 remote execution path: `Popen(("ssh", *_SSH_OPTIONS, source_id,
 *_REMOTE_WORKER_COMMAND))` with the peer drawn from a closed enum (:51), a
 JSON request on stdin, and the response read via `selectors` + `os.read`.
-Companion probes: an ssh reachability check (DEVNULL, timeout 8,
-returncode inspected) before expensive work, and a `scutil` hostname query
-whose failure degrades gracefully to `"local"`. Design flaw worth
-preserving as a lesson: the request is written to stdin in full before the
-read loop starts (:149), so a request larger than the pipe buffer can
-never complete — the write-before-read deadlock in production form.
+Companion probes: an ssh reachability check (DEVNULL, timeout 8) before
+expensive work, and a `scutil` hostname query where failure *and*
+unrecognized-hostname both degrade to `"local"`. The write-before-read
+hazard is conditional, not the unconditional deadlock first recorded: the
+write is `BrokenPipeError`-guarded and ssh forwards stdin, so both sides
+block only if the peer emits >64 KB of response before consuming the
+request. The ssh options are themselves a nested transport budget:
+`BatchMode` (no auth hang), `ConnectTimeout=5`, `ServerAliveInterval=15
+× 2` (~30 s dead-peer detection inside the 3600 s wall-clock); the
+remote command is absolute-path-pinned with `--no-sync` (no remote
+dependency resolution).
 
-Budget axes — both caller-declared per call, the fleet's best
-parameterization: wall-clock (default 3600 s) and a response cap
-(64 MiB default, per-call override) — a contract budget on the response;
-input unbounded.
+Budget axes — wall-clock (default 3600 s) and response cap (64 MiB) are
+keyword parameters — though no in-repo caller overrides them; the
+deadline is *shared* across read and reap (`wait(timeout=remaining)`),
+and the cap is enforced by reading one byte past it: overrun-detection
+rather than silent truncation. Input unbounded.
 
-Observability — stderr uninherited by the protocol: it passes through to
-the operator's terminal (accidental stdio passthrough for diagnostics); no
-narration, no record.
+Observability — `ProgressSink` narration threads through the whole path
+(availability check, scan start, candidate counts, per-peer error-code
+lines), and failures are recorded structurally as `MachineFailure(code,
+message)` inside the scan report — failure-as-data at the report
+boundary, not an escaping exception.
 
-Lifecycle — `_stop_process`: SIGTERM → 1 s wait → SIGKILL, single process
-only; no session, no group — the ssh client dies, whatever it spawned
+Lifecycle — `finally`-ordered cleanup: close selector → close pipes →
+`_stop_process` (SIGTERM → 1 s → SIGKILL, single process, no group) —
+pipe-close-first gives the child EOF before signals; whatever ssh spawned
 remotely is out of reach entirely.
 
-Attribution — the fleet's only transport-aware taxonomy:
-`RemoteScanError(code)` distinguishes transport failures (`ssh_timeout`,
-`ssh_unavailable`) from remote-worker failures (`peer_worker_unavailable`,
-`peer_worker_timeout`, `peer_response_limit`, `peer_protocol_error`) —
-attribution across a machine boundary, plus a typed UTF-8 decode error at
-the response edge.
+Attribution — a seven-code transport-aware taxonomy: ssh-level
+(`ssh_timeout`, `ssh_unavailable`) vs peer-level (`peer_worker_
+unavailable`/`timeout`/`failed`, `peer_response_limit`,
+`peer_protocol_error`), plus `peer_unknown` constructed without any spawn.
+Protocol validation is strict set-equality on response fields, version
+match, and — strongest correctness pattern in the fleet — the response
+must *echo the request* (returned roots and config compared against what
+was sent).
 
 ## dr-diagram
 
@@ -698,18 +793,32 @@ Budget axes — wall-clock only:
 
 Observability — no narration and no durable record, but the result
 envelope is diagnosis-friendly: `tool_found`, `timed_out`, `duration_s`,
-and timeout-recovered partial output all arrive as data, so a failed run
-explains itself in-memory. Nothing persists.
+and timeout-recovered partial output all arrive as data. Nothing
+persists — and ty's persisted diagnostics reference tempdir paths that no
+longer exist by the time they're read.
 
 Lifecycle — `subprocess.run` defaults: leader-only timeout kill, no group
-handling.
+handling; no `env=` and no `cwd` at all, so ty resolves its config from
+the *tempdir's* ancestry, not the project.
 
-Attribution — the never-raises envelope is the attribution story: absence
-(`tool_found`), timeout (`timed_out`), and exit status all data, nothing
-exceptional. No payload-vs-executor split beyond that.
+Attribution — the envelope discriminates, but consumers throw the
+discrimination away: both ruff helpers branch on `res.ok` alone, so
+missing tool, timeout, and parse error collapse into one warning
+diagnostic; `returncode=-1` means three different things (not-found,
+timeout, or a real signal death); `ruff check --exit-zero` deliberately
+neutralizes the exit code. Two bright spots: diagnostics carry a
+`DiagnosticSource` tag (SUBPROCESS vs NORMALIZER) — layer attribution as
+persisted data — and tool absence is modeled as `success=True` with a
+no-op result plus a warning: absence as a *correct* outcome, distinct
+from failure.
 
 Testing seam — constructed `SubprocessRunner` instances passed to
-consumers: configuration-as-injection, no monkeypatching.
+consumers (configuration-as-injection) — but injection is optional with
+silent default-construction fallback. One acknowledged TOCTOU: the L5
+path `which`es ty twice with an explicit "ty disappeared mid-run"
+branch. Correction from source: the catalog's `find_spec`
+parent-package-execution hazard is defused in code — only the root of
+each dotted name is passed, so parent packages are never imported.
 
 ## symphony-lite
 
@@ -728,21 +837,34 @@ be probed or signaled as if it were the run). `cwd` is load-bearing
 `assert_subscription_auth_env()` asserts `ANTHROPIC_API_KEY` is *absent*
 before spawn — a negative environment assertion.
 
-Budget axes — none: no timeout (unbounded by design), transcript file
-grows without limit (a deliberate unbounded-accumulation grant).
+Budget axes — no run timeout (unbounded by design; the transcript's
+unbounded growth is a deliberate grant), but not budget-free: a
+fleet-level `CONCURRENCY_CAP = 3` admission budget, and stuck-detection
+via the transcript file's *mtime* compared against a configured
+threshold — file mtime as an inferential heartbeat, the only
+wall-clock-ish bound on a run. One hole: an untimed, uncheck'd `git`
+call sits inside the spawn path.
 
-Observability — the transcript is spooled (stream-json to a file, live
-and durable): genuinely good delivery. The SQLite pid registry is a
-durable ownership record. No narration of lifecycle events; exit is never
-observed (no wait, no reap — death is discovered by a failed liveness
-probe).
+Observability — better than first assessed: every lifecycle transition
+(spawn, resume, state change, kill) is journaled as structured events in
+SQLite — arguably the fleet's best lifecycle narration — and the
+transcript is spooled live and durable (stdout and stderr multiplexed
+into one stream file, non-JSON stderr lines tolerated by a lenient
+parser: lossy-by-design). The pid registry is a durable ownership record
+for claude runs only — every codex run stores the *shared app-server
+pid*, so the column means two different things.
 
-Lifecycle — group-targeted SIGTERM, but nothing else: no escalation, no
-wait, no reap, no exit observation ever; the runs are permanent zombies
-until the pid table is manually reconciled.
+Lifecycle — group-targeted SIGTERM, no escalation, no wait, no reap; the
+pid-reuse guard is absent (`os.kill(pid, 0)` liveness,
+`PermissionError` treated as alive).
 
-Attribution — none: exit status is never collected, so nothing is ever
-attributed.
+Attribution — exists, just not exit-code-based: run outcome is read from
+the transcript's `result` event (`is_error` → FAILED, else COMPLETED),
+with the liveness probe as fallback for vanished runs — in-band exit
+observation. Codex runs get a restart-aware mapping table:
+`TurnState.UNKNOWN → FAILED` with the comment "the daemon restarted
+mid-run" — inferring run death from the supervisor's own amnesia, unique
+in the fleet.
 
 ### Codex app-server JSON-RPC singleton
 
@@ -752,11 +874,19 @@ file, `start_new_session=True`) speaking bidirectional JSON-RPC: a reader
 thread demultiplexes responses by id into per-request queues; a write
 lock serializes stdin. Cancellation is protocol-level: `kill_codex_run`
 sends a `turn/interrupt` RPC rather than a signal — in-flight work
-cancelled without touching the process. Flaws: `_read_loop` iterates
-stdout with no size bound; `_pending` is mutated under two different
-locks; the stdin write is unguarded against `BrokenPipeError`; a crashed
-child is never reaped or restarted; `stop()` is leader-only
-`terminate()`.
+cancelled without touching the process (though when the daemon restarted
+and no `turn_id` is known, the run is journaled KILLED *without any
+interrupt sent* — a kill that didn't kill). Flaws: `_read_loop` iterates
+stdout with no size bound; `_pending` has two unlocked accesses, and the
+reader thread's check-then-index race means a timeout popping the entry
+between them raises an uncaught `KeyError` that kills the demux thread
+permanently — every later request then times out; the stdin write is
+unguarded against `BrokenPipeError`; a crashed child is never reaped or
+restarted; `stop()` is leader-only `terminate()`; the append-mode log
+handle is never closed (an fd leak per start); sandbox and approval
+policy are hardcoded constants (`workspace-write`, `never`) — the same
+interior-default critique made of genfxn applies here. No testing seam
+anywhere in the execution paths.
 
 Budget axes — per-request wall-clock 60 s (interactions budgeted while
 the child is not — the UC6 shape); no output bound on the RPC stream.
@@ -872,13 +1002,26 @@ schema, approval requirement, timeout defaults/ceilings, and output limit
 co-located in one frozen contract object. Weaknesses: login-shell
 semantics; leader-only kills.
 
-Budget axes — wall-clock and output, both pinned in the contract object:
+Budget axes — wall-clock and output, both pinned in the contract object
+(10 s default, 60 s ceiling, 16 KiB output):
 
-- Wall-clock — per-call timeout with a configured ceiling, defaults in
-  `BASH_TOOL_CONTRACT`.
-- Output — per-stream caps via `cappedAppend`; truncation is silent, and
-  the full concatenation is materialized before slicing.
-- Termination — 1 s wait between SIGTERM and SIGKILL (leader only).
+- Wall-clock — over-ceiling requests are *clamped*, never rejected — the
+  schema's `.max()` is unreachable; a model asking for 300 s silently
+  gets 60.
+- Output — `cappedAppend` re-materializes the full concatenation per
+  chunk: output is bounded but the *work* is not — a capped runaway child
+  still costs unbounded allocation. Truncation silent.
+- Termination — SIGTERM then a 1 s SIGKILL timer that is `unref`'d: if
+  the event loop has nothing else pending, Node exits before the SIGKILL
+  fires — best-effort escalation dependent on unrelated loop state.
+- Timeout discards evidence: the rejection carries only the timeout
+  value; all accumulated stdout/stderr is thrown away.
+- `exitCode ?? 1` renders signal deaths unrepresentable (the `signal`
+  argument is never read). Stdin is explicitly closed — a deliberate
+  anti-hang measure. No `env` control; `-lc` sources the operator's rc
+  files. The bash side has *no* injection seam (module-private const),
+  while the codex side has a clean one — two opposite testability
+  postures in one repo.
 
 Observability — the silent `cappedAppend` truncation is the section's
 anti-pattern: information loss with no marker, so a capped transcript is
@@ -901,17 +1044,27 @@ stdin; AbortSignal cancellation. Weaknesses: SIGTERM only, leader only.
 
 Budget axes — wall-clock only:
 
-- Wall-clock — `CODEX_COMMAND_TIMEOUT_MS` environment variable.
+- Wall-clock — `CODEX_COMMAND_TIMEOUT_MS = 60_000`, a hardcoded module
+  constant with no override path (an earlier version of this section
+  called it an env var — it is not).
 - Output — unbounded stdout accumulation.
-- Input — prompt written to stdin, unbounded.
+- Input — prompt via `stdin.end()` with no error handler (EPIPE
+  unhandled).
 
-Observability — `--json` gives a structured event stream, but it is
-accumulated rather than surfaced live; no narration, no durable record.
+Observability — the `--json` event stream is parsed and *thrown away*: a
+four-key text-extraction heuristic returns "" on any parse failure;
+error events, tool calls, and token counts are silently discarded — the
+opposite of dr-llm's in-band error handling. No narration, no record.
 
-Lifecycle — SIGTERM only, leader only: no escalation, no group.
+Lifecycle — SIGTERM only, leader only; the spawn-error path performs no
+kill at all. Argv pins a fully non-interactive sandbox profile:
+`--sandbox read-only --ask-for-approval never --ephemeral` — the fleet's
+strongest profile-in-argv instance.
 
-Attribution — timeout and AbortSignal cancellation distinguishable from
-exit; otherwise raw.
+Attribution — two-tier exit policy: nonzero → error with stderr as the
+message; exit-0-with-stderr → a warning event. Testing seam — a typed
+optional `runCommand` constructor parameter with a real default: the
+cleanest JS seam beside vercel-install's.
 
 ## codearc
 
@@ -944,33 +1097,45 @@ approach dr-exec deliberately does not take.) Lifecycle and attribution —
 
 ## dr-queues
 
-### Detached stage-worker spawning
+### Detached stage workers with a two-channel stop protocol
 
 `src/dr_queues/runtime/lifecycle.py:126` (`start_stage_workers`) —
 `Popen(cmd, stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL,
-start_new_session=True)`; command prefix resolved via `shutil.which` for an
-installed entry point with `sys.executable -m` fallback; grace-period sleep
-then `poll()` as a startup liveness check. A second variant at
-`src/dr_queues/pipeline/runner.py:296` spawns one worker per pipeline stage
-with plain `Popen` and inherited stdio. Weaknesses: no health monitoring
-past startup, no shutdown/reap path in the spawn module. Tests fake by
-monkeypatching `Popen`.
+start_new_session=True)`; command prefix via `shutil.which` with
+`sys.executable -m` fallback; grace-period sleep then `poll()` as a
+startup liveness check. A second variant
+(`pipeline/runner.py:296`) spawns one worker per stage with inherited
+stdio. The design's actual shape (an earlier version of this section got
+this wrong): supervision is deliberately relocated off the process handle
+and into the datastore, precisely *because* `start_new_session` detaches.
+Workers self-register (`WorkerRecord` with pid/host/status), heartbeat
+the DB every 2 s via a daemon thread, and mark themselves stopped in
+their own `finally`. Stop is two-channel and host-aware
+(`stop_workers`, :180): a DB stop-request flag as the primary,
+cross-host, cooperative channel (the heartbeat thread notices
+`STOP_REQUESTED` and stops the pool), plus a same-host-only `os.kill`
+SIGTERM accelerator gated on `record.host == current_host()`; worker
+side wires SIGTERM/SIGINT into `pool.stop()` with a bounded
+`pool.join(timeout=5)`. `replace_stage_workers` is stop-then-start; both
+verbs are CLI-exposed, as is `workers --json`.
 
-Budget axes — none: workers run with no execution timeout (the startup
-grace-period is a liveness check, not a deadline), and output is discarded
-in the detached variant rather than bounded.
+Budget axes — no execution timeout on workers, but teardown is bounded:
+`pool.join(timeout=5)`, tap-thread join 5 s, and a `TimeoutError` on
+pipeline completion.
 
-Observability — the anti-observable extreme: the detached variant routes
-all three stdio streams to DEVNULL, so a worker's entire life is invisible
-by construction; the startup `poll()` is the only progress signal that will
-ever exist. No narration, no record, nothing to consult when a worker
-dies.
+Observability — stdio is DEVNULL'd but observability lives in the DB:
+registration, 2 s heartbeats, stop marks, a `list_workers` API and JSON
+CLI view — a durable, queryable worker registry instead of streams.
 
-Lifecycle — spawn-only: `start_new_session` detaches the worker and then
-no kill, escalation, or reap path exists anywhere in the module — workers
-are orphaned by design the moment the spawner exits.
+Lifecycle — cooperative-first: SIGTERM is the *terminal* action (no
+SIGKILL escalation), `stop_workers` returns without confirming death,
+nothing is ever reaped, and a wedged non-heartbeating cross-host worker
+is unkillable through this path; `PermissionError` on signaling is
+swallowed to stderr.
 
-Attribution — none: exit is never observed, so nothing is ever attributed.
+Attribution — worker status lives in the DB record lifecycle
+(registered/heartbeating/stopped), not in exit codes; the parent never
+observes exit.
 
 Testing seam — monkeypatched `Popen` in `tests/test_lifecycle.py`.
 
@@ -999,40 +1164,53 @@ status at all and can fail silently.
 `src/nl_code/code_execution/worker.py` — `exec` of model-generated code
 behind `_require_docker_execution`, which raises unless an env var is set
 *and* `_is_running_in_container()` verifies the claim: the origin of the
-containment-is-verified behavior. In-container defenses: `RLIMIT_CPU`;
-per-item `signal.setitimer(ITIMER_REAL)` + SIGALRM deadlines; bounded
-stdin and bounded stdout capture via `dr_docker.workers.json_stdio`
-(`read_stdin_bounded`, `BoundedTextCapture`); an AST denylist (Async
-nodes, dunder access) and a `__builtins__` shallow-copy namespace — the
-same shape-policing caveat as genfxn's. Caller side
+containment-is-verified behavior. In-container defenses are
+mode-dependent: the AST denylist guards only `function_call` mode
+(assertion and unittest modes `exec` with no AST validation), and
+per-item `setitimer`/SIGALRM deadlines exist only in *batch* mode —
+single-item modes have no in-worker wall-clock at all. Five rlimits
+applied (CPU, AS 256 MB, FSIZE, NOFILE, NPROC), so memory is bounded
+twice (rlimit inside, `--memory` outside). Caller side
 (`code_execution/runner.py`) delegates spawning to
-`dr_docker.SubprocessDockerAdapter` (see dr-docker) and translates its
-error envelope into `CodeExecutionInfrastructureError`.
+`dr_docker.SubprocessDockerAdapter` and translates its envelope into
+`CodeExecutionInfrastructureError` with a **12-value `stage=` taxonomy**
+(worker_nonzero_exit, docker_timeout, …) — though one stage is derived by
+stderr substring-matching, and the exit-code channel is discarded
+(`exit_code or 0`; the worker returns 0 on unexpected exceptions), so
+crash-vs-success is distinguishable only by payload fields.
 
-Budget axes — layered across three parties:
+Budget axes — layered, with derived formulas on both sides: the batch
+container timeout is `timeout_per_item × N × 1.5 + 10` while the worker
+independently widens its CPU soft limit to `used + timeout_per_item × N`
+(usage-relative, restored in a `finally`) — same inputs, different
+formulas, opposite sides of the boundary. Caller stdin cap 50 MiB
+(env-overridable); stream caps 1 MiB single-item but
+`max(10 MiB, 50 KiB × N)` for batches; chunking at 200 items.
 
-- Worker: CPU (`RLIMIT_CPU`) and per-item wall-clock
-  (`setitimer`/SIGALRM).
-- Caller: stdin cap 50 MiB; per-stream stdout/stderr caps 1 MiB default,
-  env-overridable.
-- Container: the full dr-docker set (memory, pids, fsize, nofile) by
-  delegation.
+Observability — structured stage codes plus `retriable`; `stderr[:200]`
+head-slices in two messages; no narration or durable record.
 
-Observability — error envelopes carry structured codes with a `retriable`
-flag (failure as diagnosable data); otherwise no narration or durable
-record at this layer.
+Lifecycle — delegated to the adapter; inside the worker, per-item
+`os.chdir` + directory wipe between items — per-item filesystem hygiene
+inside the shared container.
 
-Lifecycle — delegated to the dr-docker adapter (leader-only, see there);
-inside the worker, per-item SIGALRM timers are the only lifecycle control.
+Attribution — the container gate refuses pre-execution; AST rejection is
+a payload verdict (one mode only); everything else rides the stage
+taxonomy.
 
-Attribution — three-way: the container gate refuses with its own error
-before execution; AST rejection is a pre-execution payload verdict; the
-adapter's error envelope translates to
-`CodeExecutionInfrastructureError` — executor-side by construction.
+Amortization — container at the batch dimension, deadline at the item
+dimension, with per-item scratch hygiene as the sharing boundary's cost.
 
-Amortization — one container per batch with per-item timers inside it: a
-declared sharing boundary (container at the batch dimension, deadline at
-the item dimension).
+Testing seam — effectively none: `_import_dr_docker()` is called lazily
+nine times and its 9-tuple indexed positionally; faking requires patching
+module imports.
+
+Novel — the budget crosses the process boundary *as data*: the caller
+serializes its limits via `JsonWorkerExecutionConfig.to_env()` into
+container env, and the worker rehydrates the same frozen model with
+`from_env()` — one contract object, two processes. Worker delivery is a
+fourth program-transport mode: the script bind-mounted read-only and run
+as `python3 -I /sandbox/worker.py`.
 
 ## dr_exp
 
@@ -1097,14 +1275,22 @@ Testing seam — `subprocess.run`/`Popen` mocked in
 ### CLI self-invocation job submission
 
 `scripts/submission/*.py` (~a dozen sites) — job submission drives the
-repo's own `dr_exp` CLI via `subprocess.run(capture_output=True)`, parsing
-stdout for lines like "Job submitted with ID:". Self-invocation as an API:
-the process boundary substitutes for a library call, with string-parsing
-where a return value should be. No timeouts anywhere; mixed `check=`
-postures. Budget axes — none. Observability — captured output is consumed
-only for the parsed line; no narration or record beyond each script's own
-prints. Lifecycle — `subprocess.run` defaults. Attribution — success
-determined by string-matching stdout; mixed `check=` postures.
+repo's own `dr_exp` CLI via `subprocess.run(capture_output=True)`.
+Self-invocation as an API: the process boundary substitutes for a library
+call. The `check=` split is coherent, not mixed: `check=True` for probe
+calls, `check=False` for submissions. Success is returncode-gated; only
+the job *identity* is string-parsed ("Job submitted with ID:") — and when
+the marker line is absent, submission is still logged as success with
+`job_id or "unknown"`: a silent identity-degradation bug. Duplicate
+detection parses `job list` output with a bare `except` that degrades to
+an empty set — duplicate protection fails open. No timeouts anywhere.
+Budget axes — none. Lifecycle — `run` defaults. Observability — better
+than first assessed: `SubmissionLogger` writes a durable timestamped JSON
+append log per experiment (config/seed/job_id/success/error), read back
+as the *idempotency key set* on re-runs, and the summary generates a
+copy-pasteable retry command — submission is idempotent-by-persisted-log
+rather than by server state, one of the fleet's better durable-record
+patterns.
 
 ## deconCNN
 
@@ -1165,32 +1351,64 @@ with output discarded and no timeout.
 
 Budget axes — the fleet's widest set, mostly containment-backed:
 
-- Wall-clock — `timeout_seconds` on the docker CLI client;
-  `TimeoutExpired` → kill.
-- CPU time — cpu ulimit, derived from `timeout_seconds`.
-- Memory — `--memory` (plus `--cpus` rate limiting).
-- Processes — `--pids-limit` and the nproc ulimit.
-- File size / open files — fsize and nofile ulimits.
-- Output — per-stream byte caps with explicit truncation markers.
-- Input — bytes stdin, unbounded.
-- Termination — unbounded: `proc.wait()` after kill has no timeout.
+- Wall-clock — a true monotonic *deadline* spanning both phases:
+  `remaining` recomputed per select iteration and again to bound the
+  final `proc.wait()` — better discipline than first recorded.
+- CPU time — cpu ulimit `max(1, ceil(timeout_seconds))`, a formula
+  independently duplicated in `json_stdio.py` — one rule, two
+  implementations, no shared constant.
+- Memory/processes/files — `--memory`, `--cpus`, `--pids-limit`, ulimits;
+  but *three different default sets* coexist (contract 256m/64 pids,
+  worker policy 512m/256, in-container config 256MB/64) — a live drift
+  surface — and `DR_DOCKER_WORKER_SKIP_LIMITS` is an ambient off-switch
+  for the CPU bound.
+- Output — per-stream caps; but the truncation marker is appended
+  *in-band* into the stream text with no `truncated` field on the result,
+  so a JSON-parsing consumer sees a parse failure, not a truncation
+  signal (the in-container `BoundedTextCapture` does it right with a
+  proper boolean — same package, two policies).
+- Input — bytes stdin written by a daemon thread with `BrokenPipeError`
+  suppressed twice: a child that never reads cannot deadlock the writer,
+  but non-delivery is silently discarded.
+- Termination — three unbounded `kill(); wait()` pairs, and the `finally`
+  cleanup's `docker rm -f` has no timeout — the timeout-recovery path is
+  itself unbounded.
 
-Observability — the strongest marked-loss story in the fleet: truncation
-carries explicit markers stating how many bytes were dropped and the cap in
-force, so a capped stream is never mistaken for a complete one. The
-cidfile is a durable artifact, but only for cleanup — no run record. A
-module logger exists; lifecycle narration is minimal.
+Observability — true byte totals are tracked so markers report real
+sizes; the adapter's module logger is entirely dead (never called in 362
+lines); real logging exists only in cleanup/cidfile. No run record.
 
-Lifecycle — split-brain: container-side teardown is the strength (cidfile
-tracked, `docker rm -f` in `finally`, CID validated) while client-side is
-weak (bare `proc.kill()` leader-only, no escalation, unbounded wait,
-writer thread joined without timeout).
+Lifecycle — split-brain: container-side teardown is the strength — `--rm`
+in argv *plus* cidfile-tracked `docker rm -f` in `finally` (belt and
+braces), with the cidfile dance (private 0o700 dir, reserve-then-unlink
+because docker refuses existing paths) and a guarded reclamation that
+refuses to delete a directory it cannot prove it created. Client-side is
+weak: bare leader-only `kill()`, no escalation, unbounded waits.
 
-Attribution — `ErrorEnvelope(code, retriable)`: structured failure codes
-with retriability as data, the fleet's only retriability-aware taxonomy.
+Attribution — a three-code taxonomy (TIMEOUT/UNAVAILABLE/INTERNAL_ERROR)
+that is lossy: payload nonzero-exit and executor RuntimeError share
+INTERNAL_ERROR; signal deaths undistinguished; `retriable=True` is set on
+exactly one path (timeout). The envelope's ok/error invariant is
+*structurally enforced* by a model validator, and `adapters.py`
+re-validates it defensively with machine-readable violation tags. Inputs
+to argv construction are pydantic-validated (nonempty image, positive
+limits, absolute container paths, `..` rejected) — narrower than "no
+argv validation."
 
-Amortization — none: a cold container per call, seconds of setup however
-small the payload — the shape that motivated the amortization principle.
+Amortization — wrong before: `batching.py` is a first-class
+batch-amortization primitive — one container for many jobs with strict
+result-count alignment (misaligned results refuse to return), and
+`run_batch_with_failure_isolation` *recursively bisects* a failing chunk
+to isolate the poison item, so one bad payload doesn't lose the batch —
+dr-docker already solved the incremental-survival problem for the
+batch-level case. Per-call container setup remains the cost when batching
+isn't used.
+
+Testing seam — `RuntimeAdapter` is a `@runtime_checkable` Protocol: a
+first-class injection seam. `json_stdio`'s config round-trips
+caller-declared budgets through env with parsers that raise on malformed
+values — while nl-code's own env parsing warns-and-defaults: two policies
+for the same operation across the package boundary.
 
 ## dr-util
 
