@@ -277,12 +277,12 @@ Observability — none; nothing beyond `check=True` exceptions.
 
 `scripts/github_loc_stats_t1.py:125` — `gh auth token` with
 `capture_output=True`, `check=True`: a credential deliberately transported
-through captured stdout. Budget axes — none. Observability — flags a
-design tension rather than a gap: a secret in captured output is exactly
-what verbose-by-default narration and durable run records must never
-persist, so the observability contract needs a redaction stance for runs
-whose *output is itself sensitive* (llmflow's in-flight `redactToken` is
-the fleet's one prior-art instance).
+through captured stdout. Budget axes — none. Observability — evidence for
+the faithful-record posture: output that is itself sensitive is a domain
+fact only the caller can know, so redaction is caller-side and
+post-capture; the executor records verbatim. (llmflow's in-flight
+`redactToken` is the fleet's one executor-side redaction instance — the
+approach dr-exec deliberately does not take.)
 
 ## dr-queues
 

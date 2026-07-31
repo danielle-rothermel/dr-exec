@@ -97,6 +97,11 @@ intermediate is lost data, not lost convenience.
   new or debugging user, which is when defaults matter; flags reduce it.
   Silence is unrecoverable, noise is filterable, and disk at machine scale
   makes verbosity cheap.
+- The record is faithful — the executor never edits, filters, or
+  transforms what it observed. Sensitivity is domain knowledge: redaction
+  belongs to the caller, after capture, where the knowledge lives; a
+  partially-redacting executor would mutate collected data at capture time
+  and teach callers to stop thinking about secrets.
 - Narration and payload output are separate channels, never conflated —
   the executor's own logging must not corrupt captured or protocol output,
   the same invariant the batch protocol enforces from the child's side.
