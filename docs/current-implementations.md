@@ -1302,7 +1302,7 @@ miniature.
 `scripts/github_loc_stats_t1.py:125` — `gh auth token` with
 `capture_output=True`, `check=True`: a credential deliberately transported
 through captured stdout. Budget axes — none. Observability — evidence for
-the faithful-record posture: output that is itself sensitive is a domain
+the faithful-record behavior: output that is itself sensitive is a domain
 fact only the caller can know, so redaction is caller-side and
 post-capture; the executor records verbatim. (llmflow's in-flight
 `redactToken` is the survey's one executor-side redaction instance — the
@@ -1320,8 +1320,7 @@ start_new_session=True)`; command prefix via `shutil.which` with
 `sys.executable -m` fallback; grace-period sleep then `poll()` as a
 startup liveness check. A second variant
 (`pipeline/runner.py:296`) spawns one worker per stage with inherited
-stdio. The design's actual shape (an earlier version of this section got
-this wrong): supervision is deliberately relocated off the process handle
+stdio. The design's shape: supervision is deliberately relocated off the process handle
 and into the datastore, precisely *because* `start_new_session` detaches.
 Workers self-register (`WorkerRecord` with pid/host/status), heartbeat
 the DB every 2 s via a daemon thread, and mark themselves stopped in
@@ -1358,11 +1357,13 @@ Testing seam — monkeypatched `Popen` in `tests/test_lifecycle.py`.
 
 ### Tailwind shell-string build and pre-check script
 
-`styles/build.mjs:12` — the fleet's one shell-string invocation
+`styles/build.mjs:12` — the survey's one shell-string invocation
 (`execSync("npx tailwindcss -i ./input.css -c ./tailwind.config.js
---minify")`): the entire minified CSS transits stdout under Node's
-*default 1 MiB `maxBuffer`* — the one place in the fleet where the unset
-default is a realistic failure mode, not theoretical; stderr inherits,
+--minify")`) — the survey's one argv-only violation in first-party build
+code: the entire minified CSS transits stdout under Node's
+*default 1 MiB `maxBuffer`* — the one place across the surveyed repos
+where the unset default is a realistic failure mode, not theoretical;
+stderr inherits,
 so a tailwind error throws without diagnostics in the exception. No
 timeout. `scripts/pre-check.sh` — near-twin of dr-code's with a marimo
 step added and a strict check commented out in place; its `run_report`
@@ -1371,6 +1372,21 @@ under `.cache/pre-check/`, true status recovered via `PIPESTATUS[0]`),
 `set -uo pipefail` *without* `-e` deliberately enabling failure
 aggregation — while `run_silent`'s four autofix steps propagate no
 status at all and can fail silently.
+
+Budget axes — output only, and only by accident: Node's default 1 MiB
+`maxBuffer` on the tailwind build, which the minified CSS realistically
+approaches; no timeouts anywhere. Observability — `pre-check.sh`'s
+`run_report` is the strength: dual delivery, tee to terminal for live
+progress plus a durable per-check artifact under `.cache/pre-check/`, with
+the true status recovered via `PIPESTATUS[0]`; the tailwind build records
+nothing and inherits stderr, so a tailwind error throws with no
+diagnostics in the exception. Lifecycle — `execSync` and shell defaults,
+leader-only; no kill path, no escalation, nothing outlives the call.
+Attribution — `set -uo pipefail` without `-e` deliberately enables
+failure aggregation across checks, and `PIPESTATUS[0]` preserves the real
+per-check status; but `run_silent`'s four autofix steps propagate no
+status at all, and the tailwind failure arrives as an exception stripped
+of the child's diagnostics.
 
 ## nl-code
 
@@ -1431,7 +1447,7 @@ as `python3 -I /sandbox/worker.py`.
 
 ### Slurm worker fleet launcher
 
-`src/dr_exp/worker/launcher.py` — the fleet's most complete supervised
+`src/dr_exp/worker/launcher.py` — the survey's most complete supervised
 long-lived implementation. `WorkerLauncher` spawns N workers per GPU (its
 own CLI: `sys.executable -m dr_exp.cli.main ... worker --worker-id ...`),
 each with an environment overlay (`os.environ.copy()` plus a per-worker
@@ -1458,10 +1474,10 @@ Budget axes:
 - Termination — 5 s TERM→KILL escalation, group-targeted (executor
   self-budget); no post-kill reap wait.
 - Output — per-worker logs spill to disk, unbounded: the permissive
-  disk-backed posture the budgets principle prefers.
+  disk-backed delivery the budgets principle prefers.
 - Per-worker/per-job wall-clock — none at this layer.
 
-Observability — the fleet's richest: narration to console and a launcher
+Observability — the survey's richest: narration to console and a launcher
 log file simultaneously; a per-worker durable log each; a status JSON
 heartbeat rewritten every 60 s (workers, restart counts, job-state tallies,
 runtime); error aggregation sweeping worker logs for
@@ -1499,12 +1515,12 @@ the marker line is absent, submission is still logged as success with
 `job_id or "unknown"`: a silent identity-degradation bug. Duplicate
 detection parses `job list` output with a bare `except` that degrades to
 an empty set — duplicate protection fails open. No timeouts anywhere.
-Budget axes — none. Lifecycle — `run` defaults. Observability — better
-than first assessed: `SubmissionLogger` writes a durable timestamped JSON
+Budget axes — none. Lifecycle — `run` defaults. Observability —
+notable: `SubmissionLogger` writes a durable timestamped JSON
 append log per experiment (config/seed/job_id/success/error), read back
 as the *idempotency key set* on re-runs, and the summary generates a
 copy-pasteable retry command — submission is idempotent-by-persisted-log
-rather than by server state, one of the fleet's better durable-record
+rather than by server state, one of the survey's better run-record
 patterns.
 
 ## deconCNN
@@ -1564,11 +1580,11 @@ thread joined without timeout, no argv validation, no plain-argv
 (non-Docker) entry point. `cleanup.py:21` is a best-effort `docker rm -f`
 with output discarded and no timeout.
 
-Budget axes — the fleet's widest set, mostly containment-backed:
+Budget axes — the survey's widest set, mostly containment-backed:
 
 - Wall-clock — a true monotonic *deadline* spanning both phases:
   `remaining` recomputed per select iteration and again to bound the
-  final `proc.wait()` — better discipline than first recorded.
+  final `proc.wait()`.
 - CPU time — cpu ulimit `max(1, ceil(timeout_seconds))`, a formula
   independently duplicated in `json_stdio.py` — one rule, two
   implementations, no shared constant.
