@@ -4,10 +4,11 @@
 
 - **Payload** — the content a child process executes or interprets: source code, argv, stdin programs, prompts driving agent CLIs. Categorized by who authored that content, not by which binary runs it.
 - **Trusted payload** — content we authored or pinned (first-party code, known tools with first-party arguments). Failures are bugs, not adversarial behavior.
-- **Untrusted payload** — content from outside our control, above all model-generated: generated source, compiled artifacts of it, model-authored prompts or commands. Assumed arbitrary; runs only under an explicitly declared containment posture.
+- **Untrusted payload** — content from outside our control, above all model-generated: generated source, compiled artifacts of it, model-authored prompts or commands. Assumed arbitrary; runs only under an explicitly declared containment profile.
 - **Inherited state** — what a child process receives automatically from its parent: environment variables (and any credentials in them), working directory, open file descriptors. Inheritance is never the default; it is always an explicit grant.
 - **Environment passthrough** — an explicit grant of parent environment to the child, named-variable or overlay; the only route by which inherited environment reaches a child.
-- **Containment** — the declared restrictions on what a payload can reach (filesystem, network, processes, resources): a posture ranging from bare process boundary to full sandbox, always stated, never implied.
+- **Containment** — the declared restrictions on what a payload can reach (filesystem, network, processes, resources): a spectrum from bare process boundary to full sandbox, always stated, never implied.
+- **Containment profile** — the complete declared containment for a run: per-axis reach grants, resource backing, and the enforcement's known limits. A named, reusable object independent of the mechanism that enforces it.
 - **Call-scoped** — the child's entire lifetime, spawn through reap, falls within a single executor call. Contrast: supervised long-lived processes, which outlive the call.
 - **Supervised** — a child whose owner observes liveness and exit and is accountable for teardown; the opposite of fire-and-forget.
 - **Liveness** — verified evidence that a process is still the child we spawned: identity, not a bare pid check.
@@ -88,7 +89,7 @@ intermediate is lost data, not lost convenience.
   is also the antipattern detector: aggregate-in-memory-write-at-the-end
   becomes visible during the run, not at the post-mortem.
 - Every run leaves a durable record — what was invoked (argv, cwd,
-  environment grant posture), budgets in force, timestamps, outcome and
+  environment grants), budgets in force, timestamps, outcome and
   attribution, and where outputs including intermediates landed. The run
   result is the in-memory answer; the record is its persistent shadow —
   current while the run is live, not only complete at exit, and persisting
@@ -134,6 +135,11 @@ intermediate is lost data, not lost convenience.
    - No survivors — when a run ends, by any path, the child's entire process tree is gone before the call returns.
 5. **Sandboxes** — real containment (filesystem/network/resource) for untrusted execution; mechanism to be researched (not necessarily docker); replaces and decommissions dr-docker.
    - Containment is verified, not assumed — execution refuses rather than silently degrading when the promised containment is unavailable.
+   - Reach is granted per axis — filesystem read and write separately, network, environment, process-spawning — deny by default, each grant an explicit list.
+   - The declared profile is the contract — the same profile is executable by different isolation mechanisms; callers never write mechanism vocabulary.
+   - Containment constrains what a payload may touch, never what it may look like — structural gating of payload code is not containment and is not this layer's job.
+   - Every profile declares its limits — what it does not contain is part of the contract, not a docstring caveat.
+   - Containment composes with any lifetime — call-scoped or supervised; a profile is a reach declaration, not a lifecycle, and the supervised behaviors apply unreduced inside it.
 6. **Supervised long-lived processes** — children that outlive the call (agent servers, stdio RPC); a fully targeted use case with its own distinct set of concerns (liveness, restart, streaming I/O, reaping across calls), designed as its own contract — never a mode of the call-scoped runners.
    - Supervised, never orphaned — every child has an accountable owner; spawn-and-forget with nobody responsible for observing exit and reaping does not exist.
    - Exit is an observed event — child death is detected and surfaced promptly with attribution (crash vs clean exit vs killed), not discovered as a broken pipe on next use.

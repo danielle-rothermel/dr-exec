@@ -103,7 +103,7 @@ a JSONL event stream too noisy to parse), and `TimeoutExpired` is caught
 into a typed `CodexInvocation(text="", returncode=-1, timed_out=True)`
 rather than raised. Notable properties: the file-delivered result as an
 early spill-to-disk instance; the proposer's never-raises timeout envelope;
-sandbox posture pinned in argv (`-s read-only`). Testing seam: no
+sandbox profile pinned in argv (`-s read-only`). Testing seam: no
 injection — tests fake the codex CLI itself with `#!/bin/sh` stub scripts
 on PATH, including a `sleep 5` stub to force the timeout path
 (`tests/optimization/test_codex_proposer.py`).
