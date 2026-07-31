@@ -1,6 +1,7 @@
 # Current implementations
 
-Catalog of existing process-execution implementations across the fleet: one
+Catalog of existing process-execution implementations across the surveyed
+repos: one
 section per repo, one subsection per implementation. Companion to
 `current-uses.md` — that doc records the needs dr-exec must serve; this one
 records the mechanisms that exist today (anatomy, notable properties,
@@ -8,11 +9,14 @@ weaknesses) so design can mine prior art deliberately, including from
 implementations that are clearly bad. Every filled section pulls out four
 categories for cross-implementation comparison — Budget axes,
 Observability, Lifecycle, Attribution — plus two only where they exist:
-Testing seam and Amortization. Repos ordered by most recent PR activity.
+Testing seam and Amortization. The behavioral vocabulary used in judgments
+throughout is defined in `target-usecases.md`. Repos ordered by most recent
+PR activity (a superset of `current-uses.md`'s ordering — the six
+mechanism-only repos are interleaved here).
 
 ## dr-code
 
-### Bounded subprocess primitive
+### Budgeted subprocess primitive
 
 `src/dr_code/execution/subprocess.py` (345 lines, branch
 `rebuild/01-subprocess-execution`) — the reference call-scoped runner:
@@ -39,20 +43,20 @@ wall-clock are module constants rather than caller-declared:
   `SubprocessOutputLimitError`; no truncate mode.
 - Input — 4 MiB, validated before spawn; oversized input is rejected
   without spawning.
-- Termination — 5 s bounded wait for group death and 1 s bounded IPC-thread
+- Termination — 5 s budgeted wait for group death and 1 s budgeted IPC-thread
   joins; exceeding either → `SubprocessInfrastructureError`.
 
-Observability — none: no narration of any lifecycle step, no durable
+Observability — none: no narration of any lifecycle step, no run
 record; the run result is in-memory only and dies with the caller. Channel
 separation is trivially safe (the executor emits nothing). A run that hangs
 inside its deadline is indistinguishable from one making progress.
 
-Lifecycle — the fleet's reference: fresh session per spawn
+Lifecycle — the survey's reference: fresh session per spawn
 (`start_new_session=True`); on every exit path `os.killpg(SIGKILL)` with a
-completion-race retry after reaping the leader; 5 s bounded termination
-wait and 1 s bounded IPC-thread joins. The only fleet implementation
-combining session isolation, whole-group kill, and a bounded wait —
-no-survivors compliant.
+completion-race retry after reaping the leader; 5 s budgeted termination
+wait and 1 s budgeted IPC-thread joins. The only implementation in the
+surveyed repos combining session isolation, whole-group kill, and a
+budgeted wait — no-survivors compliant.
 
 Attribution — typed tree `SubprocessError` → `Timeout` / `OutputLimit` /
 `Infrastructure` (→ `Start`): bounds and infrastructure raise; outcomes
@@ -65,7 +69,7 @@ Testing seam — `PythonSubprocessRunner` Protocol, with two near-identical
 kill): the double-divergence problem a first-class fake story must
 prevent. A third fake shape (`_stub_runner`, fixed
 `SubprocessCompletedProcess`, no process) lives beside the doubles. The
-test suite is also the fleet's only lifecycle-fault-injection suite:
+test suite is also the survey's only lifecycle-fault-injection suite:
 `os.killpg` is monkeypatched to distinguish stale-group from live-group
 signal errors, pinning the reap-race semantics; env inheritance,
 replacement, and `-I` isolation each have a dedicated test.
@@ -99,7 +103,7 @@ budget:
 - Result fields — per-field traceback clipping at 8000 chars
   (`FIELD_LIMIT`) in the child.
 
-Observability — no narration and no durable record, but two strong partial
+Observability — no narration and no run record, but two strong partial
 properties: channel separation is the design's centerpiece (the child
 reassigns `sys.stdout` to stderr so candidate prints cannot corrupt
 protocol output), and per-case `elapsed_seconds` measurements plus
@@ -110,7 +114,7 @@ the results-leave-the-child-incrementally behavior.
 
 Lifecycle — delegated wholesale to the primitive.
 
-Attribution — the fleet's most developed: `CANDIDATE_KILL_RETURNCODES`
+Attribution — the survey's most developed: `CANDIDATE_KILL_RETURNCODES`
 ({-SIGKILL, -SIGSEGV}) → candidate-attributed error; timeout → every case
 TIMEOUT; output limit → every case ERROR; other nonzero exit, JSON parse
 failure, shape violation, or unknown/duplicate case IDs →
@@ -142,7 +146,7 @@ path. `stdin=DEVNULL`, `env={**os.environ}` (a no-op overlay),
 `stderr[:2000]` (a *head* slice; the separate `stdout[-2000:]` tail is
 success-path evidence, not error diagnosis). Results return through a
 shared SQLite tool-call store the MCP subprocess reopens from
-`WS_MCP_SQLITE_PATH` — durable-store-as-IPC, the fleet's only instance
+`WS_MCP_SQLITE_PATH` — durable-store-as-IPC, the survey's only instance
 of state rather than output crossing the process boundary.
 `src/whetstone/optimization/codex_proposer.py:146` —
 `--output-last-message <tmpfile>` with a scratch-dir cwd; the invoker
@@ -168,7 +172,7 @@ tool-call store *is* a durable cross-process record; the proposer's
 result tmpfile is transient.
 
 Lifecycle — none beyond `subprocess.run` defaults: leader-only timeout
-kill, no group, no escalation, no reap concern.
+kill, no group, no escalation; n/a — no reap concern (call-scoped `run`).
 
 Attribution — runner: nonzero → `OpaqueStepError` (exception-as-outcome).
 Proposer: the three-way taxonomy above, with empty-output-as-signal
@@ -193,7 +197,7 @@ surface). Currently nonfunctional: `dr_code` *is* installed — pinned to
 commit `5810f30` — but the pinned wheel predates the module move to
 `dr_code.execution.subprocess`, and the call site passes `input_json=`
 where the current signature takes `input_text=`. Notable as prior art for
-the batch-driver protocol shape, and as the fleet's clearest example of
+the batch-driver protocol shape, and as the survey's clearest example of
 cross-repo drift: a *pinned but stale* execution dependency, where the
 pin preserved the breakage instead of preventing it.
 
@@ -205,7 +209,7 @@ Observability — none: the single-line JSON response is the only artifact,
 and the breakage itself demonstrates the cost — nothing recorded the drift
 until the call site failed.
 
-Lifecycle and attribution — moot while broken; the intended design
+Lifecycle — n/a (broken). Attribution — n/a (broken); the intended design
 inherits both from the dr-code primitive.
 
 ### Docker availability probe
@@ -234,14 +238,15 @@ code) — file-delivered, not captured. (Provenance: this code lives on
 unmerged `envs/*` branches/worktrees, not main.) Test-side patterns, all
 in `tests/c23/test_upstream.py`: a reverse-then-forward `patch --batch`
 round-trip against pinned SHA256s — the strongest vendoring-integrity
-mechanism in the fleet; full env replacement with constructed `PATH`; and
+mechanism across the repo survey; full env replacement with constructed
+`PATH`; and
 `PYTHONHASHSEED` *randomization* (not pinning): the subprocess exists
 precisely because the hash seed cannot vary in-process —
 subprocess-as-environment-control. An 8-way ThreadPoolExecutor test pins
 concurrency safety and global-RNG-state preservation.
 
 Budget axes — wall-clock is a caller parameter (`timeout_s: float =
-300.0`), rare in the fleet; output captured unbounded (the result travels
+300.0`), rare across the surveyed repos; output captured unbounded (the result travels
 by file, disk-backed and unbounded).
 
 Observability — none live; on failure `UpstreamError` carries
@@ -263,7 +268,7 @@ copies), a deliberate trade of per-call setup for parallel safety.
 ### Timeout-bearing git helper with persisted failure records
 
 `src/fchord/github_pull.py:186` (`_git`) — captured, text, `check=True`,
-and — rare among the fleet's git helpers — a timeout: `_GIT_TIMEOUT =
+and — rare among the survey's git helpers — a timeout: `_GIT_TIMEOUT =
 300.0` (:36), per *invocation*, and `_sparse_shallow_clone` makes three
 (clone, sparse-checkout, rev-parse), so the effective clone bound is up to
 900 s. Repo scoping via `git -C` argv; the checkout lives in a
@@ -275,7 +280,7 @@ atomic-write-with-cleanup idiom in shell.
 Budget axes — wall-clock only (module constant, per invocation not per
 operation); no output bound.
 
-Observability — the fleet's clearest failure-as-persisted-record: clone
+Observability — the survey's clearest failure-as-persisted-record: clone
 failure writes `pull.json` with a `FailedPage(url, error)` entry via
 atomic write and returns it — the failed attempt is durably recorded, not
 raised (docstring states the contract). Success records provenance: the
@@ -312,23 +317,45 @@ materialized wholly in memory into a tarfile. Amortization — none: a
 three-way merge of an N-file skill spawns ~3N git processes
 (`cat-file blob` per file per side). Testing seam — none: tests spawn
 the real script via `uv run` (no timeout), with testability coming from
-env-var path injection, not a runner seam. Note: the audit's
-`skill_dispatch.py` agent-CLI spawn (`claude -p`, timeout 120) no longer
-exists — the file was cut to a pure-filesystem checker; dotfiles now has
-no agent-CLI execution.
+env-var path injection, not a runner seam. Note: `skill_dispatch.py` is a
+pure-filesystem checker; dotfiles has no agent-CLI execution.
+
+Budget axes — none: no timeout parameter and no seam to add one, on local
+*and* network git calls; `git archive` output is materialized wholly in
+memory with no cap. Observability — none: no narration and no run record;
+stderr is routed to DEVNULL on the returncode-as-boolean paths and
+discarded on the merge path. Lifecycle — `subprocess.run` defaults,
+leader-only; inherited stdin with no `GIT_TERMINAL_PROMPT=0` means a
+credential prompt hangs a merge forever with no kill path. Attribution —
+three incompatible disciplines in one file: raw `CalledProcessError`;
+returncode-as-boolean collapsing missing repo, corrupt object, and absent
+commit into `False`; and every nonzero from `git merge-file` reinterpreted
+as "conflict", so genuine errors (−1/128) masquerade as conflicts —
+collapsed attribution three ways.
 
 ### pi extensions (TypeScript)
 
 `zsh-user-bash.ts:31` — every model-issued command becomes
 `exec <zsh> -fc <command>` passed as a *string* to pi's bash-based exec:
 double-shelled by construction (bash parses the outer, zsh the inner),
-with single-quote `shellQuote` correct for one level; bounding and kill
+with single-quote `shellQuote` correct for one level — a direct violation
+of the argv-only behavior; bounding and kill
 delegated entirely to pi. `copy-all.ts` — `spawn("pbcopy")` with stderr
 accumulated into the rejection message and spawn-error distinguished
 from exit failure, but no stdin error handler (EPIPE → unhandled) and no
 timeout. `diff.ts` — `pi.exec` with a bare-literal 5000 ms timeout
 repeated per site, called up to four times per flow with no aggregate
 budget.
+
+Budget axes — wall-clock only, and only in `diff.ts` (a 5000 ms literal
+repeated per site, no aggregate budget); `zsh-user-bash.ts` delegates all
+bounding to pi; `copy-all.ts` has none. Observability — none: no narration
+and no run record; `copy-all.ts`'s stderr accumulation into a rejection
+message is the only retained evidence. Lifecycle — delegated entirely to
+pi for the zsh and `diff.ts` paths; `copy-all.ts` has no kill path and no
+timeout, so a wedged `pbcopy` is never terminated. Attribution —
+`copy-all.ts` distinguishes spawn error from exit failure (the one
+distinction here); elsewhere attribution is pi's, unexamined.
 
 ## whetstone-viewer
 
@@ -393,6 +420,14 @@ no timeout, throws on nonzero; the child delivers its result via `--out
 <file>` (artifact path), and a `try/finally rmSync` cleans the scratch
 dir on every path.
 
+Budget axes — wall-clock only: 30 s on the git helper, 60 s on the ruff
+call, none at all on `gen-api.mjs`; no output bounds anywhere.
+Observability — none live; the ruff path's documented null-vs-false
+discipline is the only recorded signal, and the git helper's `None`
+records nothing at all. Lifecycle — `subprocess.run` and `execFileSync`
+defaults, leader-only; the only cleanup is `gen-api.mjs`'s
+`try/finally rmSync` of the scratch dir.
+
 ## genfxn
 
 ### safe_exec worker containment
@@ -411,8 +446,9 @@ persistent reusable worker with its own startup timeout; spawn-bootstrap
 diagnostics; six-type error taxonomy. Weaknesses: no stdin path (inputs
 travel as pickled args, unbounded). The AST layer is
 shape-policing rather than reach-restriction: it forbids what generated
-code may *look like* (no classes, no globals), a posture the target
-principles reject for research code.
+code may *look like* (no classes, no globals) — shape-policing, which the
+containment-constrains-reach-not-shape behavior rejects, for research
+code.
 
 Budget axes:
 
@@ -423,7 +459,7 @@ Budget axes:
   gates (sanitize through the type graph → pre-pickle → size-check), with
   the stated rationale that pre-serializing prevents queue feeder-thread
   errors from being *misattributed as timeouts* — the sharpest
-  attribution reasoning in the fleet.
+  attribution reasoning in the survey.
 - Wall-clock — per-execution timeout (default 1.0 s); the "startup
   timeout" is derived (`max(timeout_sec, 1.0)`), not independent.
 - Input — unbounded: pickled args cross with no size validation, the
@@ -439,14 +475,14 @@ the parent's fds); a module logger exists but speaks only DEBUG-level
 swallowed-cleanup breadcrumbs; spawn-bootstrap diagnostics are a
 three-part *inference* (CPython message match + `__main__` introspection
 + start-method check) ending in a remedy-bearing error naming the exact
-env-var fix — the best startup attribution in the fleet, though the
+env-var fix — the best startup attribution in the survey, though the
 string match is version-coupled.
 
 Lifecycle — TERM→KILL escalation with 0.2 s joins, degradable and
 unprovable: `os.setsid()` failures are swallowed (group kill silently
 becomes leader-only) and every teardown step is individually excepted to
 DEBUG. Forkserver preferred over spawn (a second, unremarked amortization
-axis); the one-shot `_run_isolated` path — including its queue-feeder
+boundary); the one-shot `_run_isolated` path — including its queue-feeder
 grace drain — is dead code: only the persistent worker is reachable.
 
 Attribution — six typed classes, but worker *crash* — the case that
@@ -455,18 +491,19 @@ interpolated into a string; exit-code discrimination exists
 (crashed-with-code vs exited-without-result) but is untyped.
 
 Amortization — `_PersistentWorker` reuses one containment-bearing worker
-across calls: the fleet's clearest warm-worker amortization.
+across calls: the survey's clearest warm-worker amortization.
 
 In practice — the trust gate is ceremony: all eleven validator call sites
 pass `trust_untrusted_code=True` unconditionally and none passes a
 timeout or memory limit, so every real execution runs at the 1 s/256 MB
-interior defaults. And there are zero tests: 880 lines of signal, group,
+interior defaults — the categorization-is-declared behavior defeated at
+every call site. And there are zero tests: 880 lines of signal, group,
 and serialization lifecycle with no test file and no injection seam
 beyond a start-method env var.
 
 ### Compiled-parity, formatting, and quality-check execution
 
-Three more execution sites, previously uncataloged.
+Three more execution sites.
 `verification/parity.py` — compile-once-run-many: a context manager
 compiles generated Java/Rust once into a prefix-named TemporaryDirectory
 and yields a frozen runner handle whose `command_prefix` the per-case
@@ -481,7 +518,8 @@ output cap. `langs/formatting.py` — `lru_cache`d subprocess memoization
 elsewhere); tools resolved by `which` at *import time* (PATH snapshotted
 once); every failure — timeout, crash, parse — silently returns the
 unformatted input with no log line: the purest failure-degrades-to-input
-in the fleet; file-as-return-channel via `--replace` + read-back.
+across the surveyed repos; file-as-return-channel via `--replace` +
+read-back.
 `generated_code_quality.py` (top-level, not under `langs/`) — 30 s
 constant; five-tool preflight whose error names every missing tool *and*
 the exact bypass flag; timeout converted to `SubprocessError` with output
@@ -492,9 +530,26 @@ raise once, displaying the first 20 with a count of the rest — a rare
 explicit cap on *diagnostic* size. Four uncoordinated wall-clock
 constants now exist across one repo: 1 s, 15 s, 20 s, 30 s.
 
+Budget axes — wall-clock only, as uncoordinated module constants: one 20 s
+constant shared by parity's compile and run phases, 30 s in
+`generated_code_quality.py`; no output caps anywhere; the one cap on
+anything else is the diagnostic display cap (first 20 failures plus a
+count). Observability — none: no narration and no run record; the
+formatting path is the extreme case, silently returning unformatted input
+on timeout, crash, or parse failure with no log line, while parity's
+`_format_subprocess_error` echoes the command only into the raised error.
+Lifecycle — `subprocess.run` defaults, leader-only; the only cleanup is
+parity's prefix-named `TemporaryDirectory`, discarded when the context
+manager exits. Attribution — mixed by site: parity distinguishes timeout
+from nonzero exit and splits item failures (`ParityFailure` data) from
+artifact failures (raised); `generated_code_quality.py` uses a two-bucket
+tool-said-no vs tool-didn't-work taxonomy; `langs/formatting.py` collapses
+timeout, crash, and parse failure into "return the input unchanged" —
+collapsed attribution at its purest.
+
 ## dr-platform
 
-### Spawn-context crash-recovery harness
+### Spawn-context crash-recovery probe
 
 `tests/test_dbos_recovery_boundary.py` — `multiprocessing` spawn-context
 workers used to prove DBOS replay across a genuine process death:
@@ -509,6 +564,15 @@ is uuid-suffixed per run — collision avoidance against a shared Postgres
 rather than via temp dirs. Attribution: exit-code sentinel plus four
 independent durable DB signals cross-checked after the crash.
 
+Budget axes — wall-clock only, on two tiers: the child's self-polled 10 s
+deadline and the parent's 20 s join, the margin sized so `terminate()`
+cannot destroy the child's diagnostic traceback; no output or memory
+bounds. Observability — the four durable DB signals are the record, and
+the deliberately preserved child traceback is the narration; nothing
+narrates the spawn itself. Lifecycle — one-step escalation: `terminate()`
+followed by an *unbounded* join, no group targeting and no kill after the
+terminate.
+
 ## dr-graph
 
 ### Import-hygiene probe
@@ -521,6 +585,11 @@ path with no protocol parsing: the child raises
 offending module names to stderr and exits 1; the parent asserts
 returncode 0 with stderr in the failure message. Captured, `check=False`,
 no timeout; the repo's only exec site.
+
+Budget axes — none: no timeout, no output bound. Observability — none: no
+narration and no run record; the only artifact is the offending module
+names on stderr, surfaced in the pytest failure message. Lifecycle —
+`subprocess.run` defaults, leader-only; nothing outlives the call.
 
 ## dr-providers
 
@@ -537,18 +606,29 @@ list — program-from-data, not a literal.
 *relative* paths — cwd-dependent, and a script failure is a pytest
 collection error, not a test failure. No timeouts anywhere.
 
+Budget axes — none: no timeouts anywhere, no output bounds (the probes do
+not capture at all). Observability — none of the executor's own: with no
+capture, failure detail lands only on inherited stderr, visible in
+pytest's capture and absent from the `CalledProcessError`; no run record.
+Lifecycle — `subprocess.run` defaults, leader-only; the `exec_module`
+site runs in-process, so it has no child lifecycle at all. Attribution —
+`check=True` raise-on-nonzero and nothing finer; the child asserts
+in-process, so payload and executor failure are indistinguishable from
+the parent's side, and the `exec_module` script's failure is
+misattributed as a pytest collection error.
+
 ## dr-subs
 
 ### SSH remote worker invocation
 
-`src/dr_subs/machines.py:121-198` (`_run_remote_worker`) — the fleet's one
+`src/dr_subs/machines.py:121-198` (`_run_remote_worker`) — the survey's one
 remote execution path: `Popen(("ssh", *_SSH_OPTIONS, source_id,
 *_REMOTE_WORKER_COMMAND))` with the peer drawn from a closed enum (:51), a
 JSON request on stdin, and the response read via `selectors` + `os.read`.
 Companion probes: an ssh reachability check (DEVNULL, timeout 8) before
 expensive work, and a `scutil` hostname query where failure *and*
 unrecognized-hostname both degrade to `"local"`. The write-before-read
-hazard is conditional, not the unconditional deadlock first recorded: the
+hazard is conditional: the
 write is `BrokenPipeError`-guarded and ssh forwards stdin, so both sides
 block only if the peer emits >64 KB of response before consuming the
 request. The ssh options are themselves a nested transport budget:
@@ -579,7 +659,7 @@ Attribution — a seven-code transport-aware taxonomy: ssh-level
 unavailable`/`timeout`/`failed`, `peer_response_limit`,
 `peer_protocol_error`), plus `peer_unknown` constructed without any spawn.
 Protocol validation is strict set-equality on response fields, version
-match, and — strongest correctness pattern in the fleet — the response
+match, and — strongest correctness pattern in the survey — the response
 must *echo the request* (returned roots and config compared against what
 was sent).
 
@@ -607,6 +687,18 @@ success are indistinguishable except by downstream content checks.
 Chrome profile), no kill at all, and statically-broken imports. Five
 `sh -c 'command -v'` probes with two different return contracts.
 
+Budget axes — wall-clock only and only in places: a 15 s wait backstopping
+the DevTools URL scrape, and `smoke.mjs`'s virtual-time budget; the CDP
+clients have no response timeout at all, so a lost reply hangs forever; no
+output bounds. Observability — none: no narration and no run record;
+stderr is consumed as a scrape target for the `ws://` URL rather than
+recorded, and `smoke.mjs` accumulates stdout only to feed downstream
+content checks. Lifecycle — the weakest in the surveyed repos: cleanup is
+called only from try/catch bodies, so no signal or exit handler exists and
+Ctrl-C orphans the Chrome tree and its temp profile; kills are leader-only
+`SIGKILL` with no wait, racing profile `rmSync` against Chrome's own
+shutdown writes; `cap.mjs` has no kill at all.
+
 ### Shell wrappers: Perl deadline and codex batch
 
 `phase6/…/pi-image-run.sh` — the Perl deadline faithfully reconstructs
@@ -622,6 +714,20 @@ spooled per invocation (the repo's one durable record); but
 `set -uo pipefail` without `-e` means per-document failures print and
 the loop continues — the script always exits 0 with no status
 aggregation.
+
+Budget axes — wall-clock only, in `pi-image-run.sh`: the Perl SIGALRM
+deadline plus a 5 s TERM→KILL escalation window; `run-codex.sh` has none.
+No output bounds on either. Observability — asymmetric: `run-codex.sh`
+spools a full trace per invocation (the repo's one run record), while
+`pi-image-run.sh` narrates nothing and `eval "$(mise env)" || true`
+silently proceeds under a wrong toolchain. Lifecycle — `pi-image-run.sh`
+does TERM → 5 s → KILL on a single pid with no `setsid`, so pi's tool
+subprocesses survive; `run-codex.sh` has no lifecycle handling at all.
+Attribution — `pi-image-run.sh` reconstructs shell-convention exit codes
+(128+N) on the normal path but exits 124 from inside the SIGALRM handler,
+so a deadline kill can never report the child's actual signal;
+`run-codex.sh` discards attribution entirely — it always exits 0 and
+aggregates no per-document status.
 
 ## unitbench
 
@@ -641,9 +747,22 @@ into `JSON.parse` (any uv warning corrupts it), then an unguarded
 hand-patch of the generated schema: a cross-repo contract enforced by
 inline mutation.
 
+Budget axes — output only, and only by accident: `gen-graph-schema.mjs`
+inherits Node's default 1 MiB `maxBuffer`; no timeouts anywhere.
+Observability — none: no narration and no run record; on the
+`stdio:'inherit'` path output goes to the operator's terminal and is not
+retained, and `gen-graph-schema.mjs` feeds raw stdout straight into
+`JSON.parse`, so any uv warning corrupts the result with no trace.
+Lifecycle — `spawnSync`-family defaults, leader-only; nothing outlives the
+call, and no kill path exists. Attribution — broken on the inherit path:
+`.trim()` on a null `stderr` crashes the reporter with a TypeError instead
+of reporting, missing-binary (`status null`) hits the same crash, and
+`result.error` is never consulted; `gen-graph-schema.mjs` has no error
+handling at all.
+
 ### Vercel install wrapper
 
-`scripts/vercel-install.mjs` — the fleet's cleanest JS injection seam:
+`scripts/vercel-install.mjs` — the survey's cleanest JS injection seam:
 environment, spawn function, and output sinks all defaulted parameters
 with typed JSDoc contracts, fully drivable without a real process.
 Redaction is thoughtful but bounded: the token is redacted in raw *and*
@@ -654,12 +773,19 @@ re-forwarding, not exposure. Attribution: exit code preserved in the
 message, but the spawn-error path discards the underlying error for a
 fixed string (ENOENT and EACCES indistinguishable). No timeout.
 
+Budget axes — none: no timeout, no output bound. Observability — output
+sinks are injectable parameters, so the caller chooses the destination,
+but nothing is narrated or persisted by the wrapper itself; redaction is
+executor-side and per-chunk, so a token split across stream chunks leaks
+into whatever sink the caller supplied. Lifecycle — `spawn` defaults,
+leader-only: no kill path and no escalation, so every descendant of
+`pnpm install` outlives a wedged run.
+
 ## nlae
 
 ### Two-transport fetcher with filesystem reconciliation
 
-`src/nlae/arxiv_library/fetch.py` — a two-backend design the audit
-flattened: `Transport.AUTO` picks gcloud iff `shutil.which` finds it,
+`src/nlae/arxiv_library/fetch.py` — a two-backend design: `Transport.AUTO` picks gcloud iff `shutil.which` finds it,
 else a pure-Python httpx path that spawns nothing — availability-driven
 backend selection where the *in-process fallback is the better-bounded
 path* (60 s timeout + retries vs gcloud's no timeout, no capture,
@@ -674,6 +800,17 @@ at two levels: production and tests take structurally different paths
 fakes pin `subprocess.run`'s exact kwarg names — adding `timeout=` to
 production would break every test: a seam that actively resists adding a
 budget.
+
+Budget axes — inverted across the two backends: the in-process httpx path
+carries a 60 s timeout plus retries, while the spawning gcloud path has no
+timeout and no capture at all; no output or input bounds on either.
+Observability — none from the spawn: gcloud's stdio is inherited and
+uncaptured, so progress is the operator's terminal and nothing is
+recorded; the destination-directory re-listing is the only durable
+evidence of what happened. Lifecycle — `subprocess.run` defaults,
+leader-only, with no timeout to trigger even that; the `.part` +
+atomic-rename convention (httpx path only) is the sole cleanup
+discipline.
 
 ## dr-llm
 
@@ -697,7 +834,9 @@ key-name redaction → 10 MiB event envelope. Under *default* config the
 sanitize layer replaces payloads with `"<omitted>"` — which also empties
 the exception message, so the production failure message contains no
 stderr at all (the `[:800]` clip is dead code), and timeout events
-discard `TimeoutExpired`'s recovered partial output. `latency_ms` is a
+discard `TimeoutExpired`'s recovered partial output — executor-side
+redaction of the kind the faithful-record behavior forbids, and it empties
+the failure message. `latency_ms` is a
 first-class response field. Argv is logged verbatim (not in the redaction
 key set); env is never logged.
 
@@ -739,11 +878,27 @@ open-file stdin, bytes, no timeout; the pgpass tempfile is chmod-0600
 deadlock-avoidance case (stderr drained before `wait`) and a fake built
 by calling `Popen.__new__` to skip initialization.
 
+Budget axes — almost none, and one that lies: captured bytes with no
+timeout on the docker runner, no timeout on the psql restore, and no
+output bounds anywhere; `wait_docker_ready`'s `timeout_seconds` is an
+*iteration count* over untimed `docker exec` calls while its sibling
+`wait_dsn_ready` is a true monotonic deadline — same parameter name,
+different semantics. Observability — none of the executor's own: no
+narration and no run record; psql's stdout goes to DEVNULL so restore
+diagnostics are stderr-only, and the one narration instance is
+`docker_swap_in_db`'s cleanup failure reported via `exception.add_note`.
+Attribution — classification by stderr *substring* into five typed errors
+plus a fallback, with the returncode never inspected: locale- and
+version-fragile, and call sites layer further ad-hoc string checks on top
+("already running" → success). Retriability in the readiness loop is
+derived from those same substrings. Tool-missing is handled three
+different ways in one repo with no `shutil.which` preflight anywhere.
+
 ## nl_latents
 
 ### Containment tripwire and provider worker scripts
 
-`evaluation_runner.py:184-213` — the fleet's one caller-side containment
+`evaluation_runner.py:184-213` — the survey's one caller-side containment
 verification: snapshot `git status --short`, run a one-item smoke
 evaluation through the docker path, re-snapshot, and raise if the
 working tree changed ("use docker isolation before running decoder
@@ -757,9 +912,26 @@ manager: pids array + background jobs + bare `wait`, cleanup is `kill`
 (TERM only, no groups, no escalation, trap wired by the sourcing
 caller); per-provider worker counts and retry policies as env-defaults
 (rate-limit-derived concurrency ceilings); `: "${VAR:?}"` fail-fast on
-required config; and the fleet's highest-fidelity command narration —
+required config; and the survey's highest-fidelity command narration —
 `printf ' %q'` logging each launched command shell-quoted and
 re-runnable.
+
+Budget axes — none on execution: no wall-clock, output, or memory bounds
+on the docker path or the worker runner; the only declared limits are
+admission-shaped — per-provider worker counts and retry policies as
+env-defaults, with rate-limit-derived concurrency ceilings.
+Observability — the `printf ' %q'` command narration is the strength (each
+launched command logged shell-quoted and re-runnable), and the containment
+tripwire's `git status --short` snapshots are a filesystem-witnessed
+pre-flight record; nothing persists a run record beyond that.
+Lifecycle — the bash runner is a hand-rolled process-group manager: pids
+array plus background jobs plus a bare `wait`, with cleanup as `kill` —
+TERM only, no groups, no escalation, and the trap wired by the sourcing
+caller rather than the script itself. Attribution — the containment
+tripwire refuses pre-execution when the working tree changed (a declared
+verdict with the filesystem as evidence); `: "${VAR:?}"` fail-fast
+attributes missing required config before any spawn; beyond those, failure
+attribution rides bare exit codes.
 
 ## dr-cognee
 
@@ -769,6 +941,10 @@ re-runnable.
 to dr-notion's file except a one-line vendoring header ("keep edits
 upstream"); no drift, and actively imported (committed `__pycache__`).
 Every dr-notion finding applies at a +1 line offset.
+
+Budget axes — n/a — byte-identical vendored copy; dr-notion's findings
+apply unchanged. Observability — n/a — same. Lifecycle — n/a — same.
+Attribution — n/a — same.
 
 ## code-eval
 
@@ -782,8 +958,9 @@ duration_s, ...)` envelope that never raises. Weaknesses: no environment
 control, no process group handling. Consumers drive ruff/ty over generated
 source (stdin or tmpfile). Adjacent in-process pieces:
 `validators/compile_check.py` (`compile()` only, never executed) and
-`validators/import_resolve.py` (`find_spec`, which executes parent packages
-of dotted names).
+`validators/import_resolve.py` (`find_spec` on the root of each dotted name
+only — parent packages are never imported; relative imports are skipped
+entirely).
 
 Budget axes — wall-clock only:
 
@@ -791,7 +968,7 @@ Budget axes — wall-clock only:
   stdout/stderr are recovered from `TimeoutExpired`.
 - Output and input — unbounded.
 
-Observability — no narration and no durable record, but the result
+Observability — no narration and no run record, but the result
 envelope is diagnosis-friendly: `tool_found`, `timed_out`, `duration_s`,
 and timeout-recovered partial output all arrive as data. Nothing
 persists — and ty's persisted diagnostics reference tempdir paths that no
@@ -816,9 +993,7 @@ Testing seam — constructed `SubprocessRunner` instances passed to
 consumers (configuration-as-injection) — but injection is optional with
 silent default-construction fallback. One acknowledged TOCTOU: the L5
 path `which`es ty twice with an explicit "ty disappeared mid-run"
-branch. Correction from source: the catalog's `find_spec`
-parent-package-execution hazard is defused in code — only the root of
-each dotted name is passed, so parent packages are never imported.
+branch.
 
 ## symphony-lite
 
@@ -839,15 +1014,16 @@ before spawn — a negative environment assertion.
 
 Budget axes — no run timeout (unbounded by design; the transcript's
 unbounded growth is a deliberate grant), but not budget-free: a
-fleet-level `CONCURRENCY_CAP = 3` admission budget, and stuck-detection
+process-collection-level `CONCURRENCY_CAP = 3` admission budget, and
+stuck-detection
 via the transcript file's *mtime* compared against a configured
 threshold — file mtime as an inferential heartbeat, the only
 wall-clock-ish bound on a run. One hole: an untimed, uncheck'd `git`
 call sits inside the spawn path.
 
-Observability — better than first assessed: every lifecycle transition
+Observability — every lifecycle transition
 (spawn, resume, state change, kill) is journaled as structured events in
-SQLite — arguably the fleet's best lifecycle narration — and the
+SQLite — arguably the survey's best lifecycle narration — and the
 transcript is spooled live and durable (stdout and stderr multiplexed
 into one stream file, non-JSON stderr lines tolerated by a lenient
 parser: lossy-by-design). The pid registry is a durable ownership record
@@ -864,7 +1040,7 @@ with the liveness probe as fallback for vanished runs — in-band exit
 observation. Codex runs get a restart-aware mapping table:
 `TurnState.UNKNOWN → FAILED` with the comment "the daemon restarted
 mid-run" — inferring run death from the supervisor's own amnesia, unique
-in the fleet.
+across the surveyed repos.
 
 ### Codex app-server JSON-RPC singleton
 
@@ -884,12 +1060,13 @@ permanently — every later request then times out; the stdin write is
 unguarded against `BrokenPipeError`; a crashed child is never reaped or
 restarted; `stop()` is leader-only `terminate()`; the append-mode log
 handle is never closed (an fd leak per start); sandbox and approval
-policy are hardcoded constants (`workspace-write`, `never`) — the same
-interior-default critique made of genfxn applies here. No testing seam
+policy are hardcoded constants (`workspace-write`, `never`) — hardcoded
+where the declared-profile behavior requires caller declaration. No testing seam
 anywhere in the execution paths.
 
 Budget axes — per-request wall-clock 60 s (interactions budgeted while
-the child is not — the UC6 shape); no output bound on the RPC stream.
+the child is not — the supervised interactions-are-budgeted shape); no
+output bound on the RPC stream.
 
 Observability — stderr spooled to an append-mode log (durable); no
 narration; a dead child is discovered as a broken pipe on next use.
@@ -911,7 +1088,7 @@ returncode-as-predicate.
 `src/dr_notion/github_docs_mirror.py` — a sparse blob-filtered clone
 (`--depth 1 --filter=blob:none --sparse` + `sparse-checkout set
 --no-cone` with computed patterns): bandwidth bounded *by protocol*,
-expressed in argv — the fleet's only resource bounding done by asking for
+expressed in argv — the survey's only resource bounding done by asking for
 less rather than killing. The clone is uncaptured with inherited stdin
 and no timeout: a credential prompt on a private URL blocks forever.
 `run_git` (cwd=checkout, captured, `check=True`) propagates raw
@@ -923,12 +1100,24 @@ origin-URL match check; the checkout path is fixed and unlocked —
 concurrent mirrors of one repo race on the same tree. Env fully
 inherited: no `GIT_TERMINAL_PROMPT=0`, no `git -c` hardening.
 
+Budget axes — one, and it is not a kill: bandwidth bounded by protocol via
+`--depth 1 --filter=blob:none --sparse`, expressed in argv; no wall-clock
+timeout on the clone and no output bound. Observability — none: the clone
+is uncaptured, `run_git` captures but propagates raw `CalledProcessError`
+whose stderr is absent from `str(exc)`, and nothing is persisted.
+Lifecycle — `subprocess.run` defaults, leader-only, with no timeout to
+trigger even that; the fixed, unlocked checkout path is the only
+persistent state, and concurrent mirrors race on it. Attribution —
+raise-on-nonzero and nothing finer: failures surface as "exit status 128"
+with git's actual error invisible, and a credential prompt on a private
+URL blocks forever rather than failing at all.
+
 ## dr-dspy
 
 ### Deno capability-sandboxed Python interpreter
 
-`dspy/primitives/python_interpreter.py` (vendored) — the fleet's one
-non-container sandbox: a persistent Deno process running Pyodide (Python
+`dspy/primitives/python_interpreter.py` (vendored) — the survey's one
+non-container containment mechanism: a persistent Deno process running Pyodide (Python
 compiled to WASM), driven over JSON-line RPC on stdin/stdout. Containment
 is Deno's deny-by-default capability model, granted per axis at
 construction: `--allow-read=<paths>`, `--allow-write=<paths>`,
@@ -953,7 +1142,7 @@ exactly the silent-replacement pattern the supervised behaviors forbid.
 
 Lifecycle — persistent child with restart-on-death (`_ensure_deno_process`
 polls before each use); no kill path, no escalation, no reap of the
-replaced process.
+replaced process (shutdown-deliberate-and-complete requires reaping).
 
 Attribution — crash surfaces exit code plus stderr; in-sandbox permission
 denials arrive as Deno errors through the RPC channel — reach violations
@@ -976,6 +1165,16 @@ the LM object (`lm.process`, `lm.thread`, `lm.get_logs`) — no handle
 type, no registry. `get_free_port()` is a classic TOCTOU bind race, and
 the server binds 0.0.0.0.
 
+Budget axes — a readiness timeout only (parameter, default 1800 s); no
+execution cap, and the `logs_buffer` the tail thread appends to is
+explicitly unbounded. Observability — every child line is printed to
+console until the ready event and retained in the in-memory
+`logs_buffer`, reachable only through a monkey-patched `lm.get_logs`; no
+run record and no narration of the lifecycle itself. Attribution —
+none: readiness-timeout failure is the only distinguished outcome, and
+because the child is never reaped or restarted a crashed server is
+indistinguishable from a slow one.
+
 ### HumanEval batch ancestor
 
 `dr_dspy/humaneval/task.py:555` (`run_subprocess_batch`) — the direct
@@ -991,12 +1190,23 @@ multiprocessing start method (`fork` on non-Windows, against CPython's
 macOS default) with `force=True` under a suppressed `RuntimeError` —
 silently clobbering any prior setting.
 
+Budget axes — wall-clock only, and it never reaches the caller: the
+ancestor has no output cap branch and does not carry the timeout value
+into messages or results. Observability — none: no narration, no run
+record, no per-case timing (all added by the rewrite), and no
+partial-result-carrying exceptions, so a failure loses what the batch had
+already produced. Lifecycle — raw inline `subprocess.run` defaults,
+leader-only, with no injection seam; `runtime.py:37` additionally forces
+the multiprocessing start method globally with `force=True` under a
+suppressed `RuntimeError`.
+
 ## llmflow
 
 ### Bash tool executor (TypeScript)
 
 `packages/runtime/src/tool-executor.ts` — model-issued commands via
-`bash -lc` with `cwd`, SIGTERM → 1 s → SIGKILL (leader only). Notable
+`bash -lc` — an argv-only violation by design (the tool's contract is
+shell execution) — with `cwd`, SIGTERM → 1 s → SIGKILL (leader only). Notable
 property: `BASH_TOOL_CONTRACT` (`packages/core/src/tools.ts:84-130`) — tool
 schema, approval requirement, timeout defaults/ceilings, and output limit
 co-located in one frozen contract object. Weaknesses: login-shell
@@ -1010,7 +1220,10 @@ Budget axes — wall-clock and output, both pinned in the contract object
   gets 60.
 - Output — `cappedAppend` re-materializes the full concatenation per
   chunk: output is bounded but the *work* is not — a capped runaway child
-  still costs unbounded allocation. Truncation silent.
+  still costs unbounded allocation, and it is the aggregate-in-memory
+  antipattern. Truncation is silent — noncompliant with the
+  visible-truncation behavior (overflow policy: failure or visible
+  truncation, never silent loss).
 - Termination — SIGTERM then a 1 s SIGKILL timer that is `unref`'d: if
   the event loop has nothing else pending, Node exits before the SIGKILL
   fires — best-effort escalation dependent on unrelated loop state.
@@ -1021,11 +1234,13 @@ Budget axes — wall-clock and output, both pinned in the contract object
   anti-hang measure. No `env` control; `-lc` sources the operator's rc
   files. The bash side has *no* injection seam (module-private const),
   while the codex side has a clean one — two opposite testability
-  postures in one repo.
+  stances in one repo.
 
 Observability — the silent `cappedAppend` truncation is the section's
 anti-pattern: information loss with no marker, so a capped transcript is
-indistinguishable from a complete one. No executor narration or durable
+indistinguishable from a complete one — noncompliant with the
+visible-truncation behavior (overflow policy: failure or visible
+truncation, never silent loss). No executor narration or run
 record in the executor itself; approval-before-execution surfaces each
 command to the operator ahead of time, which is a form of pre-execution
 visibility.
@@ -1045,8 +1260,7 @@ stdin; AbortSignal cancellation. Weaknesses: SIGTERM only, leader only.
 Budget axes — wall-clock only:
 
 - Wall-clock — `CODEX_COMMAND_TIMEOUT_MS = 60_000`, a hardcoded module
-  constant with no override path (an earlier version of this section
-  called it an env var — it is not).
+  constant with no override path.
 - Output — unbounded stdout accumulation.
 - Input — prompt via `stdin.end()` with no error handler (EPIPE
   unhandled).
@@ -1057,8 +1271,8 @@ error events, tool calls, and token counts are silently discarded — the
 opposite of dr-llm's in-band error handling. No narration, no record.
 
 Lifecycle — SIGTERM only, leader only; the spawn-error path performs no
-kill at all. Argv pins a fully non-interactive sandbox profile:
-`--sandbox read-only --ask-for-approval never --ephemeral` — the fleet's
+kill at all. Argv pins a fully non-interactive containment profile:
+`--sandbox read-only --ask-for-approval never --ephemeral` — the survey's
 strongest profile-in-argv instance.
 
 Attribution — two-tier exit policy: nonzero → error with stderr as the
@@ -1091,9 +1305,10 @@ through captured stdout. Budget axes — none. Observability — evidence for
 the faithful-record posture: output that is itself sensitive is a domain
 fact only the caller can know, so redaction is caller-side and
 post-capture; the executor records verbatim. (llmflow's in-flight
-`redactToken` is the fleet's one executor-side redaction instance — the
-approach dr-exec deliberately does not take.) Lifecycle and attribution —
-`check=True` defaults, nothing finer.
+`redactToken` is the survey's one executor-side redaction instance — the
+approach dr-exec deliberately does not take.) Lifecycle — `subprocess.run`
+defaults, leader-only; nothing outlives the call. Attribution —
+`check=True` raise-on-nonzero, nothing finer.
 
 ## dr-queues
 
