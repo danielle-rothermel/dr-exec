@@ -164,6 +164,43 @@ error, and a hung docker all report identically.
 
 ## genfxn
 
+### safe_exec worker containment
+
+`src/genfxn/core/safe_exec.py` (881 lines) — model-generated Python
+executed in `multiprocessing` workers (forkserver/spawn; `fork` via env
+override), self-described as "not a security sandbox." Containment layers:
+`resource.setrlimit(RLIMIT_AS)` (default 256 MB); AST pre-validation
+blocking `__import__`/`eval`/`exec`/`compile`/`open`/`getattr`, dunder
+attributes, `Import`, `ClassDef`, `Global`, and top-level non-function
+statements; allowlisted builtins; structured value return through an
+allowlisted type graph (nesting depth 32) with results pickled before
+`queue.put` so serialization failures surface synchronously; an explicit
+`trust_untrusted_code` gate raising `SafeExecTrustRequiredError`; a
+persistent reusable worker with its own startup timeout; spawn-bootstrap
+diagnostics; six-type error taxonomy. Weaknesses: `_set_process_group`
+swallows `os.setsid()` failures so group kill silently degrades to
+leader-only; `_terminate_process_tree` swallows signaling failures; no
+stdin path (inputs travel as pickled args, unbounded). The AST layer is
+shape-policing rather than reach-restriction: it forbids what generated
+code may *look like* (no classes, no globals), a posture the target
+principles reject for research code.
+
+Budget axes:
+
+- Memory — `RLIMIT_AS` 256 MB default: a task-scale interior default of
+  exactly the kind the budgets principle prohibits.
+- Result size — 1 MB pickled-result bound (protocol budget).
+- Wall-clock — per-execution timeout plus a separate worker-startup
+  timeout (the fleet's one existing startup self-budget).
+- Termination — SIGTERM→SIGKILL with 0.2 s joins; `killpg` only when group
+  leadership is confirmed.
+- Output — none: child stdout/stderr go to inherited fds, uncaptured and
+  unbounded.
+
+Observability — no capture of worker output at all (accidental passthrough
+to the parent's fds, not a chosen delivery mode); spawn-bootstrap
+diagnostics give good startup-failure attribution; nothing durable.
+
 ## dr-platform
 
 ## dr-graph
@@ -217,6 +254,32 @@ explains itself in-memory. Nothing persists.
 ## dr-notion
 
 ## dr-dspy
+
+### Deno capability-sandboxed Python interpreter
+
+`dspy/primitives/python_interpreter.py` (vendored) — the fleet's one
+non-container sandbox: a persistent Deno process running Pyodide (Python
+compiled to WASM), driven over JSON-line RPC on stdin/stdout. Containment
+is Deno's deny-by-default capability model, granted per axis at
+construction: `--allow-read=<paths>`, `--allow-write=<paths>`,
+`--allow-env=<vars>`, `--allow-net=<hosts>` — each an explicit opt-in
+list, nothing ambient; no `--allow-run`, so subprocess spawning inside the
+sandbox simply does not exist. Paths are symlink-canonicalized so grants
+match what Deno's permission check compares against (denoland/deno#9607).
+Lifecycle: `_ensure_deno_process` restarts the child whenever `poll()`
+shows it dead; on crash, exit code and stderr are read for diagnosis;
+`deno info --json` discovers the cache dir up front. Notable properties:
+per-axis capability grants that mirror the inherited-state-by-explicit-
+grant vocabulary almost exactly; containment with no kernel/container
+dependency; restart-on-death supervision of a sandboxed worker.
+
+Budget axes — none: RPC reads are blocking `readline()` with no timeout, a
+hung sandbox hangs the caller; no memory, CPU, or output bounds on either
+side of the WASM boundary.
+
+Observability — crash diagnosis only (exit code plus stderr on failure);
+no narration, no durable record; silent restart of a dead sandbox is
+exactly the silent-replacement pattern the supervised behaviors forbid.
 
 ## llmflow
 
@@ -311,6 +374,34 @@ dies.
 ## marimo_utils
 
 ## nl-code
+
+### Container-gated execution worker
+
+`src/nl_code/code_execution/worker.py` — `exec` of model-generated code
+behind `_require_docker_execution`, which raises unless an env var is set
+*and* `_is_running_in_container()` verifies the claim: the origin of the
+containment-is-verified behavior. In-container defenses: `RLIMIT_CPU`;
+per-item `signal.setitimer(ITIMER_REAL)` + SIGALRM deadlines; bounded
+stdin and bounded stdout capture via `dr_docker.workers.json_stdio`
+(`read_stdin_bounded`, `BoundedTextCapture`); an AST denylist (Async
+nodes, dunder access) and a `__builtins__` shallow-copy namespace — the
+same shape-policing caveat as genfxn's. Caller side
+(`code_execution/runner.py`) delegates spawning to
+`dr_docker.SubprocessDockerAdapter` (see dr-docker) and translates its
+error envelope into `CodeExecutionInfrastructureError`.
+
+Budget axes — layered across three parties:
+
+- Worker: CPU (`RLIMIT_CPU`) and per-item wall-clock
+  (`setitimer`/SIGALRM).
+- Caller: stdin cap 50 MiB; per-stream stdout/stderr caps 1 MiB default,
+  env-overridable.
+- Container: the full dr-docker set (memory, pids, fsize, nofile) by
+  delegation.
+
+Observability — error envelopes carry structured codes with a `retriable`
+flag (failure as diagnosable data); otherwise no narration or durable
+record at this layer.
 
 ## dr_exp
 
