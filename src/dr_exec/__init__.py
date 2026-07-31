@@ -2,6 +2,7 @@
 
 from dr_exec.batch import (
     BODY_HOOK_NAME,
+    CLIP_MARKER,
     PROTOCOL_VERSION,
     BatchItem,
     BatchRequest,
@@ -43,6 +44,15 @@ from dr_exec.errors import (
     ExecutorFailure,
     ProtocolFailure,
 )
+from dr_exec.fake import (
+    EntryPoint,
+    FakeExecutor,
+    RecordedBatchCall,
+    RecordedCall,
+    ScriptedBatch,
+    ScriptError,
+    UnscriptedCall,
+)
 from dr_exec.record import (
     EXECUTOR_IDENTITY,
     FAKE_EXECUTOR_IDENTITY,
@@ -69,6 +79,7 @@ from dr_exec.run import run_tool, run_untrusted_command, run_untrusted_python
 
 __all__ = [
     "BODY_HOOK_NAME",
+    "CLIP_MARKER",
     "EXECUTOR_IDENTITY",
     "FAKE_EXECUTOR_IDENTITY",
     "HERMETIC",
@@ -92,10 +103,12 @@ __all__ = [
     "ContainmentProfile",
     "DeclarationError",
     "DrExecError",
+    "EntryPoint",
     "EnvironmentGrant",
     "ExecutorFailure",
     "ExitPolicy",
     "ExitVerdict",
+    "FakeExecutor",
     "GrantKind",
     "ItemResult",
     "Measurements",
@@ -108,13 +121,18 @@ __all__ = [
     "PythonRuntime",
     "RecordKey",
     "RecordStatus",
+    "RecordedBatchCall",
+    "RecordedCall",
     "Records",
     "RecordsKind",
     "RunRecord",
     "RunResult",
+    "ScriptError",
+    "ScriptedBatch",
     "StreamBounds",
     "TruncationMark",
     "TrustCategory",
+    "UnscriptedCall",
     "WireKey",
     "WireKind",
     "config_digest_of",

@@ -17,7 +17,7 @@ from dr_exec.batch import (
     BatchRequest,
     BatchResult,
     ProtocolChannelBudget,
-    _account,
+    account_transcript,
 )
 from dr_exec.errors import DeclarationError, ProtocolFailure
 from dr_exec.record import (
@@ -74,7 +74,7 @@ def _transcript(request: BatchRequest, *lines: str) -> str:
 
 
 def _accounted(request: BatchRequest, transcript: str) -> BatchResult:
-    return _account(request=request, run=_run(transcript))
+    return account_transcript(request=request, run=_run(transcript))
 
 
 class TestPreludeVerification:

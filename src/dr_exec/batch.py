@@ -293,17 +293,7 @@ def run_batch(
     unknown item id, or a shape-invalid line. The failure carries whatever
     results were validated before the fault.
     """
-    source = request.driver_source()
-    source_bytes = len(source.encode("utf-8"))
-    if source_bytes > SOURCE_BOUND_BYTES:
-        raise DeclarationError(
-            f"composed driver source of {source_bytes} bytes exceeds the "
-            f"{SOURCE_BOUND_BYTES}-byte source bound"
-        )
-
-    _logger.info(
-        "batch of %d items, driver source %d bytes", len(request.items), source_bytes
-    )
+    source = validated_driver_source(request)
     run = run_untrusted_python(
         source,
         profile=profile,
@@ -312,12 +302,32 @@ def run_batch(
         runtime=runtime,
         environment=environment,
         exit_policy=exit_policy,
-        stream_bounds=_channel_bounds(request, budgets),
+        stream_bounds=channel_bounds_for(request, budgets),
     )
-    return _account(request=request, run=run)
+    return account_transcript(request=request, run=run)
 
 
-def _channel_bounds(request: BatchRequest, budgets: Budgets) -> StreamBounds:
+def validated_driver_source(request: BatchRequest) -> str:
+    """Compose the driver program and check it against the source bound.
+
+    The bound belongs to the request, not to the spawn: an executor that
+    never spawns still rejects a request whose composed driver could not be
+    delivered as one argument.
+    """
+    source = request.driver_source()
+    source_bytes = len(source.encode("utf-8"))
+    if source_bytes > SOURCE_BOUND_BYTES:
+        raise DeclarationError(
+            f"composed driver source of {source_bytes} bytes exceeds the "
+            f"{SOURCE_BOUND_BYTES}-byte source bound"
+        )
+    _logger.info(
+        "batch of %d items, driver source %d bytes", len(request.items), source_bytes
+    )
+    return source
+
+
+def channel_bounds_for(request: BatchRequest, budgets: Budgets) -> StreamBounds:
     """Protocol stdout gets the channel budget; payload stderr gets the run's.
 
     Splitting the bound is what keeps a noisy payload from voiding completed
@@ -333,7 +343,7 @@ def _channel_bounds(request: BatchRequest, budgets: Budgets) -> StreamBounds:
     )
 
 
-def _account(*, request: BatchRequest, run: RunResult) -> BatchResult:
+def account_transcript(*, request: BatchRequest, run: RunResult) -> BatchResult:
     """Parse the transcript, verifying identity before trusting any result.
 
     A final fragment with no terminating newline is a cut, not a fault: the

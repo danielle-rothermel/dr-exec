@@ -145,11 +145,25 @@ class _Enforcement:
     output_overflowed: bool = False
 
 
-def execute(declaration: Declaration) -> RunResult:
-    """Run one declaration to completion and return its attributed outcome.
+@dataclass(frozen=True, slots=True)
+class ValidatedDeclaration:
+    """A declaration that passed every pre-spawn check, plus what they built.
 
-    Raises :class:`DeclarationError` before any spawn and
-    :class:`ExecutorFailure` only when the executor's own machinery broke.
+    Validation is a pure function of the declaration, so it is the one thing
+    a non-spawning executor can share with this one verbatim: whatever
+    :func:`validate_declaration` accepts here is exactly what any executor
+    honoring this contract accepts.
+    """
+
+    argv: tuple[str, ...]
+    input_payload: bytes
+    child_environment: dict[str, str]
+
+
+def validate_declaration(declaration: Declaration) -> ValidatedDeclaration:
+    """Every pre-spawn caller check, in order, before any child exists.
+
+    Raises :class:`DeclarationError` and nothing else; no side effects.
     """
     argv = _validate_argv(declaration.invocation.argv)
     input_payload = _validated_input(
@@ -158,6 +172,23 @@ def execute(declaration: Declaration) -> RunResult:
     child_environment = _materialize_environment(declaration.environment)
     _validate_invocation_size(argv, child_environment)
     _validate_program_resolvable(argv[0], child_environment)
+    return ValidatedDeclaration(
+        argv=argv,
+        input_payload=input_payload,
+        child_environment=child_environment,
+    )
+
+
+def execute(declaration: Declaration) -> RunResult:
+    """Run one declaration to completion and return its attributed outcome.
+
+    Raises :class:`DeclarationError` before any spawn and
+    :class:`ExecutorFailure` only when the executor's own machinery broke.
+    """
+    validated = validate_declaration(declaration)
+    argv = validated.argv
+    input_payload = validated.input_payload
+    child_environment = validated.child_environment
 
     run_id = new_run_id()
     started_at = datetime.now(UTC)

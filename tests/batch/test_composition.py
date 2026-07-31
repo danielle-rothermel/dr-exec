@@ -11,7 +11,7 @@ from dr_exec.batch import (
     BatchRequest,
     BatchResult,
     ProtocolChannelBudget,
-    _channel_bounds,
+    channel_bounds_for,
     run_batch,
 )
 from dr_exec.declare import (
@@ -96,7 +96,7 @@ class TestChannelBounds:
             )
         )
 
-        bounds = _channel_bounds(request, budgets)
+        bounds = channel_bounds_for(request, budgets)
 
         assert bounds == StreamBounds(
             stdout_bytes=ProtocolChannelBudget().channel_bytes_for(2),
@@ -104,7 +104,7 @@ class TestChannelBounds:
         )
 
     def test_an_unbudgeted_output_axis_leaves_stderr_unbounded(self) -> None:
-        bounds = _channel_bounds(_request(), Budgets())
+        bounds = channel_bounds_for(_request(), Budgets())
 
         assert bounds.stderr_bytes is None
         assert bounds.stdout_bytes == ProtocolChannelBudget().channel_bytes_for(1)
