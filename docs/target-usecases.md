@@ -12,16 +12,22 @@
 - **Call-scoped** — the child's entire lifetime, spawn through reap, falls within a single executor call. Contrast: supervised long-lived processes, which outlive the call.
 - **Supervised** — a child whose owner observes liveness and exit and is accountable for teardown; the opposite of fire-and-forget.
 - **Liveness** — verified evidence that a process is still the child we spawned: identity, not a bare pid check.
+- **Slot** — a supervised child's declared logical position (gpu 3, worker 1): stable across replacements while process identity changes.
 - **Reap** — collect a dead child's exit status so it cannot linger as a zombie.
 - **Hermetic** — no undeclared inputs: the runtime includes only what was declared. Distinct from containment (restricting what a payload can reach) and from POSIX session isolation (process-group lifecycle).
 - **Budgeted** — a resource axis carries a budget when one is declared; every budget in force is visible, finite, and attributable to who declared it, and exceeding one is a distinguishable outcome, never silent. Per-axis names (deadline, output cap) refer to a single budget; the axes and default rules live in the Budgets section.
 - **Captured** — output buffered by the executor and returned as part of the result at exit.
 - **Streamed** — output delivered to the calling code incrementally as it is produced; still budgeted.
+- **Spooled** — output written directly to a caller-designated file as it is produced: the disk-backed delivery mode that makes permissive output budgets cheap, and the natural mode for long-lived children.
 - **Stdio passthrough** — child output forwarded live to the operator's own stdio rather than to calling code.
 - **Driver** — executor machinery that runs inside a child to conduct payload work: it receives work items, executes them, and emits results. Part of the executor for attribution purposes despite its address.
 - **Executor** — our machinery around the payload, whichever side of the process boundary it runs on: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
 - **Run result** — the structured record of a completed run: exit status, delivered output, and measurements (duration, budget consumption). Exists whenever the child ran, however it exited; executor failure is precisely the case where no run result exists.
+- **Run record** — the durable twin of the run result: persisted while the run is live, kept regardless of outcome, surviving the process that made it.
+- **Attribution** — the determination of which party a failure belongs to: payload, executor (driver included), budget, or machine. Every failure carries exactly one.
 - **Exit policy** — the caller-declared mapping from exit status to success, failure, or domain data. The default policy is report-only.
+- **Dimension** — one direction of a batch cross-product (candidates, tasks, cases): results are indexed by dimensions and failure scopes bind to them. Distinct from budget axes, which are resource kinds.
+- **Narration** — the executor's own progress logging: lifecycle events emitted as they happen, on the executor's channel, never the payload's.
 
 ## Budgets
 
@@ -32,9 +38,9 @@ library-abandonment event. So a default budget exists only to protect the
 executor, is set at machine scale, and is scoped to the per-run aggregate —
 never a task-scale guess, never a per-item proxy for the resource actually
 being protected. A budget kill is never the artifact of an unnoticed
-default. Preferring delivery modes that make permissiveness cheap (output
-spilling to disk rather than accumulating in RAM) is part of the principle,
-not an optimization.
+default. Preferring delivery modes that make permissiveness cheap (spooled
+output rather than RAM-accumulated capture) is part of the principle, not
+an optimization.
 
 Three kinds of budget:
 
