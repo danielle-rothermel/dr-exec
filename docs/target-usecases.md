@@ -21,6 +21,7 @@
 - **Streamed** — output delivered to the calling code incrementally as it is produced; still budgeted.
 - **Spooled** — output written directly to a caller-designated file as it is produced: the disk-backed delivery mode that makes permissive output budgets cheap, and the natural mode for long-lived children.
 - **Stdio passthrough** — child output forwarded live to the operator's own stdio rather than to calling code.
+- **Artifact paths** — files a payload writes at declared locations are payload output, not an executor delivery mode; the run record notes where they landed.
 - **Driver** — executor machinery that runs inside a child to conduct payload work: it receives work items, executes them, and emits results. Part of the executor for attribution purposes despite its address.
 - **Executor** — our machinery around the payload, whichever side of the process boundary it runs on: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
 - **Run result** — the structured record of a completed run: exit status, delivered output, and measurements (duration, budget consumption). Exists whenever the child ran, however it exited; executor failure is precisely the case where no run result exists.
@@ -139,6 +140,7 @@ intermediate is lost data, not lost convenience.
 
 1. **Untrusted Python source, call-scoped** — run generated Python in a budgeted, disposable runtime.
    - Fresh state per run — nothing a prior run did can affect this one.
+   - Concurrent runs never collide — each run works in its own scratch workspace by default; shared assets are read-only views, never shared mutable state.
    - Declared runtime — the interpreter and importable package set are explicit inputs, hermetic by default; nothing from the host leaks in by accident.
    - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
@@ -147,6 +149,7 @@ intermediate is lost data, not lost convenience.
 2. **Untrusted command, call-scoped** — same, argv-general: compiled artifacts of generated code, headless agent CLIs.
    - Absence is a distinct outcome — a missing or unresolvable program is its own distinguishable outcome, not a generic start failure.
    - Inherited state by explicit grant — the child inherits nothing by default: environment, working directory, file descriptors; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
+   - Concurrent runs never collide — each run works in its own scratch workspace by default; shared assets are read-only views, never shared mutable state.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
    - Argv only — commands are argument vectors; nothing is ever interpreted by a shell.
