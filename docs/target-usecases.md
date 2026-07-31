@@ -13,13 +13,64 @@
 - **Liveness** — verified evidence that a process is still the child we spawned: identity, not a bare pid check.
 - **Reap** — collect a dead child's exit status so it cannot linger as a zombie.
 - **Hermetic** — no undeclared inputs: the runtime includes only what was declared. Distinct from containment (restricting what a payload can reach) and from POSIX session isolation (process-group lifecycle).
-- **Budgeted** — every resource axis — wall-clock, output, input — carries an explicit finite budget; exceeding one is a distinguishable failure, never silent. Per-axis names (deadline, output cap) refer to a single budget.
+- **Budgeted** — a resource axis carries a budget when one is declared; every budget in force is visible, finite, and attributable to who declared it, and exceeding one is a distinguishable outcome, never silent. Per-axis names (deadline, output cap) refer to a single budget; the axes and default rules live in the Budgets section.
 - **Captured** — output buffered by the executor and returned as part of the result at exit.
 - **Streamed** — output delivered to the calling code incrementally as it is produced; still budgeted.
 - **Stdio passthrough** — child output forwarded live to the operator's own stdio rather than to calling code.
 - **Executor** — our machinery on the parent side of the process boundary: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
 - **Run result** — the structured record of a completed run: exit status, delivered output, and measurements (duration, budget consumption). Exists whenever the child ran, however it exited; executor failure is precisely the case where no run result exists.
 - **Exit policy** — the caller-declared mapping from exit status to success, failure, or domain data. The default policy is report-only.
+
+## Budgets
+
+Defaults never guess the workload. The primary consumer is research code,
+where strange shapes are the norm: hitting machine limits is expected
+behavior, while hitting an interior limit invented "because" is a
+library-abandonment event. So a default budget exists only to protect the
+executor, is set at machine scale, and is scoped to the per-run aggregate —
+never a task-scale guess, never a per-item proxy for the resource actually
+being protected. A budget kill is never the artifact of an unnoticed
+default. Preferring delivery modes that make permissiveness cheap (output
+spilling to disk rather than accumulating in RAM) is part of the principle,
+not an optimization.
+
+Three kinds of budget:
+
+- **Contract budgets** — caller-declared bounds derived from real
+  downstream meaning (a max row size, a protocol field limit): exceeding
+  one fails early and diagnosably instead of later and confusingly.
+  Protocol budgets (per-item result size, traceback clipping) are contract
+  budgets declared by the protocol.
+- **Machine protection** — per-run aggregate bounds (RAM, disk) at actual
+  machine scale. Their second role is diagnostic: a budget set at machine
+  capacity converts a chaotic machine-limit death (an OOM kill arriving as
+  an unattributable SIGKILL, ENOSPC surfacing wherever a write happened to
+  land) into a clean, attributed budget failure — which is why "as
+  permissive as possible" beats "non-existent" for this tier.
+- **Executor self-budgets** — bounds on the executor's own operations
+  (termination wait, startup deadline) so cleanup and supervision can never
+  hang. The only tier with true built-in defaults, because they protect the
+  machinery, not the workload.
+
+Axes and their default rules:
+
+- Wall-clock deadline — workload budget: declared or visibly absent, no
+  default; overflow is always failure (time cannot truncate). Supervised
+  children carry per-interaction deadlines instead of lifetime ones.
+- CPU time — workload budget, containment-backed; distinct from wall-clock
+  (catches spin-loops that a generous deadline misses); declared only.
+- Output — any cap is contract-derived or machine-scale aggregate, never a
+  small interior default; overflow policy is caller-declared, failure or
+  visible truncation, never silent loss.
+- Input — validated before spawn; an over-budget input is a caller error
+  rejected without wasting the spawn, not a run failure.
+- Memory — machine protection by default (per-run aggregate at machine
+  scale); tighter only by declaration, containment-backed.
+- Processes, file size, open files — containment-backed, declared only; no
+  invented defaults.
+- Termination wait, startup deadline — executor self-budgets with built-in
+  defaults.
+- Per-item result size — protocol budget, declared by the batch protocol.
 
 ## Use cases
 
