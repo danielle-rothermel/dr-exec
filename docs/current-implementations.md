@@ -224,9 +224,52 @@ copies), a deliberate trade of per-call setup for parallel safety.
 
 ## fchord
 
+### Timeout-bearing git helper
+
+`src/fchord/github_pull.py:186` (`_git`) — captured, text, `check=True`,
+and — rare among the fleet's many git helpers — a timeout, via a named
+module constant `_GIT_TIMEOUT`. Bash scripts under `scripts/` drive
+`exec uv run python` and `jq` with mktemp+trap hygiene. Budget axes —
+wall-clock only, module-constant not caller-declared; no output bound.
+Observability — none. Lifecycle — `subprocess.run` defaults, no group
+cleanup. Attribution — `check=True` raise-on-nonzero, nothing finer.
+
 ## dotfiles
 
 ## whetstone-viewer
+
+### Cross-repo hydration via sibling venvs
+
+`src/whetstone_viewer/etl/hydration/runner.py:111` (`_run_dump`) —
+`["uv", "run", "--frozen", "--project", <repo>, "python", "-", *args]`
+with a first-party script piped to `python -` on stdin: the script
+executes inside a *sibling repo's pinned venv* — a working declared-runtime
+instance, with the interpreter and package set specified as "that
+project's frozen environment" rather than inherited from the host.
+Captured output parsed as JSON; `check=False` with nonzero →
+`HydrationError` carrying `stderr[-2000:]` (the tail-slice pattern again);
+`OSError`/`SubprocessError` mapped into the same error type.
+
+Budget axes — wall-clock per call; output captured unbounded.
+
+Observability — none live; error tail-slices only.
+
+Lifecycle — `subprocess.run` defaults; the `uv run` → `python` two-level
+tree makes the leader-only timeout kill a real survivor risk.
+
+Attribution — one typed error (`HydrationError`) absorbing nonzero exit,
+spawn failure, and infrastructure error alike: intentionally coarse.
+
+### Failure-degrades-to-None helpers
+
+`:153` (`_git`): `git -C` rev-parse/status with timeout 30, *all*
+failures → `None`; `etl/hydration/task_intrinsic.py:270`: `ruff format
+--isolated <tmpfile>` read back from the mutated file (an artifact-path
+delivery), timeout 60, any failure → `None`. The anti-attribution
+pattern: absence, timeout, crash, and nonzero exit all collapse into one
+silent `None` — the polar opposite of absence-as-distinct-outcome.
+`web/scripts/gen-api.mjs:26` — `execFileSync` with `stdio: "inherit"`
+(full passthrough), no timeout, throws on nonzero.
 
 ## genfxn
 
