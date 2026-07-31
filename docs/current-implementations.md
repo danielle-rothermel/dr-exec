@@ -224,17 +224,75 @@ copies), a deliberate trade of per-call setup for parallel safety.
 
 ## fchord
 
-### Timeout-bearing git helper
+### Timeout-bearing git helper with persisted failure records
 
 `src/fchord/github_pull.py:186` (`_git`) — captured, text, `check=True`,
-and — rare among the fleet's many git helpers — a timeout, via a named
-module constant `_GIT_TIMEOUT`. Bash scripts under `scripts/` drive
-`exec uv run python` and `jq` with mktemp+trap hygiene. Budget axes —
-wall-clock only, module-constant not caller-declared; no output bound.
-Observability — none. Lifecycle — `subprocess.run` defaults, no group
-cleanup. Attribution — `check=True` raise-on-nonzero, nothing finer.
+and — rare among the fleet's git helpers — a timeout: `_GIT_TIMEOUT =
+300.0` (:36), per *invocation*, and `_sparse_shallow_clone` makes three
+(clone, sparse-checkout, rev-parse), so the effective clone bound is up to
+900 s. Repo scoping via `git -C` argv; the checkout lives in a
+`TemporaryDirectory` discarded on every path. Shell scripts: three are
+pure `exec` process replacement; `parse-codex-session.sh` does
+mktemp + `trap rm EXIT` + atomic `mv` + trap disarm — a complete
+atomic-write-with-cleanup idiom in shell.
+
+Budget axes — wall-clock only (module constant, per invocation not per
+operation); no output bound.
+
+Observability — the fleet's clearest failure-as-persisted-record: clone
+failure writes `pull.json` with a `FailedPage(url, error)` entry via
+atomic write and returns it — the failed attempt is durably recorded, not
+raised (docstring states the contract). Success records provenance: the
+resolved commit SHA from `rev-parse` is stored in the pull record.
+
+Lifecycle — `subprocess.run` defaults, leader-only; cleanup is
+filesystem-only.
+
+Attribution — better than most: `CalledProcessError` → last *line* of
+stderr (exit-code fallback when stderr is empty) vs `TimeoutExpired` → a
+distinct "git timed out after Ns" message, both landing in the persisted
+record; `OSError`/git-absent propagates uncaught.
+
+Testing seam — none: tests clone for real over `file://` fixtures with an
+unbounded `check=True` fixture helper — the spawn path is exercised live.
 
 ## dotfiles
+
+### Git sync helpers
+
+`scripts/sync_skills.py` — `run_git`/`run_git_bytes:261,273`
+(`git -c core.quotepath=off`, explicit PIPE capture, `check=True`, no
+timeout parameter and no seam to add one) — including *network* calls
+(`clone --depth 1`, `fetch --depth 1` mid-merge) with inherited stdin and
+no `GIT_TERMINAL_PROMPT=0`: a credential prompt hangs a merge forever.
+Three returncode disciplines coexist: raw `CalledProcessError`
+(`check=True`); returncode-as-boolean with stderr→DEVNULL
+(`commit_available:436`, `git_tree_exists:746` — missing repo, corrupt
+object, and absent commit all collapse to `False`); and
+`merge_file_bytes:963` reinterpreting *every* nonzero as "conflict" —
+though `git merge-file` returns −1/128 on genuine error, with stderr
+discarded, so errors masquerade as conflicts. `git archive` output is
+materialized wholly in memory into a tarfile. Amortization — none: a
+three-way merge of an N-file skill spawns ~3N git processes
+(`cat-file blob` per file per side). Testing seam — none: tests spawn
+the real script via `uv run` (no timeout), with testability coming from
+env-var path injection, not a runner seam. Note: the audit's
+`skill_dispatch.py` agent-CLI spawn (`claude -p`, timeout 120) no longer
+exists — the file was cut to a pure-filesystem checker; dotfiles now has
+no agent-CLI execution.
+
+### pi extensions (TypeScript)
+
+`zsh-user-bash.ts:31` — every model-issued command becomes
+`exec <zsh> -fc <command>` passed as a *string* to pi's bash-based exec:
+double-shelled by construction (bash parses the outer, zsh the inner),
+with single-quote `shellQuote` correct for one level; bounding and kill
+delegated entirely to pi. `copy-all.ts` — `spawn("pbcopy")` with stderr
+accumulated into the rejection message and spawn-error distinguished
+from exit failure, but no stdin error handler (EPIPE → unhandled) and no
+timeout. `diff.ts` — `pi.exec` with a bare-literal 5000 ms timeout
+repeated per site, called up to four times per flow with no aggregate
+budget.
 
 ## whetstone-viewer
 
@@ -246,30 +304,58 @@ with a first-party script piped to `python -` on stdin: the script
 executes inside a *sibling repo's pinned venv* — a working declared-runtime
 instance, with the interpreter and package set specified as "that
 project's frozen environment" rather than inherited from the host.
-Captured output parsed as JSON; `check=False` with nonzero →
-`HydrationError` carrying `stderr[-2000:]` (the tail-slice pattern again);
-`OSError`/`SubprocessError` mapped into the same error type.
+The dump programs live as module string constants (`dump_scripts.py`)
+specifically because they import packages that exist only in the child's
+venv and must never be importable in the parent — dependency isolation
+across sibling repos as the stdin-payload rationale. Purity is a stated
+constraint throughout: `--frozen` so source-repo lockfiles are never
+mutated, stdin delivery so nothing is written into the source tree,
+`--isolated` ruff for byte-stability across machines.
 
-Budget axes — wall-clock per call; output captured unbounded.
+Budget axes — wall-clock 300 s per dump, 30 s per git call, 60 s per ruff
+call — all module constants; output captured unbounded.
 
-Observability — none live; error tail-slices only.
+Observability — provenance-grade: each source repo's commit and dirtiness
+land in the build summary, as does the resolved ruff version; hydration
+failure degrades *with a record* (`hydration_note = "hydration FAILED…"`)
+rather than aborting the build. One conflation: a failed `git status`
+and a clean tree both yield `dirty=False`.
 
 Lifecycle — `subprocess.run` defaults; the `uv run` → `python` two-level
 tree makes the leader-only timeout kill a real survivor risk.
 
-Attribution — one typed error (`HydrationError`) absorbing nonzero exit,
-spawn failure, and infrastructure error alike: intentionally coarse.
+Attribution — four-way in `_run_dump`, finer than one error type
+suggests: launch failure, nonzero exit (`stderr[-2000:]`), non-JSON
+stdout (`stderr[-1000:]`), and JSON-of-wrong-shape each get distinct
+messages inside `HydrationError`. Child-side partial failure is data
+(per-env `{"error": …}` entries in the JSON); parent-side failure is the
+exception — a working driver-trust-split instance.
+
+Testing seam — two: `RuffFormatter.resolve(ruff_cmd=…)` is an argv-prefix
+injection seam (default `["uv","run","--frozen","ruff"]`), and hydration
+tests inject constructed `HydrationResult`s above the boundary — the
+spawn path is deliberately untested in CI.
+
+Amortization — `RuffFormatter` resolves `ruff --version` once per build
+and reuses it for every task (the version doubles as provenance); each
+format call still pays a fresh spawn plus a per-call `TemporaryDirectory`
+whose fixed inner filename (`canonical.py`) is collision-free precisely
+because the directory is per-call.
 
 ### Failure-degrades-to-None helpers
 
-`:153` (`_git`): `git -C` rev-parse/status with timeout 30, *all*
-failures → `None`; `etl/hydration/task_intrinsic.py:270`: `ruff format
---isolated <tmpfile>` read back from the mutated file (an artifact-path
-delivery), timeout 60, any failure → `None`. The anti-attribution
-pattern: absence, timeout, crash, and nonzero exit all collapse into one
-silent `None` — the polar opposite of absence-as-distinct-outcome.
-`web/scripts/gen-api.mjs:26` — `execFileSync` with `stdio: "inherit"`
-(full passthrough), no timeout, throws on nonzero.
+`:153` (`_git`): `git -C` rev-parse/status with timeout 30, all failures
+→ `None`; `etl/hydration/task_intrinsic.py:270`: `ruff format --isolated
+<tmpfile>` read back from the mutated file (artifact-path delivery),
+timeout 60, any failure → `None`. Two different judgments apply: the git
+helper's collapse loses attribution outright, but the ruff `None` is a
+*documented* null-vs-false discipline — "a missing measurement stays null
+instead of being coerced to 'unchanged'" — degradation that preserves
+data honesty even while discarding failure detail.
+`web/scripts/gen-api.mjs:26` — `execFileSync` with `stdio: "inherit"`,
+no timeout, throws on nonzero; the child delivers its result via `--out
+<file>` (artifact path), and a `try/finally rmSync` cleans the scratch
+dir on every path.
 
 ## genfxn
 
@@ -324,9 +410,48 @@ the fleet's clearest existing warm-worker amortization.
 
 ## dr-platform
 
+### Spawn-context crash-recovery harness
+
+`tests/test_dbos_recovery_boundary.py` — `multiprocessing` spawn-context
+workers used to prove DBOS replay across a genuine process death:
+`os._exit(86)` as an uncatchable crash with a sentinel exit code the
+parent asserts exactly. Two-tier deadline with a documented rationale: the
+child polls its own 10 s deadline, the parent joins at 20 s — the margin
+exists "so `terminate()` cannot race in and destroy the worker's
+diagnostic traceback exactly as it reports the timeout." Escalation is
+one step (terminate, then *unbounded* join). Concurrency safety by
+namespace: every shared identifier (pipeline, queue, app name/version)
+is uuid-suffixed per run — collision avoidance against a shared Postgres
+rather than via temp dirs. Attribution: exit-code sentinel plus four
+independent durable DB signals cross-checked after the crash.
+
 ## dr-graph
 
+### Import-hygiene probe
+
+`tests/test_imports.py:31` — `sys.executable -c` *without* `-I`: the probe
+deliberately measures the ambient environment (PYTHONPATH, venv, user
+site) rather than an isolated one. Attribution travels through the exit
+path with no protocol parsing: the child raises
+`SystemExit(",".join(loaded))` — a non-integer SystemExit prints the
+offending module names to stderr and exits 1; the parent asserts
+returncode 0 with stderr in the failure message. Captured, `check=False`,
+no timeout; the repo's only exec site.
+
 ## dr-providers
+
+### Import-hygiene probes and script exec_module
+
+`tests/test_public_api.py:125,133` — `sys.executable -c` with
+`check=True` and *no capture*: the child asserts in-process, so the
+failure detail lands only on inherited stderr (visible in pytest's
+capture, absent from the `CalledProcessError`). The second probe's
+payload is generated by joining imports over a `PURE_MODULES` data
+list — program-from-data, not a literal.
+`tests/test_audit_ground_truth.py:10-17` loads a checked-in script via
+`spec_from_file_location` + `exec_module` at module import time, through
+*relative* paths — cwd-dependent, and a script failure is a pytest
+collection error, not a test failure. No timeouts anywhere.
 
 ## dr-subs
 
@@ -365,17 +490,190 @@ the response edge.
 
 ## dr-diagram
 
+### Headless Chrome CDP scripts
+
+Four viz scripts spawn Chrome with `--remote-debugging-port=0`, scrape
+the DevTools `ws://` URL from stderr — matching each chunk
+*independently*, so a URL split across two data events is never matched
+(a real race, backstopped only by a 15 s wait) — then drive a
+hand-rolled ~15-line CDP client (five copies, one hand-framing raw
+WebSocket bytes; none has a response timeout, so a lost CDP reply hangs
+forever). Cleanup is called only from try/catch bodies — no signal or
+exit handlers, so Ctrl-C orphans the Chrome tree and its temp profile;
+kills are leader-only `SIGKILL` with no wait, racing profile `rmSync`
+against Chrome's own shutdown writes (race swallowed by a bare catch).
+`reflexion-workbench/scripts/smoke.mjs` is a different shape
+(`--dump-dom` + virtual-time budget, pid-suffixed profile dir *inside
+the repo tree*), and its attribution is inverted: exit and error both
+resolve with accumulated stdout — spawn failure, timeout-kill, and
+success are indistinguishable except by downstream content checks.
+`phase7/skill-audit/shots/cap.mjs` is scratch code: fixed port 9333
+(concurrent runs collide), *no* `--user-data-dir` (writes the real
+Chrome profile), no kill at all, and statically-broken imports. Five
+`sh -c 'command -v'` probes with two different return contracts.
+
+### Shell wrappers: Perl deadline and codex batch
+
+`phase6/…/pi-image-run.sh` — the Perl deadline faithfully reconstructs
+shell-convention exit codes (128+N for signal deaths) on the *normal*
+path, but the timeout path exits 124 from inside the SIGALRM handler, so
+a deadline kill can never report the child's actual signal; TERM → 5 s →
+KILL on a single pid, no setsid — pi's tool subprocesses survive.
+`eval "$(mise env)" || true` silently proceeds under a wrong toolchain.
+`phase7/…/run-codex.sh` — `env -i` keeping only HOME/PATH/TMPDIR with
+`ANTHROPIC_*` re-added as *empty strings* (present-but-empty, not
+unset); prompt via stdin herestring, result via `-o <file>`, full trace
+spooled per invocation (the repo's one durable record); but
+`set -uo pipefail` without `-e` means per-document failures print and
+the loop continues — the script always exits 0 with no status
+aggregation.
+
 ## unitbench
+
+### Sibling-repo codegen scripts
+
+`scripts/gen-api.mjs` — one `run()` helper serving two delivery modes
+(captured by default, `stdio:'inherit'` at the second call site), with a
+live bug on the inherit path: the error message calls `.trim()` on a
+null `stderr`, so a failing `openapi-typescript` crashes the reporter
+with a TypeError instead of reporting; missing-binary (`status null`)
+hits the same crash, and `result.error` is never consulted. Sibling
+repos are reached via `uv --directory <path>` with env-overridable dirs
+whose relative defaults resolve against `process.cwd()` — running from a
+subdirectory silently targets the wrong path. `gen-graph-schema.mjs` —
+no error handling at all, Node's default 1 MiB `maxBuffer`, raw stdout
+into `JSON.parse` (any uv warning corrupts it), then an unguarded
+hand-patch of the generated schema: a cross-repo contract enforced by
+inline mutation.
+
+### Vercel install wrapper
+
+`scripts/vercel-install.mjs` — the fleet's cleanest JS injection seam:
+environment, spawn function, and output sinks all defaulted parameters
+with typed JSDoc contracts, fully drivable without a real process.
+Redaction is thoughtful but bounded: the token is redacted in raw *and*
+percent-encoded forms, but per-chunk (a token split across stream chunks
+leaks), and it still lives in the child's env — visible to every
+descendant of `pnpm install`; the parent-env delete prevents
+re-forwarding, not exposure. Attribution: exit code preserved in the
+message, but the spawn-error path discards the underlying error for a
+fixed string (ENOENT and EACCES indistinguishable). No timeout.
 
 ## nlae
 
+### Two-transport fetcher with filesystem reconciliation
+
+`src/nlae/arxiv_library/fetch.py` — a two-backend design the audit
+flattened: `Transport.AUTO` picks gcloud iff `shutil.which` finds it,
+else a pure-Python httpx path that spawns nothing — availability-driven
+backend selection where the *in-process fallback is the better-bounded
+path* (60 s timeout + retries vs gcloud's no timeout, no capture,
+inherited stdio). Attribution is by reconciliation, not exit code: after
+the copy, the destination directory is re-listed and diffed against the
+manifest — partial success degrades to a misses list, the child's word
+is never trusted. The `.part` + atomic-rename convention (httpx path
+only) makes interrupted downloads invisible to the held-file census.
+Testing seam — the `runner=subprocess.run` identity-comparison pattern
+at two levels: production and tests take structurally different paths
+(the which-preflight only runs when the runner is the real one), and the
+fakes pin `subprocess.run`'s exact kwarg names — adding `timeout=` to
+production would break every test: a seam that actively resists adding a
+budget.
+
 ## dr-llm
+
+### Headless agent CLI transports
+
+`llm/providers/transports/headless_base.py` — `subprocess.run` captured
+text with a per-provider-config timeout (180 s default, 600 s for
+claude/codex) — config-level, never per-call. The "shell denylist" is a
+basename check on argv[0] only (`env bash -c …` passes); the codex
+`--sandbox read-only` is a replaceable default, not a pin. Environment:
+overlay `{**os.environ, **overrides}`; the API key is injected under two
+names and only when present — a missing key silently falls through to
+ambient auth. `required_executables`/`required_env_vars` are computed
+declaratively at config time but never actually checked before spawn.
+
+Budget axes — wall-clock only (config field); output capture unbounded.
+
+Observability — a durable JSONL transcript sink (lock-serialized,
+never-fails-the-call) with three-layer bounding: 512-char sanitize →
+key-name redaction → 10 MiB event envelope. Under *default* config the
+sanitize layer replaces payloads with `"<omitted>"` — which also empties
+the exception message, so the production failure message contains no
+stderr at all (the `[:800]` clip is dead code), and timeout events
+discard `TimeoutExpired`'s recovered partial output. `latency_ms` is a
+first-class response field. Argv is logged verbatim (not in the redaction
+key set); env is never logged.
+
+Lifecycle — no `start_new_session` anywhere in the repo; the leader-only
+timeout kill reliably orphans agent-CLI grandchildren.
+
+Attribution — nonzero exit → `HeadlessExecutionError`; codex adds an
+in-band channel: JSONL `type=="error"` events raise even on exit 0
+(exit-0-but-failed handled), and unparseable child stdout is *retained*
+as `non_json_stdout_lines` data rather than dropped.
+
+Testing seam — monkeypatched `subprocess.run` whose fake captures argv,
+input, and env but silently drops `timeout` — no test can assert the
+budget is passed.
+
+### Docker invocation and streaming psql
+
+`project/docker_runner.py` — captured bytes, no timeout; `docker_error`
+classifies by stderr *substring* into five typed errors plus a fallback —
+returncode never inspected, locale/version-fragile — and call sites layer
+further ad-hoc string checks on top ("already running" → success). The
+taxonomy drives retry-vs-abort in the readiness loop: retriability
+derived from substrings. Tool-missing is handled three different ways in
+one repo, with no `shutil.which` preflight anywhere.
+`docker_lifecycle.wait_docker_ready`'s `timeout_seconds` is an *iteration
+count* (each iteration spawns an untimed `docker exec`), while its
+sibling `wait_dsn_ready` is a true monotonic deadline — same parameter
+name, different semantics. `docker_psql.py` — bidirectional binary
+streaming with a daemon stderr thread; the success-path `wait()` and
+thread joins are unbounded; kill exists only on the exception path,
+leader-only; psql's stdout goes to DEVNULL (restore diagnostics are
+stderr-only). Genuine bright spot: `docker_swap_in_db`'s compensating
+cleanup — a uuid-named temp database dropped on any exception, with
+cleanup failure narrated via `exception.add_note`. `validate_pg_identifier`
+is the repo's one injection defense, aimed at SQL identifier
+interpolation, not argv. `postgres_sync.py:747` — psql restore with an
+open-file stdin, bytes, no timeout; the pgpass tempfile is chmod-0600
+*after* creation (a brief default-mode window). Tests include an explicit
+deadlock-avoidance case (stderr drained before `wait`) and a fake built
+by calling `Popen.__new__` to skip initialization.
 
 ## nl_latents
 
-## diff-walkthrough
+### Containment tripwire and provider worker scripts
+
+`evaluation_runner.py:184-213` — the fleet's one caller-side containment
+verification: snapshot `git status --short`, run a one-item smoke
+evaluation through the docker path, re-snapshot, and raise if the
+working tree changed ("use docker isolation before running decoder
+evaluation") — a pre-flight proof that containment actually holds,
+using the filesystem as the witness. `docker_env={"MPLBACKEND": "Agg"}`
+is an explicit env overlay into the sandbox. Tests use two unusual
+oracles: `bash -c 'source <config> && printf "$VAR"'` to assert a shell
+config's exported default, and substring asserts on script *text*.
+`scripts/shared_provider_worker_runner.sh` — a bash process-group
+manager: pids array + background jobs + bare `wait`, cleanup is `kill`
+(TERM only, no groups, no escalation, trap wired by the sourcing
+caller); per-provider worker counts and retry policies as env-defaults
+(rate-limit-derived concurrency ceilings); `: "${VAR:?}"` fail-fast on
+required config; and the fleet's highest-fidelity command narration —
+`printf ' %q'` logging each launched command shell-quoted and
+re-runnable.
 
 ## dr-cognee
+
+### Vendored mirror copy
+
+`src/dr_cognee/vendored/github_docs_mirror.py` — verified byte-identical
+to dr-notion's file except a one-line vendoring header ("keep edits
+upstream"); no drift, and actively imported (committed `__pycache__`).
+Every dr-notion finding applies at a +1 line offset.
 
 ## code-eval
 
@@ -478,6 +776,23 @@ returncode-as-predicate.
 
 ## dr-notion
 
+### GitHub docs mirror git operations
+
+`src/dr_notion/github_docs_mirror.py` — a sparse blob-filtered clone
+(`--depth 1 --filter=blob:none --sparse` + `sparse-checkout set
+--no-cone` with computed patterns): bandwidth bounded *by protocol*,
+expressed in argv — the fleet's only resource bounding done by asking for
+less rather than killing. The clone is uncaptured with inherited stdin
+and no timeout: a credential prompt on a private URL blocks forever.
+`run_git` (cwd=checkout, captured, `check=True`) propagates raw
+`CalledProcessError` — git's stderr rides the exception object but is
+absent from `str(exc)`, so failures surface as "exit status 128" with
+the actual git error invisible. Warm reuse via `ensure_checkout`
+(fetch+detach vs clone paths to the same post-state) guarded by an
+origin-URL match check; the checkout path is fixed and unlocked —
+concurrent mirrors of one repo race on the same tree. Env fully
+inherited: no `GIT_TERMINAL_PROMPT=0`, no `git -c` hardening.
+
 ## dr-dspy
 
 ### Deno capability-sandboxed Python interpreter
@@ -516,6 +831,35 @@ attributed by the mechanism itself.
 
 Amortization — the design's purpose: Deno+Pyodide startup (seconds) paid
 once, executions (milliseconds) amortized across the persistent sandbox.
+
+### SGLang server launcher (vendored)
+
+`dspy/clients/lm_local.py:71` — `Popen(["python","-m",
+"sglang.launch_server", …])` with stdout=PIPE/stderr=STDOUT and a daemon
+tail thread that appends every line to an *unbounded* `logs_buffer` while
+printing to console until a ready event. Budget: a readiness timeout only
+(param, default 1800 s) — no execution cap. Lifecycle: readiness-timeout
+failure does `kill()` with no wait/reap and the tail thread unjoined;
+normal teardown is delegated and self-described as non-atomic ("Ideally,
+the following happens atomically"). Process state is monkey-patched onto
+the LM object (`lm.process`, `lm.thread`, `lm.get_logs`) — no handle
+type, no registry. `get_free_port()` is a classic TOCTOU bind race, and
+the server binds 0.0.0.0.
+
+### HumanEval batch ancestor
+
+`dr_dspy/humaneval/task.py:555` (`run_subprocess_batch`) — the direct
+ancestor of dr-code's batch machinery: identical payload and protocol,
+but raw inline `subprocess.run`. The delta to dr-code is a measured
+evolution record of what the rewrite added: an injection seam plus pure
+build/interpret halves, an output cap branch, kill-code attribution,
+per-case timing, the timeout value in messages and results, and
+partial-result-carrying exceptions — the ancestor has none of these, and
+every failure (including unexpected ones) either propagates raw or
+collapses into generic per-case error data. `runtime.py:37` forces the
+multiprocessing start method (`fork` on non-Windows, against CPython's
+macOS default) with `force=True` under a suppressed `RuntimeError` —
+silently clobbering any prior setting.
 
 ## llmflow
 
@@ -631,6 +975,22 @@ Attribution — none: exit is never observed, so nothing is ever attributed.
 Testing seam — monkeypatched `Popen` in `tests/test_lifecycle.py`.
 
 ## marimo_utils
+
+### Tailwind shell-string build and pre-check script
+
+`styles/build.mjs:12` — the fleet's one shell-string invocation
+(`execSync("npx tailwindcss -i ./input.css -c ./tailwind.config.js
+--minify")`): the entire minified CSS transits stdout under Node's
+*default 1 MiB `maxBuffer`* — the one place in the fleet where the unset
+default is a realistic failure mode, not theoretical; stderr inherits,
+so a tailwind error throws without diagnostics in the exception. No
+timeout. `scripts/pre-check.sh` — near-twin of dr-code's with a marimo
+step added and a strict check commented out in place; its `run_report`
+is a dual-delivery pattern (tee to terminal + durable per-check artifact
+under `.cache/pre-check/`, true status recovered via `PIPESTATUS[0]`),
+`set -uo pipefail` *without* `-e` deliberately enabling failure
+aggregation — while `run_silent`'s four autofix steps propagate no
+status at all and can fail silently.
 
 ## nl-code
 
@@ -748,7 +1108,42 @@ determined by string-matching stdout; mixed `check=` postures.
 
 ## deconCNN
 
+### Re-invocation wrappers and cross-repo dr_exp calls
+
+`src/deconcnn/cli.py:31-75` — five identical console entry points that
+re-exec a sibling script as a child (`[sys.executable, script] +
+sys.argv[1:]`, inherited stdio, exit code propagated via `sys.exit`)
+instead of importing its main; script resolution falls back to
+`Path.cwd()`, making the *executable's location* cwd-dependent. The
+cross-repo `dr_exp` calls (`scripts/run_jobs/*`, three sites) reach the
+sibling's venv by hardcoding `cwd="/scratch/…/dr_exp"` and then passing
+`--base-path ../deconCNN/experiments` — two path conventions that must
+agree for anything to work. No timeouts anywhere; one helper collapses
+launch failure and job failure into a bare `False` with stderr
+discarded; one process per job id in a loop (no batching, full `uv run`
+startup each). One safety pattern: a dry-run gate plus a
+queued-jobs-only guard before destructive `job remove` calls.
+
 ## dr_gen
+
+### Local parallel training launcher
+
+`scripts/parallel_runs.py` — Hydra-sweep training runs as `Popen`
+children with per-job stdout/stderr log files (spooled; the parent's
+handles close immediately after spawn, working only via the child's
+dup'd fds), env overlay (`os.environ.copy()` +
+`CUBLAS_WORKSPACE_CONFIG` for determinism + per-job
+`CUDA_VISIBLE_DEVICES`). GPU assignment is a round-robin over a mutable
+module-global index — not availability-based, so slots can collide when
+parallelism exceeds GPU count. Budget axes — none: no timeouts; the only
+bound is a max-parallel-jobs admission count. Lifecycle — busy-poll
+admission and drain loops over a handle list with sleeps; no kill path,
+no signal handling, no reap: Ctrl-C orphans every child. Attribution —
+rc==0 binary, plus a pointer to the per-job stderr log. Observability —
+`print(flush=True)` narration; one durable record,
+`launcher_critical_errors.log`, for launch failures (two exception
+classes distinguished, failing command included) — failed launches are
+otherwise silently skipped. Hardcoded cluster paths throughout.
 
 ## dr-docker
 
@@ -799,7 +1194,45 @@ small the payload — the shape that motivated the amortization principle.
 
 ## dr-util
 
+### Slurm query helpers
+
+`src/dr_util/slurm_utils.py` — `_run_command`: captured text,
+`check=True`, timeout 30 s as a module constant shared by all four
+callers (`sinfo`, `sacctmgr`, `squeue`, `scontrol`). Two endpoints return
+raw unparsed stdout in a pydantic `raw_output` field — unbounded string
+straight into a serialization type. Notable validate-then-don't-use: the
+QOS name is regex-validated but never reaches argv — `squeue` runs a
+fixed command and the value is only compared in-process; only the
+partition query actually interpolates its validated string.
+
+Budget axes — wall-clock 30 s, module constant; no output bound.
+Observability — zero. Lifecycle — `run` defaults, leader-only.
+
+Attribution — asymmetric and lossy: `TimeoutExpired` → `SlurmError`, but
+`SlurmError` subclasses `ValueError` — the same base as the validation
+errors, so a `ValueError` catcher cannot tell "bad partition name" from
+"slurm timed out"; nonzero exit and `FileNotFoundError` (the common case
+off-cluster) propagate raw and untyped.
+
+Testing seam — monkeypatch at two depths: `_run_command` faked with
+hand-built stdlib `CompletedProcess` objects (the helper as de facto
+seam, signature-coupled to stdlib), and `subprocess.run` patched directly
+for the timeout-mapping test.
+
 ## parse_claude
+
+### Uniform CLI end-to-end suite
+
+44 subprocess sites across 5 test files, verified fully uniform:
+`["uv","run","python","-m","parse_claude", …]`, captured text,
+`cwd=` repo root, `check=False` with the returncode asserted. Zero
+`timeout=`, zero `env=`, zero `shell=` anywhere. Every call pays the full
+two-level `uv run` → `python` tree, and all 44 share the repo working
+tree — no per-test isolation. Sharpest finding: `test_performance.py`
+asserts wall-clock thresholds (<5 s, <3 s, <10 s) via `perf_counter`
+around *untimed* processes — a hang blocks the suite forever instead of
+failing the very threshold it was written to guard. Ruff S603/S607
+suppressed globally in pyproject.
 
 ## utils
 

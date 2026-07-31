@@ -41,8 +41,6 @@ recent PR activity.
 
 ## nl_latents
 
-## diff-walkthrough
-
 ## dr-cognee
 
 ## symphony-lite
