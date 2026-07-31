@@ -72,6 +72,34 @@ Axes and their default rules:
   defaults.
 - Per-item result size — protocol budget, declared by the batch protocol.
 
+## Observability
+
+Defaults never guess what you won't need to know — the information twin of
+the budgets principle. A tight default budget manufactures spurious
+failures; a quiet default log manufactures unanswerable questions, and the
+information case is harsher: an over-tight budget costs a restart, an
+unlogged fact is gone. For research code the run is the experiment — a lost
+intermediate is lost data, not lost convenience.
+
+- Progress is observable while it runs — the executor narrates its
+  lifecycle (spawned with what and where, streaming, waiting on deadline,
+  killing, reaping), so "is it working, is it stuck, where is my output
+  landing?" is answerable from outside at any moment. Consistent narration
+  is also the antipattern detector: aggregate-in-memory-write-at-the-end
+  becomes visible during the run, not at the post-mortem.
+- Every run leaves a durable record — what was invoked (argv, cwd,
+  environment grant posture), budgets in force, timestamps, outcome and
+  attribution, and where outputs including intermediates landed. The run
+  result is the in-memory answer; the record is its persistent shadow and
+  survives the process that made it.
+- Verbose by default, quiet by declaration — the default level assumes a
+  new or debugging user, which is when defaults matter; flags reduce it.
+  Silence is unrecoverable, noise is filterable, and disk at machine scale
+  makes verbosity cheap.
+- Narration and payload output are separate channels, never conflated —
+  the executor's own logging must not corrupt captured or protocol output,
+  the same invariant the batch protocol enforces from the child's side.
+
 ## Use cases
 
 1. **Untrusted Python source, call-scoped** — run generated Python in a budgeted, disposable runtime.
