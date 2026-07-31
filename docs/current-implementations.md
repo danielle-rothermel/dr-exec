@@ -372,6 +372,67 @@ consumers: configuration-as-injection, no monkeypatching.
 
 ## symphony-lite
 
+### Detached agent-run supervisor
+
+`src/symphony_lite/claude_runner.py:50` — agent runs spawned detached:
+`Popen(["claude", "-p", prompt, ..., "--output-format", "stream-json"],
+cwd=workspace, stdout=<open file>, stderr=STDOUT, stdin=DEVNULL,
+start_new_session=True)`, pid recorded in SQLite, runs lasting minutes to
+hours. The closest existing thing to ownership-survives-the-owner: the
+CLI exits and later invocations kill or inspect runs via the stored pid —
+but with the identity hole open (liveness is `os.kill(pid, 0)`, kill is
+`os.killpg(run.pid, SIGTERM)` with no pid-reuse guard: a recycled pid can
+be probed or signaled as if it were the run). `cwd` is load-bearing
+(claude session IDs are cwd-scoped). Precondition check worth noting:
+`assert_subscription_auth_env()` asserts `ANTHROPIC_API_KEY` is *absent*
+before spawn — a negative environment assertion.
+
+Budget axes — none: no timeout (unbounded by design), transcript file
+grows without limit (a deliberate unbounded-accumulation grant).
+
+Observability — the transcript is spooled (stream-json to a file, live
+and durable): genuinely good delivery. The SQLite pid registry is a
+durable ownership record. No narration of lifecycle events; exit is never
+observed (no wait, no reap — death is discovered by a failed liveness
+probe).
+
+Lifecycle — group-targeted SIGTERM, but nothing else: no escalation, no
+wait, no reap, no exit observation ever; the runs are permanent zombies
+until the pid table is manually reconciled.
+
+Attribution — none: exit status is never collected, so nothing is ever
+attributed.
+
+### Codex app-server JSON-RPC singleton
+
+`src/symphony_lite/codex_appserver.py:67` — a long-lived singleton child
+(`codex app-server`, stdin=PIPE, stdout=PIPE, stderr=append-mode log
+file, `start_new_session=True`) speaking bidirectional JSON-RPC: a reader
+thread demultiplexes responses by id into per-request queues; a write
+lock serializes stdin. Cancellation is protocol-level: `kill_codex_run`
+sends a `turn/interrupt` RPC rather than a signal — in-flight work
+cancelled without touching the process. Flaws: `_read_loop` iterates
+stdout with no size bound; `_pending` is mutated under two different
+locks; the stdin write is unguarded against `BrokenPipeError`; a crashed
+child is never reaped or restarted; `stop()` is leader-only
+`terminate()`.
+
+Budget axes — per-request wall-clock 60 s (interactions budgeted while
+the child is not — the UC6 shape); no output bound on the RPC stream.
+
+Observability — stderr spooled to an append-mode log (durable); no
+narration; a dead child is discovered as a broken pipe on next use.
+
+Lifecycle — leader-only terminate, no escalation, no reap, no restart.
+
+Attribution — per-request timeout distinguishable; channel failures
+(dead server, broken pipe) surface as raw exceptions, unattributed.
+
+Also noteworthy, one line each: `cli.py:165` replaces the CLI process
+entirely via `os.execvp` (exec-replacement, outside dr-exec's spawn
+model); git helpers at `workspace.py` use `git -C` with timeouts and
+returncode-as-predicate.
+
 ## dr-notion
 
 ## dr-dspy
