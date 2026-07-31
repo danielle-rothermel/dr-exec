@@ -3,11 +3,13 @@
 Catalog of first-party process execution across the fleet: one section per
 repo, one subsection per usage. This is the curated picture of what dr-exec
 must serve — content is added deliberately as behaviors and terminology are
-settled, and each usage accretes its mapping onto dr-exec vocabulary
-(use case, terms, budget axes) in place. Companion to
-`current-implementations.md`, which records the mechanisms; a repo whose
-execution code is purely mechanism appears only there. Repos ordered by most
-recent PR activity.
+settled, and each usage accretes its mapping onto the vocabulary defined
+in `target-usecases.md` (use case, terms, budget axes) in place. Companion
+to `current-implementations.md`, which records the mechanisms; a repo whose
+execution code is purely mechanism appears only there. Some usages map to
+the contract's cross-cutting sections (Testing, Observability) or to
+declared non-goals (in-process evaluation, the far side of ssh) rather
+than a numbered use case. Repos ordered by most recent PR activity.
 
 ## dr-code
 
@@ -80,6 +82,9 @@ recent PR activity.
 ## dr-subs
 
 ### Remote peer scanning over ssh
+
+(The contract serves the local half — the ssh invocation is a trusted-tool
+call; the remote side is caller domain by declared scope.)
 
 ### Host identity and reachability probes
 
