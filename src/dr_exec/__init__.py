@@ -23,6 +23,7 @@ from dr_exec.declare import (
     RecordsKind,
     contents_digest_of,
 )
+from dr_exec.errors import DeclarationError, DrExecError, ExecutorFailure
 from dr_exec.record import (
     EXECUTOR_IDENTITY,
     FAKE_EXECUTOR_IDENTITY,
@@ -45,6 +46,7 @@ from dr_exec.record import (
     serialize_budgets,
     serialize_grant,
 )
+from dr_exec.run import run_tool, run_untrusted_command, run_untrusted_python
 
 __all__ = [
     "EXECUTOR_IDENTITY",
@@ -64,7 +66,10 @@ __all__ = [
     "BudgetAxis",
     "Budgets",
     "ContainmentProfile",
+    "DeclarationError",
+    "DrExecError",
     "EnvironmentGrant",
+    "ExecutorFailure",
     "ExitPolicy",
     "ExitVerdict",
     "GrantKind",
@@ -86,6 +91,9 @@ __all__ = [
     "format_record_timestamp",
     "new_run_id",
     "record_filename",
+    "run_tool",
+    "run_untrusted_command",
+    "run_untrusted_python",
     "serialize_budgets",
     "serialize_grant",
 ]
