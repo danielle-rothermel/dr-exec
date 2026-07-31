@@ -57,7 +57,7 @@ build command is never invoked from Python.
   group kill, `TimeoutExpired` → `SubprocessTimeoutError`).
 - `src/dr_code/humaneval/batch_runner.py`: sole production consumer.
   `CANDIDATE_KILL_RETURNCODES = {-SIGKILL, -SIGSEGV}` drives
-  candidate-versus-harness attribution; timeout → all cases TIMEOUT; output
+  candidate-versus-executor attribution; timeout → all cases TIMEOUT; output
   limit → all cases ERROR; other nonzero exit / JSON parse failure / shape
   violation / unknown-or-duplicate case IDs → `EvaluationHarnessError`
   carrying partial results.
