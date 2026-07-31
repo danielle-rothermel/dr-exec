@@ -6,6 +6,7 @@
 - **Trusted payload** — content we authored or pinned (first-party code, known tools with first-party arguments). Failures are bugs, not adversarial behavior.
 - **Untrusted payload** — content from outside our control, above all model-generated: generated source, compiled artifacts of it, model-authored prompts or commands. Assumed arbitrary; runs only under an explicitly declared containment posture.
 - **Inherited state** — what a child process receives automatically from its parent: environment variables (and any credentials in them), working directory, open file descriptors. Inheritance is never the default; it is always an explicit grant.
+- **Environment passthrough** — an explicit grant of parent environment to the child, named-variable or overlay; the only route by which inherited environment reaches a child.
 - **Containment** — the declared restrictions on what a payload can reach (filesystem, network, processes, resources): a posture ranging from bare process boundary to full sandbox, always stated, never implied.
 - **Call-scoped** — the child's entire lifetime, spawn through reap, falls within a single executor call. Contrast: supervised long-lived processes, which outlive the call.
 - **Supervised** — a child whose owner observes liveness and exit and is accountable for teardown; the opposite of fire-and-forget.
@@ -13,6 +14,9 @@
 - **Reap** — collect a dead child's exit status so it cannot linger as a zombie.
 - **Hermetic** — no undeclared inputs: the runtime includes only what was declared. Distinct from containment (restricting what a payload can reach) and from POSIX session isolation (process-group lifecycle).
 - **Budgeted** — every resource axis — wall-clock, output, input — carries an explicit finite budget; exceeding one is a distinguishable failure, never silent. Per-axis names (deadline, output cap) refer to a single budget.
+- **Captured** — output buffered by the executor and returned as part of the result at exit.
+- **Streamed** — output delivered to the calling code incrementally as it is produced; still budgeted.
+- **Stdio passthrough** — child output forwarded live to the operator's own stdio rather than to calling code.
 - **Executor** — our machinery on the parent side of the process boundary: spawning, lifecycle enforcement, drivers, and result interpretation. Executor failure (our machinery broke) is always distinguishable from payload failure (the payload misbehaved).
 
 ## Use cases
@@ -20,16 +24,17 @@
 1. **Untrusted Python source, call-scoped** — run generated Python in a budgeted, disposable runtime.
    - Fresh state per run — nothing a prior run did can affect this one.
    - Declared runtime — the interpreter and importable package set are explicit inputs, hermetic by default; nothing from the host leaks in by accident.
-   - Environment by explicit grant — the child inherits nothing by default; named-variable and overlay passthrough are first-class so intentional grants are easy and visible.
+   - Environment by explicit grant — the child inherits nothing by default; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 2. **Untrusted command, call-scoped** — same, argv-general: compiled artifacts of generated code, headless agent CLIs.
-   - Environment by explicit grant — the child inherits nothing by default; named-variable and overlay passthrough are first-class so intentional grants are easy and visible.
+   - Environment by explicit grant — the child inherits nothing by default; named-variable and overlay environment passthrough are first-class so intentional grants are easy and visible.
    - Failure attribution — crash, kill, timeout, output overflow, and ordinary nonzero exit are distinguishable, and payload failure is distinguishable from executor failure.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 3. **Untrusted batch** — many untrusted work items amortized through one budgeted child, with structured per-item results.
    - Trusted vs untrusted payload categorization is declared, not inferred — running an untrusted payload requires an explicit call-site acknowledgment of its containment; accidental invocation fails loudly.
 4. **Trusted tool invocation** — hardened calls to known programs (git, uv, linters, docker) with the lifecycle rigor ad-hoc call sites never have.
+   - Stdio passthrough is first-class — streaming a trusted tool's output to the operator is a supported mode, not a reason to bypass the executor.
 5. **Sandboxes** — real containment (filesystem/network/resource) for untrusted execution; mechanism to be researched (not necessarily docker); replaces and decommissions dr-docker.
    - Containment is verified, not assumed — execution refuses rather than silently degrading when the promised containment is unavailable.
 6. **Supervised long-lived processes** — children that outlive the call (agent servers, stdio RPC); a fully targeted use case with its own distinct set of concerns (liveness, restart, streaming I/O, reaping across calls), designed as its own contract — never a mode of the call-scoped runners.
@@ -39,6 +44,8 @@
    - Shutdown is deliberate and complete — stop means the whole process tree terminated, escalated, and reaped within a budget, with the same rigor as call-scoped teardown.
    - Ownership survives the owner — supervision can be persisted and reattached; a child is never unkillable because its spawner exited.
    - Interactions are budgeted even when the child is not — each request or stream carries budgets; unbounded accumulation is an explicit grant, never a default.
+   - Incremental observation — output is observable as it is produced, not only at exit; observation itself stays budgeted.
+   - Deadlock-free bidirectional exchange — when stdin and stdout are both live, the executor owns the concurrency; a caller cannot wedge on the executor's own pipes.
    - No silent replacement — a restarted child is a new child, visibly; supervision never swaps the process behind a handle.
 
 For more info: subprocess usage audit results at /Users/daniellerothermel/drotherm/repos/dr-exec/docs/subprocess-usage-audit.md
