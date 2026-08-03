@@ -7,72 +7,90 @@ name = "output overflow policy"
 definition = """
 The caller-declared response when captured payload output exceeds its byte \
 budget. V1 provides exactly two policies, fail and marked truncation; the \
-selected policy and any overflow remain visible in the run result and run \
-record."""
+selected policy and any overflow remain visible in the `ExecutionResult` and \
+run record."""
 
 [[terms]]
 name = "fail output overflow policy"
 definition = """
-The output overflow policy spelled `FAIL` in the declaration API. The \
-executor terminates the run, attributes the outcome to the output budget, \
-and retains the output captured so far with truncation marked; it never \
-discards the diagnostic prefix or attributes the executor-inflicted signal \
-death to the payload."""
+The output overflow policy spelled `FAIL` in the declaration API. The executor \
+terminates the run after aggregate payload production crosses the finite bound, \
+retains the configured stdout and stderr head and tail evidence, and records \
+exact produced and dropped byte counts. It never attributes the \
+executor-inflicted signal death to the payload."""
 
 [[terms]]
 name = "marked truncation output overflow policy"
 definition = """
-The output overflow policy spelled `MARKED_TRUNCATION` in the declaration \
-API. The executor stops retaining bytes at the bound but continues draining \
-both payload streams through EOF, lets the run finish, and records truncation \
-plus the number of bytes dropped per stream. It is never silent truncation."""
+The output overflow policy spelled `MARKED_TRUNCATION` in the declaration API. \
+The executor maintains the configured stdout and stderr head and tail segments, \
+drops intervening bytes after the bound is crossed, continues draining through \
+EOF, lets the run finish, and records exact produced and dropped byte counts. It \
+is never silent truncation."""
 
 [[terms]]
 name = "executor identity"
 definition = """
-The pinned identity of the executor machinery that produced a run, carried \
-in every run record for cache keys and provenance. Production and fake \
+The pinned identity of the executor machinery that produced a run, carried in \
+every real run record for cache keys and provenance. Production and fake \
 executors have distinct identities; executor identity is independent of \
 callable object identity and is not runtime identity, which describes the \
 platform and interpreter environment."""
 
 [[terms]]
-name = "batch request"
+name = "execution job"
 definition = """
-The v1 declaration of one flat item list, its caller-supplied driver body and \
-item schema, and the budgets governing their execution in one warm child. \
-Items inside one batch request share that child; parent-side fan-out creates \
-separate batch requests at each dimension boundary where the child is \
-refreshed."""
+The v1 caller-defined scheduling and sharing unit, represented by \
+`ExecutionJob`. It binds one stable `JobId` to one `ExecutionTarget`, one live \
+`EnvGrant`, and one complete `Budgets` value. Every physical attempt gets a \
+fresh child; work inside the job may be sequential so setup is paid once."""
 
 [[terms]]
-name = "batch protocol"
+name = "execution pool"
 definition = """
-The v1 child-to-parent NDJSON wire contract for a batch request: one initial \
-prelude carrying the batch request identity, one result line per item as it \
-completes, and one terminal completion line when the child finishes on its own \
-terms. Its incremental shape preserves already delivered item results after a \
-later child failure or truncation."""
+The concrete v1 host-local scheduler that keeps at most its effective capacity \
+of independent execution jobs active, bounds prefetch and completed-result \
+buffering, applies backpressure to its source, and yields completions in \
+completion order. It reuses scheduling capacity, never child processes or \
+interpreters."""
 
 [[terms]]
-name = "batch protocol channel"
+name = "execution protocol"
 definition = """
-The driver-owned byte channel that carries the batch protocol separately from \
-payload output. In v1 it is protected protocol stdout with its own declared \
-budget, so payload output cannot consume the protocol budget or invalidate \
-completed item results."""
+The v1 protected child-to-parent framed JSON or NDJSON contract for an untrusted \
+Python execution: an identity-echoing prelude, zero or more complete validated \
+protocol outputs, and a terminal completion message. Its incremental shape \
+preserves already accepted outputs after a later child or protocol failure \
+without assigning domain meaning to their contents."""
 
 [[terms]]
-name = "batch request identity"
+name = "execution protocol channel"
 definition = """
-The item ids and configuration digest that identify one batch request, echoed \
-in the batch protocol prelude before any item result is trusted. It binds the \
-child's incremental result stream to the exact request the parent issued."""
+The driver-owned byte channel that carries the execution protocol separately \
+from payload stdout and stderr. It has separate accounting and framing limits, \
+so payload output overflow cannot truncate a protocol frame or invalidate a \
+previously accepted protocol output."""
+
+[[terms]]
+name = "protocol output"
+definition = """
+A complete validated `IdentityDocument` emitted by the execution driver over \
+the execution protocol channel. Protocol outputs carry structured domain \
+results and are never mixed with, decoded from, or truncated like payload \
+stdout and stderr."""
+
+[[terms]]
+name = "payload output"
+definition = """
+The untrusted raw bytes a child writes to stdout or stderr as ordinary program \
+output. Payload output is captured, budgeted, and retained independently from \
+protocol outputs and executor narration."""
 
 [[terms]]
 name = "real-engine oracle test"
 definition = """
-A consumer test whose expected meaning depends on genuinely executing a \
-payload through the production engine, such as a parity suite or driver-body \
-test. It uses the real engine rather than `FakeExecutor`, because scripting \
-the execution result would assume the behavior the test exists to establish."""
+A consumer test whose expected meaning depends on genuinely executing a payload \
+through `ProcessExecutor`, such as a parity suite or driver test. It uses the \
+real engine with a temporary `DirectoryRunStore` rather than `FakeExecutor`, \
+because scripting the execution result would assume the behavior the test \
+exists to establish."""

@@ -7,17 +7,18 @@ commit = "fda5f1102914b93c40617c4206311e80818a8f6e"
 date = "2026-07-31"
 
 [[exclusions]]
-title = "Delivery modes beyond captured text"
+title = "Delivery modes beyond captured payload bytes"
 statement = """
-V1 excludes streamed, spooled, stdio-passthrough, and bytes-mode output \
-delivery."""
+V1 excludes streamed, spooled, stdio-passthrough, and executor-decoded text \
+output delivery."""
 rationale = """
-Captured text with visible overflow handling serves the initial consumers; the \
-other modes need distinct memory, latency, file-ownership, and operator-facing \
-contracts rather than partial emulation."""
+Captured raw bytes with structural head/tail overflow handling preserve the \
+initial consumers' evidence; other modes need distinct memory, latency, \
+encoding, file-ownership, and operator-facing contracts rather than partial \
+emulation."""
 related_contracts = ["Output delivery modes are explicit"]
 enforcement_modes = ["scope_exclusion"]
-enforcement = "The v1 declaration surface exposes captured text delivery only and contains no streamed, spooled, stdio-passthrough, or bytes-mode option."
+enforcement = "PayloadOutputs exposes captured raw stdout and stderr bytes only and the v1 declaration surface contains no streamed, spooled, stdio-passthrough, or decoded-text option."
 
 [[exclusions]]
 title = "Containment beyond the process boundary"

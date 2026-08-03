@@ -22,7 +22,7 @@ title = "Validated argv and concrete process invocation"
 statement = """
 V1 accepts only nonempty argument vectors whose elements are nonempty, NUL-free \
 strings, invokes them directly without a shell over real operating-system \
-pipes, and invokes hermetic Python as `interpreter -I -c <source>`."""
+pipes, and invokes isolated host Python as `interpreter -I -c <source>`."""
 rationale = """
 Pinning the accepted argv and invocation shapes turns shell injection, malformed \
 arguments, and child-observable wrapper drift into detectable contract \
@@ -42,18 +42,18 @@ identity is not evidence of content trust. Requiring a call-site declaration \
 makes accidental uncontained execution a detectable error instead of an \
 implicit downgrade."""
 parent_date = "2026-07-31"
-title = "Trust-specific entry points and containment acknowledgment"
+title = "Trust-specific targets and containment acknowledgment"
 statement = """
-V1 declares trust through distinct trusted-tool, untrusted-Python, and \
-untrusted-command entry points, records the selected category, and accepts an \
-untrusted call only when it names the `PROCESS_BOUNDARY_ONLY` containment \
-profile explicitly."""
+V1 declares trust through the closed `TrustedCommandTarget`, \
+`UntrustedPythonTarget`, and `UntrustedCommandTarget` variants, records the \
+selected category, and accepts an untrusted target only when it names the \
+`PROCESS_BOUNDARY_ONLY` containment profile explicitly."""
 rationale = """
-Making trust visible in the function name and durable record keeps the \
+Making trust visible in the target type and durable record keeps the \
 acknowledgment auditable without a redundant trust flag, while an undefaultable \
 profile prevents accidental implicit containment."""
 enforcement_modes = ["constructed_invariant", "validation_rejection", "modeled_outcome"]
-enforcement = "The public API encodes the trust category in the selected function, untrusted signatures have no default profile, validation accepts only the v1 profile, and the record persists the category and profile."
+enforcement = "ExecutionTarget is a discriminated union whose untrusted variants require a containment profile, validation accepts only the v1 profile, and RunDeclaration persists the target category and profile."
 
 [[extensions]]
 parent_title = "Inherited state is granted, not ambient"
@@ -70,7 +70,7 @@ than trusted as documentation."""
 parent_date = "2026-07-31"
 title = "Exact inherited-state and scratch behavior"
 statement = """
-V1 grants environment only through a frozen `EnvironmentGrant`, gives a child \
+V1 grants environment only through a frozen `EnvGrant`, gives a child \
 exactly file descriptors 0 (stdin), 1 (stdout), and 2 (stderr), supplies exactly \
 the declared stdin bytes \
 followed by EOF, creates a fresh per-run scratch cwd, and has no ambient record \
@@ -80,32 +80,7 @@ An exact grant surface makes run inputs reproducible, prevents credential and \
 descriptor leaks, makes stdin completion deterministic, and isolates concurrent \
 runs without hidden process-global state."""
 enforcement_modes = ["constructed_invariant", "validation_rejection", "runtime_guarantee"]
-enforcement = "Environment grants resolve parent-derived values when constructed, exclusions are checked before spawn, descriptors are made non-inheritable except for the three run pipes, stdin is closed after its declared bytes, and the engine creates and cleans one scratch cwd per call."
-
-[[extensions]]
-parent_title = "Untrusted Python runs in a declared hermetic runtime"
-parent_statement = """
-Every untrusted Python run declares its interpreter and importable package set \
-as inputs and uses a hermetic runtime by default, so no undeclared host input \
-participates in execution."""
-parent_rationale = """
-Environment and workspace isolation alone do not control which interpreter or \
-packages execute payload code. Making the runtime part of the declaration keeps \
-machine-local installations from silently changing results while allowing a \
-caller to grant a non-hermetic input visibly when the use case requires it."""
-parent_date = "2026-07-31"
-title = "Pinned hermetic-Python semantics"
-statement = """
-V1's `HERMETIC` runtime invokes the declared interpreter with `-I -c`, uses \
-only the declared environment and package set, and injects no run-varying \
-environment, argv, or stdio framing; the fresh scratch path is its sole \
-documented run-varying child observable."""
-rationale = """
-Pinning the interpreter shape and observable inputs supports exact determinism \
-checks while making the scratch-path caveat explicit rather than overstating \
-hermeticity."""
-enforcement_modes = ["constructed_invariant", "validation_rejection", "runtime_guarantee"]
-enforcement = "The runtime declaration carries interpreter and package identity, source and aggregate exec size are validated before spawn, and the engine constructs the pinned isolated invocation without additional child-visible state."
+enforcement = "EnvGrant resolves parent-derived values when constructed, exclusions are checked before spawn, descriptors are made non-inheritable except for the three run pipes, stdin is closed after its declared bytes, and the engine creates and cleans one scratch cwd per call."
 
 [[extensions]]
 parent_title = "Budgets come from declared meaning"
@@ -130,19 +105,19 @@ per-run limits, and parallel parent and child constants inevitably drift."""
 parent_date = "2026-07-31"
 title = "V1 budget shape and derivation"
 statement = """
-V1 declares wall-clock, aggregate raw-byte output, and pre-spawn raw-byte input \
-axes as finite budgets or `UNBUDGETED`, derives and pins a 96 KiB source limit \
-and 1 MiB aggregate argv-plus-environment limit from platform exec constraints, \
-applies batch budgets to the \
-whole warm child, and bounds executor startup and termination with built-in \
+V1 represents wall time, input bytes, payload output, memory bytes, CPU time, \
+process count, file size, open-file count, and disk bytes as finite budgets or \
+`UNBUDGETED`; `Budgets.unbudgeted()` supplies every default. Platform-derived \
+source and aggregate argv-plus-environment limits remain mandatory spawn \
+validation, and executor startup and termination use separate built-in \
 self-budgets."""
 rationale = """
-The v1 axes correspond to limits its consumers can size meaningfully, raw-byte \
+Explicit unit-specific axes prevent accidental value exchange, raw-byte \
 accounting is encoding-independent, derived exec limits prevent mid-spawn \
-surprises, and whole-child batch accounting matches the declared sharing \
-boundary."""
+surprises, and the absence of caller meaning remains visible instead of becoming \
+an invented finite workload limit."""
 enforcement_modes = ["validation_rejection", "constructed_invariant", "runtime_guarantee"]
-enforcement = "Budget declarations have no unset state, input and exec-size bounds are rejected before spawn, the same budget object crosses the batch boundary, and the engine applies wall, output, startup, and termination bounds at runtime."
+enforcement = "Budget declarations have no unset state, unsupported finite axes and platform-invalid declarations are rejected before spawn, RunDeclaration records the complete effective budgets, and the engine applies supported finite workload budgets independently from its self-budgets."
 
 [[extensions]]
 parent_title = "Budget enforcement remains attributable and observable"
@@ -160,17 +135,19 @@ compete with payload output for the same accounting."""
 parent_date = "2026-07-31"
 title = "Exact output-overflow enforcement"
 statement = """
-V1's `FAIL` output overflow policy terminates the run while retaining and \
-marking the captured prefix; `MARKED_TRUNCATION` stops retaining bytes but \
-continues draining through EOF, counts bytes dropped per stream, and lets the \
-run finish. A recorded output violation takes precedence over a racing deadline \
-or clean exit."""
+V1 allocates every finite aggregate payload-output budget across deterministic \
+stdout and stderr head and tail segments. `FAIL` terminates the run after the \
+aggregate threshold is crossed; `MARKED_TRUNCATION` continues draining through \
+EOF. Both preserve structural head/tail evidence and exact produced and dropped \
+byte counts, and a recorded output violation takes precedence over a racing \
+deadline or clean exit."""
 rationale = """
-The two policies preserve diagnostic evidence without permitting silent loss or \
-pipe backpressure, and fixed precedence prevents executor-inflicted termination \
-from being misattributed to the payload."""
+Head/tail retention preserves both startup and terminal diagnostics without \
+making drain scheduling observable, continued draining prevents pipe \
+backpressure, and fixed precedence prevents executor-inflicted termination from \
+being misattributed to the payload."""
 enforcement_modes = ["runtime_guarantee", "modeled_outcome"]
-enforcement = "The engine keeps draining both pipes, records overflow and per-stream byte counts, applies the selected termination behavior, and assigns the single outcome using the pinned precedence order."
+enforcement = "FiniteOutput validates that its four retention segments sum to max_bytes, the engine keeps draining both pipes, records per-stream segment and byte counts, applies the selected termination behavior, and assigns the single outcome using the pinned precedence order."
 
 [[extensions]]
 parent_title = "Call-scoped lifecycle completes before return"
@@ -218,8 +195,9 @@ interpretation with the caller while preserving retry and debugging evidence."""
 parent_date = "2026-07-31"
 title = "Recognized outcomes and pinned attribution"
 statement = """
-V1 returns `RunResult` for every trustworthy recognized execution outcome, \
-including spawn absence, budgets, signals, and ordinary exit statuses; it raises \
+V1 returns `CompletedExecution` containing an `ExecutionResult` for every \
+trustworthy recognized execution outcome, including spawn absence, budgets, \
+protocol failure, cancellation, signals, and ordinary exit statuses; it raises \
 only for invalid pre-spawn declarations or machinery failure that prevents a \
 trustworthy result, and assigns exactly one attribution in pinned precedence."""
 rationale = """
@@ -242,17 +220,18 @@ properties. Treating these modes explicitly keeps permissive output affordable, 
 prevents protocol corruption, and avoids confusing files created by payload \
 code with bytes transported by the executor."""
 parent_date = "2026-07-31"
-title = "Captured-text delivery in v1"
+title = "Captured payload bytes in v1"
 statement = """
-V1's captured text delivery accounts raw bytes before UTF-8 decoding with \
-replacement, adds no in-band framing or newline normalization, marks truncation \
-in metadata, keeps narration on parent logging, \
-and records caller-owned artifact paths separately from delivery mode."""
+V1 returns captured stdout and stderr as separate raw byte streams, adds no \
+in-band framing, decoding, or newline normalization, represents retained head \
+and tail segments separately, keeps narration on a parent-owned channel, and \
+records caller-owned artifact paths separately from delivery mode."""
 rationale = """
-Byte-first accounting, visible truncation, and separated narration preserve the \
-payload evidence needed by the initial consumers."""
+Byte-preserving capture, structural truncation metadata, and separated narration \
+retain the payload evidence needed by the initial consumers without inventing a \
+text encoding contract."""
 enforcement_modes = ["constructed_invariant", "runtime_guarantee"]
-enforcement = "The engine captures and accounts the raw streams before never-raising decode, the result models truncation out of band, and narration remains on the parent logging channel."
+enforcement = "The engine captures and accounts raw stream bytes, PayloadOutputs models head and tail segments plus exact byte counts, and narration remains on the parent-owned channel."
 
 [[extensions]]
 parent_title = "Every run is durably and faithfully observable"
@@ -271,17 +250,18 @@ and only callers have the domain knowledge to redact safely after capture."""
 parent_date = "2026-07-31"
 title = "V1 run-record and provenance format"
 statement = """
-When recording is selected, V1 writes one collision-free JSON record per run \
-from spawn through finalization with pinned invocation and input digests, trust, \
-grants, profile, budgets, runtime, timestamps, outcome, attribution, \
-measurements, output locations, and executor identity; record keys and persisted \
-literals are explicit and golden-tested."""
+Every real v1 run writes through `DirectoryRunStore`, which atomically publishes \
+`prepared`, `running`, and `finalized` JSON manifests in one collision-free run \
+directory and finalizes digest-verified retained-output sidecars. The manifest \
+records safe declaration identities, grants, profile, budgets, runtime, \
+timestamps, outcome, attribution, measurements, output metadata, and executor \
+identity; exact keys and persisted literals are golden-tested."""
 rationale = """
-A pinned, value-sensitive but secret-preserving record makes experiments and \
-cache identity reproducible without deriving durable formats from mutable code \
-field names."""
+A crash-consistent, value-sensitive but secret-preserving lifecycle record \
+makes incomplete and completed attempts recoverable without deriving durable \
+formats from mutable code field names."""
 enforcement_modes = ["runtime_guarantee", "modeled_outcome", "governance"]
-enforcement = "A selected record directory causes the engine to create at spawn and finalize at exit one JSON record, serialization models pin the schema and canonical digests, golden tests pin exact wire literals, and record failures are narrated without replacing the run outcome."
+enforcement = "ProcessExecutor requires a RunStore, prepares the record before spawn, marks successful spawn, flushes sidecars before atomic finalization, returns recording degradation through RecordReceipt without replacing the execution outcome, and reserves FakeRecordReceipt for non-executing fake calls."
 
 [[extensions]]
 parent_title = "Containment cost follows a declared sharing boundary"
@@ -296,47 +276,18 @@ execution unusable, while reserving every worst-case limit destroys \
 concurrency. Callers otherwise rationally bypass the safe path, so \
 amortization is a correctness obligation rather than optional optimization."""
 parent_date = "2026-07-31"
-title = "Batch request as sharing boundary"
+title = "Execution job as sharing boundary"
 statement = """
-V1 makes one `BatchRequest` the explicit sharing boundary for one warm child, \
-keeps cross-product fan-out at each refresh boundary in the parent, and applies \
-run budgets to the whole child rather than multiplying them per item."""
+V1 makes one caller-defined `ExecutionJob` the explicit setup and child-lifetime \
+sharing boundary, gives every job one fresh child, applies budgets to the whole \
+job, and evaluates independent jobs through one bounded host-level \
+`ExecutionPool`."""
 rationale = """
-The request shape makes amortization and resource accounting visible while \
-letting the parent preserve dimensional structure and choose exactly where a \
-fresh child is required."""
+The job shape lets domain code amortize compilation, loading, and interpreter \
+startup across related internal work while dr-exec controls concurrency across \
+independent jobs without reusing poisonable child state."""
 enforcement_modes = ["constructed_invariant"]
-enforcement = "The batch API maps each BatchRequest to one child and accepts a flat item set; callers express another sharing boundary by constructing and dispatching another request."
-
-[[extensions]]
-parent_title = "A batch preserves dimensional identity and partial work"
-parent_statement = """
-A batch is a declared cross-product of dimensions with explicit sharing \
-boundaries; every item has exactly one dimension-indexed result, item failures \
-remain data scoped to their sub-batch, malformed or missing protocol results \
-are executor failures, the driver echoes request identity before results are \
-trusted, and each result leaves the child incrementally so later failure cannot \
-erase completed work."""
-parent_rationale = """
-A flat list loses failure and sharing structure, while whole-array protocols \
-discard paid-for work when a child dies. Request echo and exact accounting \
-detect stale, duplicate, unknown, or shape-invalid responses at the boundary; \
-driver failures belong to the executor even though the driver runs beside the \
-payload."""
-parent_date = "2026-07-31"
-title = "V1 incremental batch protocol"
-statement = """
-V1 uses a pinned NDJSON protocol with an identity-echoing prelude, one result \
-line per item as it completes, and a terminal completion line; a separately \
-budgeted driver-owned protocol channel protects completed results, and the \
-parent rejects missing, duplicate, unknown, or shape-invalid accounting as an \
-executor protocol failure while preserving partial work."""
-rationale = """
-Incremental identity-bound delivery prevents later child failure or noisy \
-payload output from erasing trusted results and gives every requested item an \
-explicit final accounting."""
-enforcement_modes = ["runtime_guarantee", "modeled_outcome"]
-enforcement = "The driver emits the pinned line sequence over its protected channel, the parent validates request identity and exact item accounting as lines arrive, retains accepted results immediately, and synthesizes only missing-item consumer outcomes from the raw child result."
+enforcement = "Executor.run maps each ExecutionJob to one fresh child and one CompletedExecution, ExecutionPool bounds concurrent jobs and prefetch, and callers choose another sharing boundary by constructing another job."
 
 [[extensions]]
 parent_title = "Containment profiles are mechanism-independent and fail closed"
@@ -363,7 +314,7 @@ An honest permissive profile preserves the future containment shape without \
 letting callers mistake a process boundary for a sandbox or silently claim \
 stronger reach restrictions than v1 enforces."""
 enforcement_modes = ["validation_rejection", "constructed_invariant"]
-enforcement = "Untrusted entry points reject an absent or unknown profile, and the v1 profile serializes its full reach and known process-group limitation."
+enforcement = "Untrusted ExecutionTarget variants reject an absent or unknown profile, and the v1 profile serializes its full reach and known process-group limitation."
 
 [[extensions]]
 parent_title = "The library owns its contract-enforcing fake"
@@ -379,15 +330,15 @@ tests or making integration oracles tautological."""
 parent_date = "2026-07-31"
 title = "Exact fake behavior and testing ownership"
 statement = """
-V1's `FakeExecutor` shares production entry-point signatures and declaration \
-validation, records every complete declaration, returns behaviorally scripted \
-results only after validating production invariants, and carries a distinct \
-fake executor identity; dr-exec owns spawn-path tests while consumers retain \
-real-engine oracle tests whose meaning depends on execution."""
+V1's `FakeExecutor` satisfies the same one-method `Executor` Protocol, validates \
+and records each immutable `ExecutionJob`, returns scripted \
+`CompletedExecution` values with a distinct fake record receipt and executor \
+identity, and remains safe under `ExecutionPool`; dr-exec owns spawn-path tests \
+while consumers retain real-engine oracle tests whose meaning depends on \
+execution."""
 rationale = """
-One strict fake makes declaration changes visible to consumer tests without \
-allowing impossible outcomes or cache-identity impersonation, while explicit \
-test ownership prevents either duplicated lifecycle suites or tautological \
-execution oracles."""
+One strict fake makes job-contract changes visible to consumer tests without \
+pretending a durable real run exists, while explicit test ownership prevents \
+either duplicated lifecycle suites or tautological execution oracles."""
 enforcement_modes = ["constructed_invariant", "validation_rejection", "governance"]
-enforcement = "The library supplies the fake against the same declarations and validators, rejects invalid scripts and production identity claims, records calls for assertion, owns engine lifecycle coverage, and permits consumers to use the production engine only for real-execution oracle cases."
+enforcement = "The library supplies the fake against Executor.run and shared job validation, returns FakeRecordReceipt, records calls under synchronization, owns engine lifecycle coverage, and uses the production engine for real-execution oracle cases."

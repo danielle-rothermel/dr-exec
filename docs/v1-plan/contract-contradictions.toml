@@ -26,17 +26,45 @@ and executor self-budgets keep operations such as startup and teardown from \
 hanging. Batch- and fleet-level protection must be declared independently of \
 per-run limits, and parallel parent and child constants inevitably drift."""
 parent_date = "2026-07-31"
-title = "V1 memory remains explicitly unbudgeted"
+title = "V1 machine-protection axes default to unbudgeted"
 statement = """
-V1 records memory as explicitly unbudgeted and provides no default RAM \
-enforcement."""
+V1 defaults every workload axis, including memory and disk, to explicit \
+`UNBUDGETED`. A caller may select a supported finite budget, but v1 provides no \
+default aggregate RAM or disk enforcement."""
 rationale = """
-The initial consumers do not supply a meaningful memory contract, and v1 does \
-not yet include a containment mechanism that can enforce an aggregate \
-machine-scale memory limit faithfully."""
-conflict = "The parent contract says RAM has per-run aggregate machine-scale protection by default; v1 explicitly provides none."
+The initial consumers do not supply meaningful machine-protection limits, and \
+v1 does not yet include a mechanism that can enforce aggregate RAM or disk \
+protection faithfully. An explicit unbudgeted value records that limitation \
+without manufacturing workload failures."""
+conflict = "The parent contract requires per-run aggregate RAM and disk protection by default; v1 defaults both axes to explicit UNBUDGETED."
 enforcement_modes = ["modeled_outcome", "scope_exclusion"]
-enforcement = "The budget declaration and run record serialize the memory axis as unbudgeted, and the v1 engine installs no RAM limiter."
+enforcement = "Budgets.unbudgeted() is the default declaration, the effective declaration and run record preserve every unbudgeted axis, unsupported finite axes fail validation, and the v1 engine installs no aggregate RAM or disk limiter."
+
+[[contradictions]]
+parent_title = "Untrusted Python runs in a declared hermetic runtime"
+parent_statement = """
+Every untrusted Python run declares its interpreter and importable package set \
+as inputs and uses a hermetic runtime by default, so no undeclared host input \
+participates in execution."""
+parent_rationale = """
+Environment and workspace isolation alone do not control which interpreter or \
+packages execute payload code. Making the runtime part of the declaration keeps \
+machine-local installations from silently changing results while allowing a \
+caller to grant a non-hermetic input visibly when the use case requires it."""
+parent_date = "2026-07-31"
+title = "V1 Python uses an isolated host runtime"
+statement = """
+V1 resolves one host Python executable to an absolute path, records that path \
+and its runtime identity, and invokes it with `-I -c`. It does not declare or \
+verify an interpreter manifest, standard-library bytes, or importable package \
+closure and therefore does not claim hermetic execution."""
+rationale = """
+Isolated host Python is a small useful macOS boundary that can ship without \
+pretending the host installation is content-verified. A verified uv-provisioned \
+runtime remains a later implementation of the stable `Runtime` Protocol."""
+conflict = "The parent contract requires a declared interpreter and package set with hermetic semantics; v1 records but does not verify the host runtime or package closure."
+enforcement_modes = ["constructed_invariant", "scope_exclusion"]
+enforcement = "IsolatedHostPythonRuntime constructs only the resolved `<executable> -I -c <source>` form, RuntimeRecord persists the resolved executable and runtime identity, and the v1 runtime vocabulary contains no hermetic or manifest-bearing variant."
 
 [[contradictions]]
 parent_title = "Call-scoped lifecycle completes before return"
@@ -65,28 +93,33 @@ enforcement_modes = ["runtime_guarantee", "scope_exclusion"]
 enforcement = "The engine performs bounded process-group termination and reaps the direct child, while the containment profile explicitly excludes descendants that leave the group from its reach."
 
 [[contradictions]]
-parent_title = "Every run is durably and faithfully observable"
+parent_title = "A batch preserves dimensional identity and partial work"
 parent_statement = """
-Every run attempts a durable record from live execution through completion, \
-including invocation, grants, budgets, timestamps, outcome, attribution, and \
-output locations; narration is verbose by default and separate from payload \
-output, capture is altered only by visibly recorded budget truncation, and \
-recording or narration failure is itself reported and executor-attributed \
-without failing the run it observes."""
+A batch is a declared cross-product of dimensions with explicit sharing \
+boundaries; every item has exactly one dimension-indexed result, item failures \
+remain data scoped to their sub-batch, malformed or missing protocol results \
+are executor failures, the driver echoes request identity before results are \
+trusted, and each result leaves the child incrementally so later failure cannot \
+erase completed work."""
 parent_rationale = """
-Research runs are experiments: an unrecorded intermediate or silently edited \
-stream cannot be recovered. Quiet defaults and executor-side redaction were \
-rejected because noise is filterable but missing information is permanent, \
-and only callers have the domain knowledge to redact safely after capture."""
+A flat list loses failure and sharing structure, while whole-array protocols \
+discard paid-for work when a child dies. Request echo and exact accounting \
+detect stale, duplicate, unknown, or shape-invalid responses at the boundary; \
+driver failures belong to the executor even though the driver runs beside the \
+payload."""
 parent_date = "2026-07-31"
-title = "V1 permits explicit no-record runs"
+title = "V1 schedules domain-free execution jobs"
 statement = """
-V1 accepts the explicit `Records.none()` declaration and performs no durable \
-record attempt for that run."""
+V1 makes one caller-defined `ExecutionJob` the scheduling and sharing unit and \
+returns one `CompletedExecution` per job. The domain request and driver own any \
+dimensions, internal items, and per-item completeness; dr-exec preserves each \
+complete validated protocol output but does not model a cross-product or \
+synthesize domain item results."""
 rationale = """
-Hot-loop real-engine oracle tests need to execute production semantics without \
-creating unbounded durable artifacts, and an explicit declaration keeps the \
-absence visible at the call site."""
-conflict = "The parent contract says every run attempts a durable record; Records.none() intentionally suppresses that attempt."
-enforcement_modes = ["constructed_invariant", "scope_exclusion"]
-enforcement = "Every entry point has a records keyword with no default, and selecting Records.none() constructs a run configuration whose record writer is absent."
+The primary workload must compile or load one generated sample once, evaluate \
+its complete test suite sequentially, and run many independent samples with \
+bounded host concurrency. Keeping the job opaque lets other domains choose the \
+same setup-sharing boundary without embedding HumanEval dimensions in dr-exec."""
+conflict = "The parent contract requires dr-exec to model batch dimensions and exactly one result per item; v1 models only jobs and leaves internal item accounting to the domain driver."
+enforcement_modes = ["constructed_invariant", "modeled_outcome", "scope_exclusion"]
+enforcement = "ExecutionPool schedules only ExecutionJob values, Executor returns one CompletedExecution per job, the protocol validates framing and request identity while preserving accepted outputs, and domain adapters validate their own internal result sets."
