@@ -1,0 +1,354 @@
+# Compatible refinements proposed by the v1 design. Parent fields are frozen
+# copies from the baseline revision; they do not track later .defs changes.
+
+[baseline]
+source = ".defs/contracts.toml"
+commit = "fda5f1102914b93c40617c4206311e80818a8f6e"
+date = "2026-07-31"
+
+[[extensions]]
+parent_title = "Execution is local, process-level, and argv-only"
+parent_statement = """
+dr-exec executes machine-local child processes from validated argument vectors; \
+it never invokes a shell, treats the far side of ssh as caller domain, or \
+provides in-process evaluation as an executor mode."""
+parent_rationale = """
+The executor can guarantee lifecycle, reaping, and containment only on its own \
+machine and across a real process boundary. Shell interpretation adds an \
+unnecessary language and injection surface, while remote orchestration and \
+in-process evaluation have different ownership boundaries."""
+parent_date = "2026-07-31"
+title = "Validated argv and concrete process invocation"
+statement = """
+V1 accepts only nonempty argument vectors whose elements are nonempty, NUL-free \
+strings, invokes them directly without a shell over real operating-system \
+pipes, and invokes isolated host Python as `interpreter -I -c <source>`."""
+rationale = """
+Pinning the accepted argv and invocation shapes turns shell injection, malformed \
+arguments, and child-observable wrapper drift into detectable contract \
+violations."""
+enforcement_modes = ["validation_rejection", "constructed_invariant"]
+enforcement = "Malformed argument vectors are rejected before spawn, and every public entry point constructs one of the pinned direct-spawn forms."
+
+[[extensions]]
+parent_title = "Payload trust and containment are explicit"
+parent_statement = """
+Every run declares whether its payload is trusted or untrusted; an untrusted \
+payload runs only with an explicitly acknowledged containment profile, and \
+the executor never infers trust from the executable that receives it."""
+parent_rationale = """
+Known binaries can execute model-authored prompts or commands, so binary \
+identity is not evidence of content trust. Requiring a call-site declaration \
+makes accidental uncontained execution a detectable error instead of an \
+implicit downgrade."""
+parent_date = "2026-07-31"
+title = "Trust-specific targets and containment acknowledgment"
+statement = """
+V1 declares trust through the closed `TrustedCommandTarget`, \
+`UntrustedPythonTarget`, and `UntrustedCommandTarget` variants, records the \
+selected category, and accepts an untrusted target only when it names the \
+`PROCESS_BOUNDARY_ONLY` containment profile explicitly."""
+rationale = """
+Making trust visible in the target type and durable record keeps the \
+acknowledgment auditable without a redundant trust flag, while an undefaultable \
+profile prevents accidental implicit containment."""
+enforcement_modes = ["constructed_invariant", "validation_rejection", "modeled_outcome"]
+enforcement = "ExecutionTarget is a discriminated union whose untrusted variants require a containment profile, validation accepts only the v1 profile, and RunDeclaration persists the target category and profile."
+
+[[extensions]]
+parent_title = "Inherited state is granted, not ambient"
+parent_statement = """
+A child receives no parent environment, working directory, or open file \
+descriptors unless the caller grants them explicitly; each run otherwise uses \
+fresh state and an isolated scratch workspace, and concurrent runs share no \
+mutable workspace by default."""
+parent_rationale = """
+Ambient inheritance leaks credentials and machine-specific inputs and lets \
+concurrent or prior runs affect results. Explicit named or overlay grants make \
+each dependency visible; overlay exclusions are verified before spawn rather \
+than trusted as documentation."""
+parent_date = "2026-07-31"
+title = "Exact inherited-state and scratch behavior"
+statement = """
+V1 grants environment only through a frozen `EnvGrant`. Command targets receive \
+exactly file descriptors 0 (stdin), 1 (stdout), and 2 (stderr); an untrusted \
+Python target additionally receives the executor-owned protocol write pipe on \
+fd 3. Command stdin is the declared raw bytes; Python stdin is the canonical \
+request `IdentityDocument`; both are followed by EOF. Every run receives a \
+fresh scratch cwd and has no ambient record or cwd configuration."""
+rationale = """
+An exact grant surface makes run inputs reproducible, prevents credential and \
+descriptor leaks, makes stdin completion deterministic, and isolates concurrent \
+runs without hidden process-global state. The executor-owned fd keeps structured \
+protocol output separate from untrusted payload stdout and stderr."""
+enforcement_modes = ["constructed_invariant", "validation_rejection", "runtime_guarantee"]
+enforcement = "EnvGrant resolves parent-derived values when constructed, exclusions are checked before spawn, and os.posix_spawn file actions map only the target's stdin/stdout/stderr pipes plus fd 3 for untrusted Python. The engine validates canonical Python request bytes against the input budget before spawn, closes stdin after its complete contents, and creates and cleans one scratch cwd per call."
+
+[[extensions]]
+parent_title = "Budgets come from declared meaning"
+parent_statement = """
+Every resource axis is visibly budgeted or visibly unbudgeted: wall-clock and \
+CPU limits are declared only; output caps are contract-derived or per-run \
+machine-scale aggregates; RAM and disk have per-run aggregate machine-scale \
+protection by default; process, file-size, and open-file limits are declared \
+only; startup, termination, narration-volume, and record-volume executor \
+self-budgets have built-in defaults; and per-item result size is declared by \
+the protocol. \
+Per-run machine protection never implicitly multiplies across concurrent runs, \
+and every active budget crosses the process boundary in the same declared \
+contract object rather than in parallel constants."""
+parent_rationale = """
+Interior defaults guess at research workloads and manufacture failures, while \
+unstated absence hides exposure. Contract budgets reflect downstream meaning, \
+machine protection turns chaotic capacity failures into attributed outcomes, \
+and executor self-budgets keep operations such as startup and teardown from \
+hanging. Batch- and fleet-level protection must be declared independently of \
+per-run limits, and parallel parent and child constants inevitably drift."""
+parent_date = "2026-07-31"
+title = "V1 budget shape and derivation"
+statement = """
+V1 represents wall time, input bytes, payload output, memory bytes, CPU time, \
+process count, file size, open-file count, and disk bytes as finite budgets or \
+`UNBUDGETED`; `Budgets.unbudgeted()` supplies every default. Platform-derived \
+source and aggregate argv-plus-environment limits remain mandatory spawn \
+validation. Protocol volume, JSON depth, manifest and diagnostic volume, \
+startup, termination, and join executor self-budgets are finite or explicitly \
+`UNBUDGETED`, and `ExecutorSelfBudgets.unbudgeted()` supplies every executor \
+default."""
+rationale = """
+Explicit unit-specific axes prevent accidental value exchange, raw-byte \
+accounting is encoding-independent, derived exec limits prevent mid-spawn \
+surprises, and the absence of measured domain or executor meaning remains \
+visible instead of becoming an invented finite limit."""
+enforcement_modes = ["validation_rejection", "constructed_invariant", "runtime_guarantee"]
+enforcement = "Budget declarations have no unset state, unsupported finite axes and platform-invalid declarations are rejected before spawn, RunDeclaration records the complete effective workload budgets, the executor-config identity records the complete effective self-budgets, and the engine applies only explicitly finite axes."
+
+[[extensions]]
+parent_title = "Budget enforcement remains attributable and observable"
+parent_statement = """
+Input bounds are validated before spawn; deadline overflow fails, output \
+overflow follows a caller-declared fail-or-visible-truncate policy, budget \
+consumption and overflow remain distinguishable in results and records, and \
+narration- or record-volume exhaustion is reported and degrades observability \
+rather than the run."""
+parent_rationale = """
+Time cannot be truncated, silent output loss corrupts evidence, and spawning \
+work already known to exceed an input contract wastes resources. A budget kill \
+must not masquerade as a payload crash, and executor observability must not \
+compete with payload output for the same accounting."""
+parent_date = "2026-07-31"
+title = "Exact output-overflow enforcement"
+statement = """
+V1 allocates every finite aggregate payload-output budget across deterministic \
+stdout and stderr head and tail segments. `FAIL` terminates the run after the \
+aggregate threshold is crossed; `MARKED_TRUNCATION` continues draining through \
+EOF. Both preserve structural head/tail evidence and exact produced and dropped \
+byte counts, and a recorded output violation takes precedence over a racing \
+deadline or clean exit."""
+rationale = """
+Head/tail retention preserves both startup and terminal diagnostics without \
+making drain scheduling observable, continued draining prevents pipe \
+backpressure, and fixed precedence prevents executor-inflicted termination from \
+being misattributed to the payload."""
+enforcement_modes = ["runtime_guarantee", "modeled_outcome"]
+enforcement = "FiniteOutput validates that its four retention segments sum to max_bytes, the engine keeps draining both pipes, records per-stream segment and byte counts, applies the selected termination behavior, and assigns the single outcome using the pinned precedence order."
+
+[[extensions]]
+parent_title = "Call-scoped lifecycle completes before return"
+parent_statement = """
+For every call-scoped run, dr-exec concurrently feeds input and drains output, \
+observes the child through exit, performs group-targeted termination and \
+escalation on every exit path, ensures the entire child process tree is gone, \
+and reaps the direct child before the call returns."""
+parent_rationale = """
+Sequential pipe handling can deadlock, leader-only signals leave descendants, \
+and unreaped children become zombies. Lifecycle rigor is one executor \
+responsibility shared by trusted and untrusted payloads rather than behavior \
+each caller reimplements."""
+parent_date = "2026-07-31"
+title = "Concrete call-scoped lifecycle"
+statement = """
+V1 creates a fresh process session, concurrently feeds stdin and drains payload \
+stdout, payload stderr, and the Python protocol pipe where present. When it \
+returns a completed run, it has completed the configured process-group \
+termination policy and reaped the direct child. Finite termination and join \
+self-budgets supply escalation and return deadlines; the unbudgeted defaults \
+make no bounded-return guarantee."""
+rationale = """
+The concrete sequence prevents pipe deadlocks, ordinary background survivors, \
+reap races, and zombies when the call completes, while stating honestly that an \
+unbudgeted executor operation may wait indefinitely."""
+enforcement_modes = ["runtime_guarantee"]
+enforcement = "All entry points route through one engine that owns concurrent stdin, payload-output, and protocol I/O, session creation, group signaling, configured escalation and joining, and direct-child reaping before a completed result is returned."
+
+[[extensions]]
+parent_title = "Completed runs are data with one failure owner"
+parent_statement = """
+Every completed execution attempt produces a run result, including recognized \
+outcomes such as spawn absence where no child ran; only executor machinery \
+failure that prevents a trustworthy result produces none. Spawn absence \
+remains distinct from other spawn failures, exit interpretation is caller \
+policy with a report-only default, and every failure receives exactly one \
+evidence-based attribution without blaming payload by elimination; only \
+evidence-attributed channel failures form the retriable class. Aggregating \
+trusted-tool calls preserves per-call durable artifacts and collects ordinary \
+statuses without failing fast."""
+parent_rationale = """
+Using exceptions or sentinel values for ordinary exits collapses spawn \
+absence, crash, kill, timeout, overflow, and nonzero exit into unusable \
+control flow. Raw outcome data plus explicit policy keeps domain \
+interpretation with the caller while preserving retry and debugging evidence."""
+parent_date = "2026-07-31"
+title = "Recognized outcomes and pinned attribution"
+statement = """
+V1 returns `CompletedExecution` containing an `ExecutionResult` for every \
+trustworthy recognized execution outcome, including spawn absence, budgets, \
+protocol failure, cancellation, signals, and ordinary exit statuses; it raises \
+only for invalid pre-spawn declarations or machinery failure that prevents a \
+trustworthy result, and assigns exactly one attribution in pinned precedence."""
+rationale = """
+A single modeled outcome boundary preserves distinctions consumers need for \
+scoring and retry while leaving exit-status meaning in the caller's declared \
+policy."""
+enforcement_modes = ["validation_rejection", "modeled_outcome", "runtime_guarantee"]
+enforcement = "Declaration validation raises before spawn, recognized spawn and child outcomes construct a result, machinery failures without trustworthy evidence raise, and one post-teardown attribution is selected from recorded evidence."
+
+[[extensions]]
+parent_title = "Output delivery modes are explicit"
+parent_statement = """
+Payload output is delivered only through a declared captured, streamed, \
+spooled, or stdio-passthrough mode; payload-written artifact paths are recorded \
+as outputs but never treated as an executor delivery mode, and executor \
+narration never shares a payload output stream."""
+parent_rationale = """
+Different workloads need different memory, latency, and operator-facing \
+properties. Treating these modes explicitly keeps permissive output affordable, \
+prevents protocol corruption, and avoids confusing files created by payload \
+code with bytes transported by the executor."""
+parent_date = "2026-07-31"
+title = "Captured payload bytes in v1"
+statement = """
+V1 returns captured stdout and stderr as separate raw byte streams, adds no \
+in-band framing, decoding, or newline normalization, represents retained head \
+and tail segments separately, keeps narration on a parent-owned channel, and \
+records caller-owned artifact paths separately from delivery mode."""
+rationale = """
+Byte-preserving capture, structural truncation metadata, and separated narration \
+retain the payload evidence needed by the initial consumers without inventing a \
+text encoding contract."""
+enforcement_modes = ["constructed_invariant", "runtime_guarantee"]
+enforcement = "The engine captures and accounts raw stream bytes, PayloadOutputs models head and tail segments plus exact byte counts, and narration remains on the parent-owned channel."
+
+[[extensions]]
+parent_title = "Every run is durably and faithfully observable"
+parent_statement = """
+Every run attempts a durable record from live execution through completion, \
+including invocation, grants, budgets, timestamps, outcome, attribution, and \
+output locations; narration is verbose by default and separate from payload \
+output, capture is altered only by visibly recorded budget truncation, and \
+recording or narration failure is itself reported and executor-attributed \
+without failing the run it observes."""
+parent_rationale = """
+Research runs are experiments: an unrecorded intermediate or silently edited \
+stream cannot be recovered. Quiet defaults and executor-side redaction were \
+rejected because noise is filterable but missing information is permanent, \
+and only callers have the domain knowledge to redact safely after capture."""
+parent_date = "2026-07-31"
+title = "V1 run-record and provenance format"
+statement = """
+Every real v1 run writes through `DirectoryRunStore`, which atomically publishes \
+`prepared`, `running`, and `finalized` JSON manifests in one collision-free run \
+directory and finalizes digest-verified retained-output sidecars. The manifest \
+records the target discriminant plus full canonical declaration digest as its \
+invocation evidence, grants, profile, budgets, runtime, timestamps, outcome, \
+attribution, measurements, accepted complete protocol outputs inline, output \
+metadata, executor identity, and executor-config identity. It records no raw \
+argv, source, stdin, request payload, environment value, pool capacity, queue, \
+lease, or worker-session fact; exact keys and persisted literals are golden- \
+tested."""
+rationale = """
+A crash-consistent, value-sensitive but secret-preserving lifecycle record \
+makes incomplete and completed attempts recoverable without deriving durable \
+formats from mutable code field names."""
+enforcement_modes = ["runtime_guarantee", "modeled_outcome", "governance"]
+enforcement = "ProcessExecutor requires a RunStore, prepares an execution-local record before spawn, marks successful spawn, flushes sidecars before atomic finalization, returns recording degradation through RecordReceipt without replacing the execution outcome, and reserves FakeRecordReceipt for non-executing fake calls."
+
+[[extensions]]
+parent_title = "Containment cost follows a declared sharing boundary"
+parent_statement = """
+Containment setup and teardown attach to an explicitly declared outer \
+dimension boundary and amortize across the work inside it; enforcement limits \
+are not reservations, and the paved execution path keeps overhead \
+proportionate to the protected work."""
+parent_rationale = """
+Paying process or sandbox setup per millisecond-scale item can make rigorous \
+execution unusable, while reserving every worst-case limit destroys \
+concurrency. Callers otherwise rationally bypass the safe path, so \
+amortization is a correctness obligation rather than optional optimization."""
+parent_date = "2026-07-31"
+title = "Execution job as sharing boundary"
+statement = """
+V1 makes one caller-defined `ExecutionJob` the explicit setup and child-lifetime \
+sharing boundary, gives every job one fresh child, applies budgets to the whole \
+job, and evaluates independent jobs through one bounded host-level \
+`ExecutionPool`."""
+rationale = """
+The job shape lets domain code amortize compilation, loading, and interpreter \
+startup across related internal work while dr-exec controls concurrency across \
+independent jobs without reusing poisonable child state."""
+enforcement_modes = ["constructed_invariant"]
+enforcement = "Executor.run maps each ExecutionJob to one fresh child and one CompletedExecution, ExecutionPool bounds concurrent jobs and prefetch, and callers choose another sharing boundary by constructing another job."
+
+[[extensions]]
+parent_title = "Containment profiles are mechanism-independent and fail closed"
+parent_statement = """
+A containment profile declares filesystem read and write, network, environment, \
+process-spawning, resources, and known limits independently of enforcement \
+mechanism and child lifetime; undeclared reach is denied, unavailable promised \
+containment refuses execution, and containment constrains reach rather than \
+payload structure."""
+parent_rationale = """
+Callers must depend on a stable reach contract rather than Docker, sandbox, or \
+platform vocabulary. Silent fallback makes a declared security boundary false, \
+and structural source gating does not control what arbitrary executable content \
+can touch."""
+parent_date = "2026-07-31"
+title = "Explicitly permissive v1 containment profile"
+statement = """
+V1's `PROCESS_BOUNDARY_ONLY` declaration grants full \
+filesystem, network, credential, and process-spawning reach and states that \
+teardown reaches the run's process group but not a descendant that starts a new \
+session; every untrusted call names this profile explicitly."""
+rationale = """
+An honest permissive profile preserves the future containment shape without \
+letting callers mistake a process boundary for a sandbox or silently claim \
+stronger reach restrictions than v1 enforces."""
+enforcement_modes = ["validation_rejection", "constructed_invariant"]
+enforcement = "Untrusted ExecutionTarget variants reject an absent or unknown profile, and the v1 profile serializes its full reach and known process-group limitation."
+
+[[extensions]]
+parent_title = "The library owns its contract-enforcing fake"
+parent_statement = """
+dr-exec ships the executor fake used by consumers; the fake applies the same \
+declaration validation as production and exposes declarations for assertion, \
+while spawn-path correctness remains dr-exec's own test responsibility."""
+parent_rationale = """
+Consumer-authored doubles drift whenever budgets, grants, or containment change \
+and often leave real spawn paths untested accidentally. One library-owned fake \
+keeps consumer logic tests aligned without making consumers duplicate lifecycle \
+tests or making integration oracles tautological."""
+parent_date = "2026-07-31"
+title = "Exact fake behavior and testing ownership"
+statement = """
+V1's `FakeExecutor` satisfies the same one-method `Executor` Protocol, validates \
+and records each immutable `ExecutionJob`, returns scripted \
+`CompletedExecution` values with a distinct fake record receipt and executor \
+identity, and remains safe under `ExecutionPool`; dr-exec owns spawn-path tests \
+while consumers retain real-engine oracle tests whose meaning depends on \
+execution."""
+rationale = """
+One strict fake makes job-contract changes visible to consumer tests without \
+pretending a durable real run exists, while explicit test ownership prevents \
+either duplicated lifecycle suites or tautological execution oracles."""
+enforcement_modes = ["constructed_invariant", "validation_rejection", "governance"]
+enforcement = "The library supplies the fake against Executor.run and shared job validation, returns FakeRecordReceipt, records calls under synchronization, owns engine lifecycle coverage, and uses the production engine for real-execution oracle cases."

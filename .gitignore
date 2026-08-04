@@ -1,0 +1,11 @@
+exports/
+__pycache__/
+node_modules/
+viewer/packages/*/dist/
+.runs/
+.scratch/
+
+*.py[cod]
+*.cache
+.DS_Store
+*.swp

@@ -1,0 +1,74 @@
+# Behavior the v1 design deliberately excludes. These compact entries reference
+# related baseline contracts without copying their full text.
+
+[baseline]
+source = ".defs/contracts.toml"
+commit = "fda5f1102914b93c40617c4206311e80818a8f6e"
+date = "2026-07-31"
+
+[[exclusions]]
+title = "Delivery modes beyond captured payload bytes"
+statement = """
+V1 excludes streamed, spooled, stdio-passthrough, and executor-decoded text \
+output delivery."""
+rationale = """
+Captured raw bytes with structural head/tail overflow handling preserve the \
+initial consumers' evidence; other modes need distinct memory, latency, \
+encoding, file-ownership, and operator-facing contracts rather than partial \
+emulation."""
+related_contracts = ["Output delivery modes are explicit"]
+enforcement_modes = ["scope_exclusion"]
+enforcement = "PayloadOutputs exposes captured raw stdout and stderr bytes only and the v1 declaration surface contains no streamed, spooled, stdio-passthrough, or decoded-text option."
+
+[[exclusions]]
+title = "Containment beyond the process boundary"
+statement = """
+V1 excludes filesystem and network reach restrictions and containment \
+mechanisms that can terminate a descendant after it creates a new session."""
+rationale = """
+V1's sole profile describes an intentionally permissive process boundary; \
+stronger reach control and full descendant closure require a real containment \
+mechanism whose setup cost and guarantees are not yet selected."""
+related_contracts = [
+  "Containment profiles are mechanism-independent and fail closed",
+  "Call-scoped lifecycle completes before return",
+]
+enforcement_modes = ["scope_exclusion"]
+enforcement = "The v1 declaration set contains only PROCESS_BOUNDARY_ONLY and promises no filesystem, network, namespace, subreaper, or job-object enforcement."
+
+[[exclusions]]
+title = "Supervised-child ownership"
+statement = """
+V1 excludes long-lived child ownership, persistent or reattachable supervision, \
+liveness identity, replacement, and stable supervised handles."""
+rationale = """
+Exposing fragments of supervision from a call-scoped engine would not provide \
+the ownership or identity guarantees required for long-lived children."""
+related_contracts = ["Supervised children retain visible ownership and identity"]
+enforcement_modes = ["scope_exclusion"]
+enforcement = "No v1 public entry point returns a live child handle or offers persistence, reattachment, liveness, or replacement operations."
+
+[[exclusions]]
+title = "Supervised interaction and shutdown"
+statement = """
+V1 excludes supervised interactions, protocol cancellation, incremental \
+supervised output, drain, stop, and external-deadline shutdown orchestration."""
+rationale = """
+Interaction, drain, and stop have distinct ownership and budget semantics that \
+cannot be represented faithfully by exposing fragments of call-scoped \
+termination."""
+related_contracts = ["Supervision separates interaction, drain, and stop"]
+enforcement_modes = ["scope_exclusion"]
+enforcement = "The v1 API has no supervised interaction, cancellation, drain, stop, or external-deadline operation."
+
+[[exclusions]]
+title = "Fleet execution"
+statement = """
+V1 excludes fleet and slot-map declarations, collective lifecycle operations, \
+aggregate health and work state, per-slot outcomes, and restart policy."""
+rationale = """
+A caller-side loop over call-scoped children cannot preserve the fleet \
+contract's collective identity, health, and fault semantics."""
+related_contracts = ["A fleet is one declared slot map"]
+enforcement_modes = ["scope_exclusion"]
+enforcement = "The v1 public API contains no fleet, slot, collective lifecycle, health, or restart-policy surface."
