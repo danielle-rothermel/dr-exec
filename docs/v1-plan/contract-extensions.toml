@@ -70,17 +70,19 @@ than trusted as documentation."""
 parent_date = "2026-07-31"
 title = "Exact inherited-state and scratch behavior"
 statement = """
-V1 grants environment only through a frozen `EnvGrant`, gives a child \
-exactly file descriptors 0 (stdin), 1 (stdout), and 2 (stderr), supplies exactly \
-the declared stdin bytes \
-followed by EOF, creates a fresh per-run scratch cwd, and has no ambient record \
-or cwd configuration."""
+V1 grants environment only through a frozen `EnvGrant`. Command targets receive \
+exactly file descriptors 0 (stdin), 1 (stdout), and 2 (stderr); an untrusted \
+Python target additionally receives the executor-owned protocol write pipe on \
+fd 3. Command stdin is the declared raw bytes; Python stdin is the canonical \
+request `IdentityDocument`; both are followed by EOF. Every run receives a \
+fresh scratch cwd and has no ambient record or cwd configuration."""
 rationale = """
 An exact grant surface makes run inputs reproducible, prevents credential and \
 descriptor leaks, makes stdin completion deterministic, and isolates concurrent \
-runs without hidden process-global state."""
+runs without hidden process-global state. The executor-owned fd keeps structured \
+protocol output separate from untrusted payload stdout and stderr."""
 enforcement_modes = ["constructed_invariant", "validation_rejection", "runtime_guarantee"]
-enforcement = "EnvGrant resolves parent-derived values when constructed, exclusions are checked before spawn, descriptors are made non-inheritable except for the three run pipes, stdin is closed after its declared bytes, and the engine creates and cleans one scratch cwd per call."
+enforcement = "EnvGrant resolves parent-derived values when constructed, exclusions are checked before spawn, and os.posix_spawn file actions map only the target's stdin/stdout/stderr pipes plus fd 3 for untrusted Python. The engine validates canonical Python request bytes against the input budget before spawn, closes stdin after its complete contents, and creates and cleans one scratch cwd per call."
 
 [[extensions]]
 parent_title = "Budgets come from declared meaning"
@@ -109,15 +111,17 @@ V1 represents wall time, input bytes, payload output, memory bytes, CPU time, \
 process count, file size, open-file count, and disk bytes as finite budgets or \
 `UNBUDGETED`; `Budgets.unbudgeted()` supplies every default. Platform-derived \
 source and aggregate argv-plus-environment limits remain mandatory spawn \
-validation, and executor startup and termination use separate built-in \
-self-budgets."""
+validation. Protocol volume, JSON depth, manifest and diagnostic volume, \
+startup, termination, and join executor self-budgets are finite or explicitly \
+`UNBUDGETED`, and `ExecutorSelfBudgets.unbudgeted()` supplies every executor \
+default."""
 rationale = """
 Explicit unit-specific axes prevent accidental value exchange, raw-byte \
 accounting is encoding-independent, derived exec limits prevent mid-spawn \
-surprises, and the absence of caller meaning remains visible instead of becoming \
-an invented finite workload limit."""
+surprises, and the absence of measured domain or executor meaning remains \
+visible instead of becoming an invented finite limit."""
 enforcement_modes = ["validation_rejection", "constructed_invariant", "runtime_guarantee"]
-enforcement = "Budget declarations have no unset state, unsupported finite axes and platform-invalid declarations are rejected before spawn, RunDeclaration records the complete effective budgets, and the engine applies supported finite workload budgets independently from its self-budgets."
+enforcement = "Budget declarations have no unset state, unsupported finite axes and platform-invalid declarations are rejected before spawn, RunDeclaration records the complete effective workload budgets, the executor-config identity records the complete effective self-budgets, and the engine applies only explicitly finite axes."
 
 [[extensions]]
 parent_title = "Budget enforcement remains attributable and observable"
@@ -164,16 +168,18 @@ each caller reimplements."""
 parent_date = "2026-07-31"
 title = "Concrete call-scoped lifecycle"
 statement = """
-V1 creates a fresh process session, concurrently feeds stdin and drains both \
-output streams, performs completion-race-safe process-group termination and \
-escalation on every exit path, and reaps the direct child before returning \
-within the declared deadline plus executor termination and join self-budgets."""
+V1 creates a fresh process session, concurrently feeds stdin and drains payload \
+stdout, payload stderr, and the Python protocol pipe where present. When it \
+returns a completed run, it has completed the configured process-group \
+termination policy and reaped the direct child. Finite termination and join \
+self-budgets supply escalation and return deadlines; the unbudgeted defaults \
+make no bounded-return guarantee."""
 rationale = """
 The concrete sequence prevents pipe deadlocks, ordinary background survivors, \
-reap races, zombies, and unbounded executor-side joins across every public entry \
-point."""
+reap races, and zombies when the call completes, while stating honestly that an \
+unbudgeted executor operation may wait indefinitely."""
 enforcement_modes = ["runtime_guarantee"]
-enforcement = "All entry points route through one engine that owns concurrent I/O, session creation, group signaling, bounded escalation and joining, and direct-child reaping before result return."
+enforcement = "All entry points route through one engine that owns concurrent stdin, payload-output, and protocol I/O, session creation, group signaling, configured escalation and joining, and direct-child reaping before a completed result is returned."
 
 [[extensions]]
 parent_title = "Completed runs are data with one failure owner"
@@ -253,15 +259,19 @@ statement = """
 Every real v1 run writes through `DirectoryRunStore`, which atomically publishes \
 `prepared`, `running`, and `finalized` JSON manifests in one collision-free run \
 directory and finalizes digest-verified retained-output sidecars. The manifest \
-records safe declaration identities, grants, profile, budgets, runtime, \
-timestamps, outcome, attribution, measurements, output metadata, and executor \
-identity; exact keys and persisted literals are golden-tested."""
+records the target discriminant plus full canonical declaration digest as its \
+invocation evidence, grants, profile, budgets, runtime, timestamps, outcome, \
+attribution, measurements, accepted complete protocol outputs inline, output \
+metadata, executor identity, and executor-config identity. It records no raw \
+argv, source, stdin, request payload, environment value, pool capacity, queue, \
+lease, or worker-session fact; exact keys and persisted literals are golden- \
+tested."""
 rationale = """
 A crash-consistent, value-sensitive but secret-preserving lifecycle record \
 makes incomplete and completed attempts recoverable without deriving durable \
 formats from mutable code field names."""
 enforcement_modes = ["runtime_guarantee", "modeled_outcome", "governance"]
-enforcement = "ProcessExecutor requires a RunStore, prepares the record before spawn, marks successful spawn, flushes sidecars before atomic finalization, returns recording degradation through RecordReceipt without replacing the execution outcome, and reserves FakeRecordReceipt for non-executing fake calls."
+enforcement = "ProcessExecutor requires a RunStore, prepares an execution-local record before spawn, marks successful spawn, flushes sidecars before atomic finalization, returns recording degradation through RecordReceipt without replacing the execution outcome, and reserves FakeRecordReceipt for non-executing fake calls."
 
 [[extensions]]
 parent_title = "Containment cost follows a declared sharing boundary"

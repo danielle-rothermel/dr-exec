@@ -83,14 +83,52 @@ without creating one container, process, thread, or future per internal test or 
 queued job."""
 date = "2026-08-03"
 enforcement_modes = ["constructed_invariant", "runtime_guarantee", "governance"]
-enforcement = "run_many and run_stream delegate to ExecutionPool, automatic capacity records its effective value, admission and completion buffering are bounded, the source is pulled only when capacity exists, and implementation benchmarks pin throughput and resource high-water marks for the representative workload."
+enforcement = "run_many and run_stream delegate to ExecutionPool, worker telemetry and the release benchmark record effective capacity, admission and completion buffering are bounded, the source is pulled only when capacity exists, and implementation benchmarks pin throughput and resource high-water marks for the representative workload."
+
+[[contracts]]
+title = "Python request and protocol transports are exact"
+statement = """
+An untrusted Python child receives one canonical request `IdentityDocument` on \
+stdin followed by EOF and emits its protocol on the executor-owned fd 3 as \
+canonical UTF-8 NDJSON. The protocol contains exactly one versioned prelude, \
+consecutively sequenced output frames, and one count-matching completion frame; \
+payload stdout and stderr remain independent raw byte channels."""
+rationale = """
+One exact request and framing grammar makes byte accounting, partial-output \
+preservation, malformed-stream attribution, and cross-version interpretation \
+testable. A separate descriptor prevents ordinary payload output from becoming \
+protocol framing while retaining the honest process-boundary-only threat model."""
+date = "2026-08-03"
+enforcement_modes = ["validation_rejection", "runtime_guarantee", "governance"]
+enforcement = "The macOS engine maps fd 3 with os.posix_spawn file actions, validates canonical request bytes against the input budget before spawn, scans LF-terminated frames within executor self-budgets, strictly decodes each frame, requires canonical byte equality, validates the closed frame model, preserves accepted outputs, and golden-tests the exact valid and invalid byte streams."
+
+[[contracts]]
+title = "V1 identities are loose, role-specific, and versioned"
+statement = """
+V1 uses identity documents for executor, executor-config, runtime, domain \
+request, and protocol-output identities, while target declarations and \
+canonical environment values use nominal full digests beside safe structure. \
+Executor identity records package and source provenance, executor-config \
+identity records effective self-budgets, and isolated-host runtime identity \
+records the resolved interpreter and reported Python facts without claiming \
+content verification."""
+rationale = """
+Small inspectable v1 identities distinguish the changes most useful during \
+initial experimentation without pretending to identify an unverified host \
+closure. Separate configuration identity prevents policy changes from being \
+confused with source changes, and schema-version changes provide the path for \
+stronger future identity."""
+date = "2026-08-03"
+enforcement_modes = ["constructed_invariant", "governance"]
+enforcement = "Identity schemas and payload keys are exact-literal golden contracts; clean source uses embedded build provenance where available, dirty or unknown source receives a construction-session ID, runtime facts are probed once from the selected interpreter, and adding identity-bearing fields requires a schema-version change."
 
 [[contracts]]
 title = "Pinned semantics change only through contract revision"
 statement = """
 V1 semantics used in persisted identity, protocol interpretation, scoring, or \
-child-observable behavior change only through an explicit contract revision and \
-are golden-tested at the exact-literal level where a literal exists."""
+child-observable behavior, including scalar wire spellings, change only through \
+an explicit contract revision and are golden-tested at the exact-literal level \
+where a literal exists."""
 rationale = """
 Small locally plausible changes to bytes, invocation shape, attribution order, \
 wire keys, or canonicalization can silently invalidate caches and experimental \

@@ -26,19 +26,22 @@ and executor self-budgets keep operations such as startup and teardown from \
 hanging. Batch- and fleet-level protection must be declared independently of \
 per-run limits, and parallel parent and child constants inevitably drift."""
 parent_date = "2026-07-31"
-title = "V1 machine-protection axes default to unbudgeted"
+title = "V1 workload and executor axes default to unbudgeted"
 statement = """
 V1 defaults every workload axis, including memory and disk, to explicit \
+`UNBUDGETED` and also defaults every executor self-budget axis to explicit \
 `UNBUDGETED`. A caller may select a supported finite budget, but v1 provides no \
-default aggregate RAM or disk enforcement."""
+default aggregate RAM or disk enforcement, protocol-volume limit, metadata- \
+volume limit, or bounded startup, termination, or join deadline."""
 rationale = """
 The initial consumers do not supply meaningful machine-protection limits, and \
 v1 does not yet include a mechanism that can enforce aggregate RAM or disk \
 protection faithfully. An explicit unbudgeted value records that limitation \
-without manufacturing workload failures."""
-conflict = "The parent contract requires per-run aggregate RAM and disk protection by default; v1 defaults both axes to explicit UNBUDGETED."
+without manufacturing workload or executor failures; finite profiles can be \
+added after concrete domains provide representative measurements."""
+conflict = "The parent contract requires aggregate RAM and disk protection plus built-in finite executor self-budgets by default; v1 defaults all of those axes to explicit UNBUDGETED."
 enforcement_modes = ["modeled_outcome", "scope_exclusion"]
-enforcement = "Budgets.unbudgeted() is the default declaration, the effective declaration and run record preserve every unbudgeted axis, unsupported finite axes fail validation, and the v1 engine installs no aggregate RAM or disk limiter."
+enforcement = "Budgets.unbudgeted() and ExecutorSelfBudgets.unbudgeted() are the defaults, the declaration and executor-config identity preserve every unbudgeted axis, unsupported finite axes fail validation, and the v1 engine installs no hidden, machine-derived, or adaptive finite limit."
 
 [[contradictions]]
 parent_title = "Untrusted Python runs in a declared hermetic runtime"
@@ -90,7 +93,7 @@ PID namespace, subreaper, or job object, which v1's sole containment profile \
 does not provide."""
 conflict = "The parent contract guarantees that the entire child process tree is gone before return; v1 permits a re-sessioned descendant to survive."
 enforcement_modes = ["runtime_guarantee", "scope_exclusion"]
-enforcement = "The engine performs bounded process-group termination and reaps the direct child, while the containment profile explicitly excludes descendants that leave the group from its reach."
+enforcement = "Before returning a completed run the engine performs its configured process-group termination policy and reaps the direct child; unbudgeted termination and join axes carry no bounded-return guarantee, and the containment profile explicitly excludes descendants that leave the group from its reach."
 
 [[contradictions]]
 parent_title = "A batch preserves dimensional identity and partial work"

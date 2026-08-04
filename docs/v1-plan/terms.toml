@@ -31,11 +31,27 @@ is never silent truncation."""
 [[terms]]
 name = "executor identity"
 definition = """
-The pinned identity of the executor machinery that produced a run, carried in \
-every real run record for cache keys and provenance. Production and fake \
-executors have distinct identities; executor identity is independent of \
-callable object identity and is not runtime identity, which describes the \
-platform and interpreter environment."""
+The versioned, deliberately loose identity of the executor machinery that \
+produced a run, carried in every real run record for provenance. V1 identifies \
+the executor kind, installed package version, and source commit when available; \
+dirty or unknown source also receives a construction-session identity so \
+unverified states do not compare equal. Executor identity is distinct from \
+executor-config and runtime identity."""
+
+[[terms]]
+name = "executor-config identity"
+definition = """
+The versioned identity document containing the complete effective executor \
+self-budgets for a run. It distinguishes execution policy from executor source \
+provenance; every v1 default axis appears explicitly as unbudgeted."""
+
+[[terms]]
+name = "executor self-budget"
+definition = """
+One finite-or-explicitly-unbudgeted limit on executor mechanics such as \
+protocol volume, JSON depth, metadata volume, startup, termination, or joining. \
+Every v1 executor self-budget defaults to unbudgeted, which imposes no executor \
+policy limit and makes no unlimited-resource or bounded-return promise."""
 
 [[terms]]
 name = "execution job"
@@ -57,18 +73,20 @@ interpreters."""
 [[terms]]
 name = "execution protocol"
 definition = """
-The v1 protected child-to-parent framed JSON or NDJSON contract for an untrusted \
-Python execution: an identity-echoing prelude, zero or more complete validated \
-protocol outputs, and a terminal completion message. Its incremental shape \
-preserves already accepted outputs after a later child or protocol failure \
-without assigning domain meaning to their contents."""
+The v1 protected child-to-parent canonical-NDJSON contract for an untrusted \
+Python execution: one versioned identity-echoing prelude, zero or more \
+consecutively sequenced complete validated protocol outputs, and one terminal \
+completion frame whose count matches the accepted outputs. Its incremental \
+shape preserves already accepted outputs after a later child or protocol \
+failure without assigning domain meaning to their contents."""
 
 [[terms]]
 name = "execution protocol channel"
 definition = """
-The driver-owned byte channel that carries the execution protocol separately \
-from payload stdout and stderr. It has separate accounting and framing limits, \
-so payload output overflow cannot truncate a protocol frame or invalidate a \
+The driver-owned child-to-parent pipe inherited as fd 3 only by untrusted \
+Python targets. It carries canonical-NDJSON protocol frames separately from \
+payload stdout and stderr and has separate accounting and framing limits, so \
+payload output overflow cannot truncate a protocol frame or invalidate a \
 previously accepted protocol output."""
 
 [[terms]]

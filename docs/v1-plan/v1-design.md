@@ -1,5 +1,15 @@
 # dr-exec v1 design
 
+## Accepted boundary decisions
+
+V1 uses role-specific identity documents for semantic identities and nominal
+digests for opaque value-sensitive material. Run manifests remain
+execution-local and contain no pool-admission snapshot or pool-session
+reference. Workload and executor self-budget axes are all finite or explicitly
+unbudgeted, and every axis defaults to unbudgeted without adaptive or hidden
+finite limits. The detailed serialization additions are specified in
+[dr-serialize additions](dr-serialize-additions.md).
+
 V1 targets high-volume HumanEval-style evaluation, self-invocation probes, and
 execution fakes. Its primary workload is a dr-platform durable workflow whose
 dr-graph graph produces generated-code evaluation jobs continuously. V1
@@ -26,17 +36,12 @@ files are structured proposals rather than standing repository authority:
 - [intentional scope exclusions](intentionally-out-of-scope.toml)
 - [unaddressed contracts](unaddressed-contracts.toml)
 
-Checked items in the [review discussion](review-discussion-topics.md) are
-accepted high-level v1 decisions and are incorporated below. They control the
-v1 plan where a structured proposal still conflicts with them. Unchecked items
-remain unresolved; their implementation and API details must not be inferred
-from provisional structured clauses.
-
 The accepted public type and protocol design lives in this document and its
 settled behavior is aligned in the structured v1 contracts and terms. The
-remaining serialization discussion owns exact wire schemas, persisted literals,
-and any required changes to `dr-serialize`; implementation planning must not
-reopen the accepted execution topology implicitly.
+serialization ownership and proposed shared-library additions are recorded
+below and in the [dr-serialize additions](dr-serialize-additions.md). The v1
+high-level planning decisions are closed; implementation planning must preserve
+these boundaries while fleshing out the exact APIs and test vectors.
 
 ## Scope and consumer map
 
@@ -101,12 +106,16 @@ the effective declaration and durable record.
 
 Platform-derived spawn validation, such as source and aggregate argv-plus-
 environment limits, remains mandatory validation rather than a caller workload
-budget. Executor self-budgets used to keep startup, pipe shutdown, and teardown
-from hanging are also executor mechanics rather than workload defaults.
+budget. Executor self-budget axes are distinct executor mechanics, but they use
+the same finite-or-explicitly-unbudgeted representation and also default to
+unbudgeted. V1 has no adaptive or hidden finite executor limits.
 
 V1 performs no default or aggregate RAM enforcement and makes no RAM-protection
 claim. A future machine-protection mechanism may add a faithfully enforceable
 aggregate limit, but it cannot silently reinterpret the v1 unbudgeted value.
+Likewise, an unbudgeted executor axis promises no policy limit rather than
+unlimited machine capacity: memory exhaustion, disk exhaustion, operating-
+system limits, and machinery failure remain possible and observable.
 
 ### Containment and process lifecycle
 
@@ -116,11 +125,13 @@ process-boundary-only profile, which grants the payload the invoking user's
 filesystem, network, credential, and process-spawning reach. The profile is an
 honest reach declaration, not a security sandbox.
 
-Each spawned run starts a fresh session and process group. Before returning, the
-executor performs bounded group-targeted termination and escalation when
-required and reaps the direct child. This guarantee reaches the original
-process group only. A descendant that creates a new session can escape that
-group and may survive; v1 does not claim otherwise.
+Each spawned run starts a fresh session and process group. When the executor
+returns a completed run, it has completed the configured group-targeted
+termination policy and reaped the direct child. A finite termination or join
+self-budget supplies escalation and return deadlines; the unbudgeted default
+may wait indefinitely and therefore carries no bounded-return guarantee. This
+reach extends only to the original process group. A descendant that creates a
+new session can escape that group and may survive; v1 does not claim otherwise.
 
 The environment grant, fresh scratch cwd, closed descriptor table, direct argv
 invocation, and workload budgets still constrain child-observable state. Those
@@ -149,6 +160,147 @@ The package root re-exports the deliberate public surface. Private engine,
 wire-frame, canonicalization, and store-transaction helpers are not re-exported.
 The single-engine boundary and pinned-release rule are proposed in
 [new contracts](new-contracts.toml).
+
+## Serialization ownership and integration
+
+Dr-exec v1 builds on a released, pinned version of `dr-serialize`; it does not
+copy or fork that package's canonicalization and identity behavior. It also
+pins Pydantic because Pydantic's JSON-mode conversion is part of the bytes that
+dr-exec subsequently validates and canonicalizes. The required additions and
+their qualification criteria are specified in
+[dr-serialize additions](dr-serialize-additions.md).
+
+The ownership boundary is:
+
+| Owner | V1 responsibility |
+| --- | --- |
+| `dr-serialize` | Strict validation of materialized JSON values; canonical JSON text and bytes; `IdentityDocument` canonicalization and hashing; bounded strict decoding of one complete JSON value; and the validated full SHA-256 value. |
+| `dr-exec` | Contract models and scalar spellings; secret-safe projections; execution identity payloads; request and protocol frame schemas; frame scanning and state; lifecycle records; sidecar references; path safety; and atomic store publication. |
+| Domain adapters | Request and result `IdentityDocument` schemas, domain completeness rules, bulk artifact formats, and interpretation of accepted protocol outputs. |
+
+`Serializer.to_jsonable()` is not used for request data, protocol frames,
+records, identity material, raw payload bytes, or secret-bearing values. Its
+normalization behavior is intentionally lossy and therefore cannot define a
+wire, identity, or persistence contract.
+
+### V1 identity roles
+
+V1 deliberately starts with a loose, versioned hybrid identity scheme:
+
+- Executor, executor-config, runtime, domain-request, and protocol-output
+  identities are `IdentityDocument`s because their schema and version explain
+  the identity's meaning.
+- Target declarations and canonical environment values use nominal full
+  SHA-256 digests. Their records carry safe non-secret structure beside the
+  digest rather than wrapping opaque or secret-derived values in another
+  identity document.
+
+The production executor document uses schema `dr_exec.executor`, schema version
+1, and payload keys `kind`, `package_version`, `source_commit`, `source_state`,
+and `session_id`. `kind` is `process_executor`. `source_commit` is the complete
+Git object ID embedded at package-build time when possible; an editable-source
+fallback inspects the package source checkout, never the process cwd, and
+snapshots the result when `ProcessExecutor` is constructed. `source_state` is
+one of `clean`, `dirty`, or `unknown`. Dirty or unknown source receives an
+executor-construction `session_id` so distinct unverified source states do not
+compare equal merely because they share a commit or package version.
+
+The executor-config document uses schema `dr_exec.executor_config`, schema
+version 1, and a payload containing the complete effective
+`ExecutorSelfBudgets`. This keeps source provenance distinct from policy that
+can change whether the same execution succeeds. Every v1 default axis is
+recorded explicitly as unbudgeted.
+
+The isolated-host runtime document uses schema
+`dr_exec.isolated_host_python_runtime`, schema version 1, and payload keys
+`kind`, `resolved_executable`, `implementation`, `python_version`, `cache_tag`,
+and `platform`. `IsolatedHostPythonRuntime` probes those facts once from the
+selected interpreter under `-I` when constructed. They distinguish ordinary
+host-runtime changes but do not verify interpreter bytes, the standard library,
+or installed packages.
+
+Domain adapters own the schema, version, complete payload, and change rules for
+request and protocol-output documents. Adding an identity-bearing field changes
+the owning document's schema version; v1 fields never grow silently under the
+same version.
+
+### Validated write and read paths
+
+The canonical write path is:
+
+```text
+dr-exec or domain boundary model
+  -> explicit secret-safe Pydantic JSON-mode projection
+  -> dr-serialize strict JSON validation
+  -> dr-serialize canonical JSON bytes
+  -> protected protocol write or DirectoryRunStore transaction
+```
+
+The validated read path is:
+
+```text
+bounded bytes acquired by dr-exec
+  -> dr-serialize bounded strict JSON decode
+  -> dr-exec Pydantic model or frame validation
+  -> dr-exec protocol, identity, and lifecycle validation
+```
+
+Dr-exec bounds bytes before decoding. The shared decoder owns general JSON
+failures such as invalid UTF-8, duplicate keys, non-finite numbers, malformed
+or trailing data, and depth overflow. Dr-exec translates those failures into
+its closed protocol or record-load taxonomy and separately enforces frame
+grammar, message order, aggregate limits, identities, and lifecycle meaning.
+
+`model_dump_json()` is not the canonical wire or persistence format. Pydantic
+converts a validated model into its explicit JSON-mode projection;
+`dr-serialize` validates that value and produces the canonical UTF-8 bytes.
+Golden tests pin the resulting UUID, path, timestamp, duration, byte, Unicode,
+integer, enum, and digest spellings under the exact pinned dependency versions.
+Persisted keys and discriminants are explicit literals, not values derived by
+iterating enums or reflecting over implementation field names.
+
+### Application to v1 boundaries
+
+- The Python request is one canonical `IdentityDocument` on stdin followed by
+  EOF. Each protected protocol frame is one canonical JSON object followed by
+  LF on the executor-owned descriptor. Both use closed dr-exec models and the
+  shared decoder and canonical-byte path. A finite executor self-budget supplies
+  a protocol limit; the default supplies none.
+- Request and result documents use `IdentityDocument` only where the owning
+  schema, version, and payload are themselves the boundary. Dr-exec defines
+  the role-specific payload model and completeness checks; `dr-serialize`
+  supplies only the generic document envelope and canonical identity digest.
+- `record.json` is a closed versioned dr-exec model serialized through the same
+  canonical-byte path. Lifecycle-state validation occurs after strict decode
+  and model validation.
+- Payload stdout and stderr remain raw bytes. `DirectoryRunStore` writes their
+  retained segments directly, records exact lengths, and hashes the raw
+  sidecar bytes with streaming SHA-256. They never pass through JSON
+  normalization.
+- Caller-owned bulk formats remain outside both libraries' generic JSON lane.
+  A domain adapter records their declared media type, size, digest, and schema
+  identity where its contract requires them.
+
+### Dependency and implementation order
+
+Serialization implementation proceeds in this order:
+
+1. Add and adversarially qualify the required general capabilities in
+   `dr-serialize`, preserving all existing canonical text and digest results.
+2. Release `dr-serialize`, then pin that release and the selected Pydantic
+   release in dr-exec.
+3. Implement dr-exec boundary models, safe projections, scalar goldens, and
+   role-specific identities.
+4. Implement and qualify the request transport and protected protocol codec
+   and state machine.
+5. Implement and qualify the lifecycle manifest, sidecars, and
+   `DirectoryRunStore` transaction protocol.
+6. Run end-to-end conformance tests across canonical bytes, protocol failures,
+   partial outputs, crash-consistent records, and domain-adapter completeness.
+
+No dr-exec codec or record implementation is complete while it depends on an
+unreleased sibling checkout or locally duplicates a proposed `dr-serialize`
+capability.
 
 ## Public type and protocol design
 
@@ -207,6 +359,41 @@ class ExitedOutcome(ContractModel):
 The `StrEnum` owns the wire vocabulary; the `Literal` pins the one value valid
 for that union member and enables Pydantic's field discriminator. Persisted
 payloads are never constructed by iterating an enum.
+
+### Scalar wire spellings
+
+V1 owns explicit dependency-independent scalar spellings. Pydantic converts
+validated types into these JSON-mode values, and dr-serialize supplies the
+canonical JSON escaping and bytes:
+
+- UUIDs are lowercase 36-character hexadecimal strings with hyphens in the
+  `8-4-4-4-12` form.
+- Absolute and relative paths are POSIX path strings. Resolved executable paths
+  are absolute; run-artifact references are normalized relative paths that
+  contain no empty, `.` or `..` component. Serialization never resolves a path
+  or follows a symlink.
+- Timestamps are UTC RFC 3339 strings with a trailing `Z` and exactly six
+  fractional-second digits. Non-UTC and naive datetimes fail validation rather
+  than being normalized silently.
+- Durations are integer nanoseconds in fields suffixed `_ns`; ISO 8601 duration
+  strings and floating-point seconds are not wire forms.
+- Bytes in JSON-bearing models are padded RFC 4648 URL-safe base64 strings.
+  Command stdin, payload-output, and sidecar transport bytes retain their
+  separately specified byte contracts and are not base64-wrapped in transit.
+- Unicode strings preserve their code-point sequence without normalization.
+  Dr-serialize's canonical JSON profile determines escaping, including its
+  ASCII-only wire representation.
+- Integers use JSON integer syntax with no leading plus, leading zero, exponent,
+  or fractional form. Boolean values never validate as integers at strict model
+  boundaries.
+- Enums use their exact pinned `StrEnum` values.
+- SHA-256 digests are exactly 64 lowercase hexadecimal characters without a
+  prefix; abbreviated display digests are never accepted at a boundary.
+
+Golden vectors cover each scalar alone and nested in every relevant request,
+frame, identity, and record model. The vectors run under the exact pinned
+Pydantic and dr-serialize releases so a dependency change cannot silently alter
+the bytes.
 
 ### Protocols as governance boundaries
 
@@ -298,6 +485,36 @@ The future verified uv-provisioned runtime implements the same `Runtime`
 Protocol. Conformance does not by itself add that implementation to the v1
 support matrix.
 
+### Python request and protocol transports
+
+An untrusted Python child has four inherited descriptors: stdin on fd 0,
+payload stdout on fd 1, payload stderr on fd 2, and the executor-owned protocol
+write pipe on fd 3. Trusted and untrusted command targets receive only fds 0,
+1, and 2. Callers cannot grant arbitrary descriptors and fd 3 never appears in
+`EnvGrant`.
+
+The macOS engine creates all pipes with close-on-exec behavior, then uses
+`os.posix_spawn()` file actions to duplicate only the intended child ends onto
+fds 0 through 3 and close the originals. It creates the child session through
+the same spawn operation. It does not mutate parent-global descriptor numbers
+and does not use `preexec_fn`, so concurrent `Executor.run()` calls cannot
+deadlock on Python runtime state inherited across `fork()`.
+
+`PreparedPythonProcess.request` is serialized with
+`canonical_identity_json_bytes()` and written as the complete contents of
+stdin, with no byte-order mark, length prefix, delimiter, or trailing newline.
+The parent then closes stdin. The canonical request byte length is validated
+against the caller's input budget before spawn and is the recorded input-byte
+measurement. The driver reads through EOF, performs bounded strict JSON and
+`IdentityDocument` validation, and emits no protocol output if the request is
+invalid.
+
+The driver opens fd 3 before executing domain code and retains that handle even
+if the payload replaces `sys.stdout` or `sys.stderr`. Payload code can still
+discover, close, or write directly to inherited descriptors; malformed
+protocol bytes therefore remain an executor protocol failure under the honest
+process-boundary-only profile, not a claim of in-process tamper resistance.
+
 ### Durable run-store boundary
 
 The store Protocol operates on nominal lifecycle handles so illegal state
@@ -309,6 +526,13 @@ class RecordState(StrEnum):
     PREPARED = "prepared"
     RUNNING = "running"
     FINALIZED = "finalized"
+
+
+class RunRecordHeader(ContractModel):
+    schema_version: Literal[1] = 1
+    executor_identity: IdentityDocument
+    executor_config_identity: IdentityDocument
+    prepared_at: AwareDatetime
 
 
 class TrustedCommandTargetRecord(ContractModel):
@@ -390,17 +614,20 @@ class ExecutionResultRecord(ContractModel):
 
 class PreparedRecord(ContractModel):
     state: Literal[RecordState.PREPARED] = RecordState.PREPARED
+    header: RunRecordHeader
     declaration: RunDeclaration
 
 
 class RunningRecord(ContractModel):
     state: Literal[RecordState.RUNNING] = RecordState.RUNNING
+    header: RunRecordHeader
     declaration: RunDeclaration
     process: ProcessRecord
 
 
 class FinalizedRecord(ContractModel):
     state: Literal[RecordState.FINALIZED] = RecordState.FINALIZED
+    header: RunRecordHeader
     declaration: RunDeclaration
     result: ExecutionResultRecord
     outputs: OutputArtifactRecords
@@ -430,7 +657,7 @@ type FinalizableRun = PreparedRun | RunningRun
 class RunStore(Protocol):
     def prepare(
         self,
-        declaration: RunDeclaration,
+        record: PreparedRecord,
         /,
     ) -> PreparedRun:
         ...
@@ -501,6 +728,21 @@ returned through `RecordReceipt` without replacing the execution outcome.
 `RunDeclaration` is the safe persisted projection of a live `ExecutionJob`: it
 contains target and request identities rather than raw stdin, source, request
 payloads, or environment values.
+
+Every state is one complete execution-local snapshot. `RunRecordHeader` carries
+only record schema and executor provenance; it contains no pool capacity, queue
+depth, worker lease, or pool-session reference. Dr-platform owns durable
+workflow and lease context, while worker telemetry and the release benchmark
+own host-level scheduling observations.
+
+The target record's discriminant and full
+`canonical_declaration_sha256` together are the v1 durable invocation evidence.
+The digest covers the complete versioned target declaration, while the record
+deliberately exposes no recoverable argv, source, stdin, request-payload, or
+environment-value excerpt. Python target records add the request identity,
+containment profile, and runtime record without changing that rule. Projection
+and decoding diagnostics identify the failed field or rule without embedding a
+rejected secret-bearing value.
 
 ### Environment grants
 
@@ -670,6 +912,61 @@ or forcing the configured segment split. In `FAIL` mode the same finite total
 is the termination threshold; in `MARKED_TRUNCATION` mode it is the maximum
 retained-byte total while the engine continues draining and counting through
 EOF.
+
+### Executor self-budgets
+
+Executor self-budgets use the same explicit limit values without becoming
+caller workload budgets:
+
+```python
+class ExecutorSelfBudgets(ContractModel):
+    protocol_frame_bytes: ByteBudget = Field(
+        default_factory=UnbudgetedLimit,
+    )
+    protocol_total_bytes: ByteBudget = Field(
+        default_factory=UnbudgetedLimit,
+    )
+    protocol_output_count: CountBudget = Field(
+        default_factory=UnbudgetedLimit,
+    )
+    json_depth: CountBudget = Field(default_factory=UnbudgetedLimit)
+    manifest_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
+    narration_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
+    recording_failure_count: CountBudget = Field(
+        default_factory=UnbudgetedLimit,
+    )
+    failure_detail_bytes: ByteBudget = Field(
+        default_factory=UnbudgetedLimit,
+    )
+    startup_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
+    termination_time: DurationBudget = Field(
+        default_factory=UnbudgetedLimit,
+    )
+    join_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
+
+    @classmethod
+    def unbudgeted(cls) -> ExecutorSelfBudgets:
+        return cls()
+```
+
+There is no unset state, built-in finite profile, machine-derived limit, or
+capacity-derived limit. `ExecutorSelfBudgets.unbudgeted()` is the production
+default. A caller may later supply a deliberately finite value on any axis, and
+the complete effective configuration participates in executor-config identity.
+
+Unbudgeted affects volume and waiting policy, not validity. Canonical framing,
+closed schemas, message order, request identity, secret exclusion, and
+unavoidable operating-system limits remain mandatory. The request has no
+second hidden executor byte cap: its actual canonical length is checked only
+against the caller's `input_bytes` workload budget, while the decoder receives
+that already-known finite length as its safe materialization bound.
+
+When configured finitely, protocol volume or structure overflow is a protocol
+failure that preserves earlier accepted outputs; manifest, narration, or
+recording-detail exhaustion degrades observability without replacing the run
+outcome. Finite startup, termination, and join values supply watchdog and
+escalation deadlines. When those time axes are unbudgeted, `Executor.run()` may
+wait indefinitely and v1 makes no bounded-return claim.
 
 ### Execution targets and jobs
 
@@ -948,13 +1245,18 @@ class Executor(Protocol):
         ...
 ```
 
-The production implementation is immutable and has exactly two public fields:
+The production implementation is immutable and has three public fields. The
+third remains ergonomic by defaulting every executor axis explicitly to
+unbudgeted:
 
 ```python
 @dataclass(frozen=True, slots=True)
 class ProcessExecutor:
     runtime: Runtime
     run_store: RunStore
+    self_budgets: ExecutorSelfBudgets = field(
+        default_factory=ExecutorSelfBudgets.unbudgeted,
+    )
 
     def run(
         self,
@@ -1210,10 +1512,11 @@ signatures:
 - Persisted digests use SHA-256 over explicitly canonicalized bytes.
   Environment identity includes sorted declared names and a digest of the
   canonical name/value payload without persisting the values themselves.
-- Executor identity has distinct production and fake forms. Exact persisted
-  keys, literals, canonicalization, and identity strings belong in validated
-  serialization models and golden tests rather than being derived from mutable
-  code field names.
+- Production executor, executor-config, and runtime identities use the loose
+  versioned documents defined above. Fake executions have no production run
+  record and therefore do not manufacture production provenance. Exact keys,
+  literals, canonicalization, and identity strings belong in validated models
+  and golden tests rather than being derived from mutable code field names.
 
 ## Payload retention and protocol integrity
 
@@ -1236,25 +1539,87 @@ dropped_bytes
 
 The retained pieces remain structurally separate. The executor does not insert
 a marker or concatenate them as if the omitted bytes had never existed. The
-exact allocation of a finite aggregate output budget between stdout head,
-stdout tail, stderr head, and stderr tail is pinned by the later API design and
-cannot depend on drain-thread scheduling. The fail-on-overflow action may
+allocation of a finite aggregate output budget between stdout head, stdout
+tail, stderr head, and stderr tail is pinned by `FiniteOutput` and cannot depend
+on drain-thread scheduling. The fail-on-overflow action may
 terminate the run, while marked truncation continues draining through EOF; both
 return the retained structural evidence and exact produced/dropped counts.
 
-Execution protocol output is a separate driver-owned channel with separate
-accounting. Its framed JSON or NDJSON prelude, output, and completion messages
-must remain complete and schema-valid. Protocol bytes are never head/tail
-truncated. An oversized, malformed, identity-mismatched, duplicate, or
+Execution protocol output is strict canonical NDJSON on fd 3 with separate
+accounting. Each frame is the dr-serialize canonical UTF-8 encoding of exactly
+one closed frame model followed by one LF byte. Canonical JSON contains no raw
+line breaks, so LF is an unambiguous frame boundary. The wire permits no BOM,
+blank line, CRLF, leading or trailing whitespace, missing terminal LF, or bytes
+after the completion frame.
+
+The closed v1 frame sequence has this shape:
+
+```python
+@verify(UNIQUE)
+class ProtocolFrameKind(StrEnum):
+    PRELUDE = "prelude"
+    OUTPUT = "output"
+    COMPLETE = "complete"
+
+
+class ProtocolPrelude(ContractModel):
+    version: Literal[1] = 1
+    kind: Literal[ProtocolFrameKind.PRELUDE] = ProtocolFrameKind.PRELUDE
+    request_id_sha256: Sha256Digest
+
+
+class ProtocolOutput(ContractModel):
+    version: Literal[1] = 1
+    kind: Literal[ProtocolFrameKind.OUTPUT] = ProtocolFrameKind.OUTPUT
+    sequence: NonNegativeInt
+    document: IdentityDocument
+
+
+class ProtocolComplete(ContractModel):
+    version: Literal[1] = 1
+    kind: Literal[ProtocolFrameKind.COMPLETE] = ProtocolFrameKind.COMPLETE
+    output_count: NonNegativeInt
+
+
+type ProtocolFrame = Annotated[
+    ProtocolPrelude | ProtocolOutput | ProtocolComplete,
+    Field(discriminator="kind"),
+]
+```
+
+Exactly one prelude comes first and echoes the full request-identity digest.
+Zero or more outputs follow with consecutive zero-based sequence numbers.
+Exactly one completion comes last, and its `output_count` must equal the number
+of accepted output frames. EOF is valid only after the complete frame and its
+LF. Duplicate, skipped, reordered, or post-completion frames fail the protocol.
+
+Invalid UTF-8, invalid JSON, duplicate keys, non-canonical bytes, or a frame
+that fails its closed model maps to `MALFORMED_FRAME`; a prelude or frame in the
+wrong position maps to `UNEXPECTED_FRAME`; a request digest mismatch maps to
+`ID_MISMATCH`; a repeated sequence maps to `DUPLICATE_OUTPUT`; and EOF, a
+missing terminal LF, or a mismatched completion count maps to
+`INCOMPLETE_STREAM`. A configured finite protocol limit maps its overflow to
+`OVERSIZED_FRAME`; with the unbudgeted default there is no size- or count-based
+protocol failure.
+
+With a finite frame budget, the parent scans for LF without acquiring beyond
+that limit. With the unbudgeted default, it scans without an executor policy cap
+and may exhaust machine resources. Once one finite frame has been acquired, the
+parent gives the decoder its actual byte length and maximum structurally
+possible depth as materialization bounds, re-encodes the decoded value and
+requires byte-for-byte canonical equality, then performs Pydantic frame
+validation. Protocol bytes are never head/tail truncated. An oversized under a
+finite policy, malformed, non-canonical, identity-mismatched, duplicate, or
 incomplete stream is an executor protocol failure; the parent preserves every
 previously accepted complete protocol output. The owning domain decides whether
 those outputs constitute a complete internal result and never relies on dr-exec
 to synthesize missing domain items. Payload output can therefore overflow
 without corrupting trusted structured outputs.
 
-Per-field and per-message protocol limits prevent a payload-derived value from
-turning one result envelope into unbounded protocol output. The exact message
-schema and limits are persisted wire contracts with golden tests.
+Per-frame, aggregate-byte, JSON-depth, and output-count limits apply only when
+their executor self-budget axes are finite. Golden vectors pin valid zero-,
+one-, and multiple-output streams plus every ordering, framing, configured
+limit, identity, duplicate-key, and incomplete-stream failure.
 
 ## Durable observability and record layout
 
@@ -1283,11 +1648,15 @@ so readers never mistake their concatenation for a contiguous payload stream.
 Manifest paths are relative to the run directory; normal finalization records
 each sidecar's size and content digest.
 
-The manifest contains the run identifier, schema and executor identities,
-trust category, invocation or source digest, input digest, environment-grant
-identity, containment profile, complete effective budgets, resolved Python
-interpreter when relevant, lifecycle timestamps, outcome, attribution,
-measurements, truncation metadata, and output sidecar references and digests.
+The execution-local manifest contains record schema, executor, and
+executor-config identities; the target record that serves as durable invocation
+evidence; environment-grant identity; containment profile; complete effective
+workload budgets; resolved Python interpreter when relevant; lifecycle
+timestamps; outcome; attribution; measurements; accepted protocol outputs;
+truncation metadata; and output sidecar references and digests. It contains no
+pool capacity, queue, lease, or worker-session facts. Every accepted complete
+protocol output remains inline in the finalized `record.json`; v1 does not create
+separate protocol-output artifacts or replace them with digest-only references.
 Secret environment values and raw input do not enter the manifest merely
 because their digests do.
 
@@ -1340,10 +1709,10 @@ the manifest, sidecars, and machine-readable receipt own the durable contract.
 Narration failure is reported as observability degradation rather than payload
 failure.
 
-The record manifest's canonical JSON and digest construction should use
-`dr-serialize` if the open serialization discussion establishes the required
-stable contract. V1 does not create a second general canonicalization system in
-`dr-exec` merely for records.
+The record manifest uses the pinned `dr-serialize` canonical-byte path described
+above. Dr-exec owns the manifest model, safe projection, lifecycle validation,
+and transaction semantics; it does not create a second general canonicalization
+system merely for records.
 
 ### Durable-observability verification
 
@@ -1380,8 +1749,11 @@ The paved path must let setup and interpreter startup amortize across the cases
 that share one generated sample while evaluating many independent samples with
 bounded machine-level concurrency. On a representative workload, local
 evaluation capacity must exceed the rate at which the upstream LLM pipeline
-produces samples, without unbounded active processes, threads, memory growth,
-queued requests, or lost per-sample results and records.
+produces samples, without scheduler-created unbounded active-process, thread,
+or queue growth or lost per-sample results and records. Explicitly unbudgeted
+per-run data can still exhaust machine memory or disk; the benchmark must make
+that exposure measurable rather than treating unbudgeted policy as capacity
+protection.
 
 V1 fails this criterion if its default topology starts a container or
 provisioned environment per sample, starts a process per test case, evaluates
@@ -1501,19 +1873,6 @@ The engine suite owns lifecycle fault-injection, process-group reach,
 output-retention, protocol-integrity, bounded-pool, and durable-recording cases.
 Domain adapters own request and result schemas, internal item completeness, and
 the interpretation of `ExecutionResult` for their workflows.
-
-## Open high-level decisions
-
-One design area remains open before structured-contract alignment and
-implementation planning: settle complete serialization ownership. V1 retains
-JSON or NDJSON for control and incremental protocol data, uses domain formats
-for bulk artifacts, and builds on `dr-serialize`; the remaining discussion must
-identify any missing general serialization capability that belongs in
-`dr-serialize` rather than being reimplemented in dr-exec.
-
-The machine-utilization topology and public type and Protocol design are
-accepted above. An implementation plan must not reopen them implicitly or
-introduce a second scheduling unit alongside `ExecutionJob`.
 
 ## Future design hooks
 
