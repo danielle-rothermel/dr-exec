@@ -36,12 +36,14 @@ files are structured proposals rather than standing repository authority:
 - [intentional scope exclusions](intentionally-out-of-scope.toml)
 - [unaddressed contracts](unaddressed-contracts.toml)
 
-The accepted public type and protocol design lives in this document and its
-settled behavior is aligned in the structured v1 contracts and terms. The
-serialization ownership and proposed shared-library additions are recorded
-below and in the [dr-serialize additions](dr-serialize-additions.md). The v1
-high-level planning decisions are closed; implementation planning must preserve
-these boundaries while fleshing out the exact APIs and test vectors.
+The source package is canonical for exact public imports, names, constructors,
+fields, defaults, unions, exceptions, and signatures. This design owns the
+behavioral, wire, persistence, safety, and ownership contracts, aligned with the
+structured v1 contracts and terms. Serialization ownership and proposed
+shared-library additions are recorded below and in the
+[dr-serialize additions](dr-serialize-additions.md). The v1 high-level planning
+decisions are closed; source changes must preserve these boundaries and their
+qualification obligations.
 
 ## Scope and consumer map
 
@@ -95,9 +97,8 @@ the [verified uv-provisioned Python runtime plan](../future-plans/verified-pytho
 ### Workload budgets and RAM
 
 Every workload budget axis has one visible value: finite or explicitly
-unbudgeted. `Budgets.unbudgeted()` constructs the v1 default, and every workload
-axis defaults to that value until a caller supplies a meaningful finite bound.
-There is no unset or inferred finite state.
+unbudgeted. Until a caller supplies a meaningful finite bound, policy is
+explicitly unbudgeted. There is no unset or inferred finite state.
 
 The v1 workload axes include wall clock, input, output, memory, CPU time,
 process count, file size, open-file count, and disk where represented by the
@@ -140,25 +141,10 @@ network containment.
 
 ## Package navigation
 
-The proposed package is `dr_exec`, consumed through pinned releases:
-
-- `dr_exec.names` — nominal identifiers and other validated scalar names;
-- `dr_exec.kinds` — persisted `StrEnum` vocabularies and discriminants;
-- `dr_exec.protocols` — stable behavioral capability boundaries;
-- `dr_exec.declare` — jobs, execution targets, budgets, environment grants,
-  and containment declarations;
-- `dr_exec.runtime` — the isolated-host-Python runtime implementation;
-- `dr_exec.store` — the durable directory run-store implementation;
-- `dr_exec.executor` — the production process executor;
-- `dr_exec.pool` — bounded batch and streaming orchestration;
-- `dr_exec.record` — results, records, record receipts, and narration;
-- `dr_exec.fake` — the contract-enforcing consumer test fake; and
-- `dr_exec.engine` — private call-scoped spawn, I/O, lifecycle, budget,
-  attribution, and recording implementation.
-
-The package root re-exports the deliberate public surface. Private engine,
-wire-frame, canonicalization, and store-transaction helpers are not re-exported.
-The single-engine boundary and pinned-release rule are proposed in
+The source package, consumed through pinned releases, is the sole navigation
+and API authority. See the [public package surface](../../src/dr_exec/__init__.py)
+and [stable capability boundaries](../../src/dr_exec/protocols.py). The
+single-engine boundary and pinned-release rule are proposed in
 [new contracts](new-contracts.toml).
 
 ## Serialization ownership and integration
@@ -302,69 +288,27 @@ No dr-exec codec or record implementation is complete while it depends on an
 unreleased sibling checkout or locally duplicates a proposed `dr-serialize`
 capability.
 
-## Public type and protocol design
+## Behavioral type and capability contracts
 
-This section is the accepted v1 Python API shape. Exact persisted field names,
-enum values, schema versions, and protocol-frame limits remain part of the
-structured-contract and serialization pass, but implementation must preserve
-the ownership and composition shown here.
+The source files linked under [Package navigation](#package-navigation) own the
+exact Python API. This section records the behavior those declarations must
+continue to express without duplicating their shape.
 
-The snippets are interface fragments grouped by conceptual ownership, not one
-copy-paste module; implementations use normal imports and postponed annotations
-where a referenced type is defined in a later subsection.
+### Representation boundary and scalar wire spellings
 
-### Representation and naming rules
+Persistence, subprocess, fixture, and untrusted-input boundaries use strict,
+frozen validated models with closed fields. Live internal value objects that
+never cross a serialization boundary use frozen slotted dataclasses. A live
+execution job is never serialized wholesale because its resolved environment
+may contain secrets; the engine derives separate secret-safe request and record
+projections.
 
-Validated models use one strict frozen base at persistence, subprocess,
-untrusted-input, and fixture boundaries. Live internal values that are never
-serialized use frozen slotted dataclasses. `ExecutionJob` is deliberately a
-live dataclass because its resolved environment contains secret values; it is
-never serialized wholesale. The engine derives safe record and child-protocol
-models from it.
+Closed persisted vocabularies have unique pinned string values and closed
+variants. Persisted payloads are built from explicit schema declarations, never
+by iterating an enum or reflecting over implementation field names.
 
-```python
-class ContractModel(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=True,
-        strict=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
-    )
-```
-
-The public vocabulary consistently uses the standard short forms `Id`, `Env`,
-`Config`, `Var`, `argv`, `stdin`, `stdout`, `stderr`, `max`, `cpu`, `ns`,
-`sha256`, and `errno`. It does not shorten `Execution`, `Protocol`, `Record`,
-`Result`, or `Capacity`. Nested fields omit context already supplied by their
-owning type: `ExecutionId` contains `job_id` and `attempt_id`, while containing
-models use the field name `execution_id`.
-
-All closed persisted vocabularies use `@verify(UNIQUE)` `StrEnum` definitions.
-Pydantic discriminated-union variants use the owning enum member inside the
-required `Literal`, rather than duplicating a raw string:
-
-```python
-@verify(UNIQUE)
-class OutcomeKind(StrEnum):
-    EXITED = "exited"
-    SIGNALED = "signaled"
-
-
-class ExitedOutcome(ContractModel):
-    kind: Literal[OutcomeKind.EXITED] = OutcomeKind.EXITED
-    exit_code: int
-```
-
-The `StrEnum` owns the wire vocabulary; the `Literal` pins the one value valid
-for that union member and enables Pydantic's field discriminator. Persisted
-payloads are never constructed by iterating an enum.
-
-### Scalar wire spellings
-
-V1 owns explicit dependency-independent scalar spellings. Pydantic converts
-validated types into these JSON-mode values, and dr-serialize supplies the
-canonical JSON escaping and bytes:
+V1 owns these dependency-independent scalar wire spellings; dr-serialize owns
+their canonical JSON escaping and bytes:
 
 - UUIDs are lowercase 36-character hexadecimal strings with hyphens in the
   `8-4-4-4-12` form.
@@ -378,7 +322,7 @@ canonical JSON escaping and bytes:
 - Durations are integer nanoseconds in fields suffixed `_ns`; ISO 8601 duration
   strings and floating-point seconds are not wire forms.
 - Bytes in JSON-bearing models are padded RFC 4648 URL-safe base64 strings.
-  Command stdin, payload-output, and sidecar transport bytes retain their
+  Command stdin, payload output, and sidecar transport bytes retain their
   separately specified byte contracts and are not base64-wrapped in transit.
 - Unicode strings preserve their code-point sequence without normalization.
   Dr-serialize's canonical JSON profile determines escaping, including its
@@ -386,1115 +330,178 @@ canonical JSON escaping and bytes:
 - Integers use JSON integer syntax with no leading plus, leading zero, exponent,
   or fractional form. Boolean values never validate as integers at strict model
   boundaries.
-- Enums use their exact pinned `StrEnum` values.
+- Enums use their exact pinned string values.
 - SHA-256 digests are exactly 64 lowercase hexadecimal characters without a
   prefix; abbreviated display digests are never accepted at a boundary.
 
 Golden vectors cover each scalar alone and nested in every relevant request,
-frame, identity, and record model. The vectors run under the exact pinned
-Pydantic and dr-serialize releases so a dependency change cannot silently alter
-the bytes.
-
-### Protocols as governance boundaries
-
-`Executor`, `Runtime`, and `RunStore` are stable behavioral Protocols in v1.
-They intentionally freeze foundational capability shapes before multiple
-production implementations exist. The normal extension path is a new concrete
-implementation; adding or changing a Protocol is a loud boundary change that
-requires explicit contract review.
-
-Every supported implementation runs the shared behavioral conformance suite.
-Structural conformance alone establishes only method shape, not semantic or
-durability qualification. Protocols model swappable behavior; serialized
-variants remain closed validated models or discriminated unions.
-
-`ExecutionPool` remains one concrete class in v1. Its bounded admission,
-backpressure, and scheduling behavior are the paved-road machine-utilization
-policy rather than a swappable scheduling plug-in.
-
-### Names and execution identity
-
-```python
-JobId = NewType("JobId", UUID)
-AttemptId = NewType("AttemptId", UUID)
-
-
-class ExecutionId(ContractModel):
-    job_id: JobId
-    attempt_id: AttemptId
-```
-
-The caller supplies the stable logical `JobId`. Each physical attempt receives
-a new `AttemptId`, so retrying a workflow job never makes two executions appear
-to be the same attempt.
-
-### Runtime boundary
-
-```python
-@verify(UNIQUE)
-class RuntimeKind(StrEnum):
-    ISOLATED_HOST_PYTHON = "isolated_host_python"
-
-
-class RuntimeRecord(ContractModel):
-    kind: RuntimeKind
-    resolved_executable: Path
-    id_doc: IdentityDocument
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedPythonProcess:
-    argv: tuple[str, ...]
-    request: IdentityDocument
-    runtime_record: RuntimeRecord
-
-
-class Runtime(Protocol):
-    def prepare(
-        self,
-        target: UntrustedPythonTarget,
-        /,
-    ) -> PreparedPythonProcess:
-        ...
-
-    def describe(self) -> RuntimeRecord:
-        ...
-
-
-@dataclass(frozen=True, slots=True)
-class IsolatedHostPythonRuntime:
-    executable: Path
-
-    def prepare(
-        self,
-        target: UntrustedPythonTarget,
-        /,
-    ) -> PreparedPythonProcess:
-        ...
-
-    def describe(self) -> RuntimeRecord:
-        ...
-```
-
-`IsolatedHostPythonRuntime` resolves and validates its absolute executable at
-construction. Its `prepare()` method always produces the fixed
-`<executable> -I -c <driver_source>` form. Runtime implementations do not spawn
-processes, choose budgets, resolve environment grants, or write records.
-
-The future verified uv-provisioned runtime implements the same `Runtime`
-Protocol. Conformance does not by itself add that implementation to the v1
-support matrix.
-
-### Python request and protocol transports
-
-An untrusted Python child has four inherited descriptors: stdin on fd 0,
-payload stdout on fd 1, payload stderr on fd 2, and the executor-owned protocol
-write pipe on fd 3. Trusted and untrusted command targets receive only fds 0,
-1, and 2. Callers cannot grant arbitrary descriptors and fd 3 never appears in
-`EnvGrant`.
-
-The macOS engine creates all pipes with close-on-exec behavior, then uses
-`os.posix_spawn()` file actions to duplicate only the intended child ends onto
-fds 0 through 3 and close the originals. It creates the child session through
-the same spawn operation. It does not mutate parent-global descriptor numbers
-and does not use `preexec_fn`, so concurrent `Executor.run()` calls cannot
-deadlock on Python runtime state inherited across `fork()`.
-
-`PreparedPythonProcess.request` is serialized with
-`canonical_identity_json_bytes()` and written as the complete contents of
-stdin, with no byte-order mark, length prefix, delimiter, or trailing newline.
-The parent then closes stdin. The canonical request byte length is validated
-against the caller's input budget before spawn and is the recorded input-byte
-measurement. The driver reads through EOF, performs bounded strict JSON and
-`IdentityDocument` validation, and emits no protocol output if the request is
-invalid.
-
-The driver opens fd 3 before executing domain code and retains that handle even
-if the payload replaces `sys.stdout` or `sys.stderr`. Payload code can still
-discover, close, or write directly to inherited descriptors; malformed
-protocol bytes therefore remain an executor protocol failure under the honest
-process-boundary-only profile, not a claim of in-process tamper resistance.
-
-### Durable run-store boundary
-
-The store Protocol operates on nominal lifecycle handles so illegal state
-transitions are not expressible through one loosely typed handle.
-
-```python
-@verify(UNIQUE)
-class RecordState(StrEnum):
-    PREPARED = "prepared"
-    RUNNING = "running"
-    FINALIZED = "finalized"
-
-
-class RunRecordHeader(ContractModel):
-    schema_version: Literal[1] = 1
-    executor_identity: IdentityDocument
-    executor_config_identity: IdentityDocument
-    prepared_at: AwareDatetime
-
-
-class TrustedCommandTargetRecord(ContractModel):
-    kind: Literal[ExecutionTargetKind.TRUSTED_COMMAND] = (
-        ExecutionTargetKind.TRUSTED_COMMAND
-    )
-    canonical_declaration_sha256: str
-
-
-class UntrustedCommandTargetRecord(ContractModel):
-    kind: Literal[ExecutionTargetKind.UNTRUSTED_COMMAND] = (
-        ExecutionTargetKind.UNTRUSTED_COMMAND
-    )
-    canonical_declaration_sha256: str
-    containment_profile: ContainmentProfile
-
-
-class UntrustedPythonTargetRecord(ContractModel):
-    kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = (
-        ExecutionTargetKind.UNTRUSTED_PYTHON
-    )
-    canonical_declaration_sha256: str
-    request_id_sha256: str
-    containment_profile: ContainmentProfile
-    runtime: RuntimeRecord
-
-
-type ExecutionTargetRecord = Annotated[
-    TrustedCommandTargetRecord
-    | UntrustedCommandTargetRecord
-    | UntrustedPythonTargetRecord,
-    Field(discriminator="kind"),
-]
-
-
-class RunDeclaration(ContractModel):
-    execution_id: ExecutionId
-    target: ExecutionTargetRecord
-    env: EnvGrantRecord
-    budgets: Budgets
-
-
-class ProcessRecord(ContractModel):
-    pid: PositiveInt
-    started_at: AwareDatetime
-
-
-class OutputArtifactRecord(ContractModel):
-    relative_path: Path
-    size_bytes: NonNegativeInt
-    sha256: str
-
-
-class OutputArtifactRecords(ContractModel):
-    stdout: OutputArtifactRecord
-    stderr: OutputArtifactRecord
-
-
-class RetainedPayloadStreamRecord(ContractModel):
-    head_bytes: NonNegativeInt
-    tail_bytes: NonNegativeInt
-    produced_bytes: NonNegativeInt
-    dropped_bytes: NonNegativeInt
-
-
-class PayloadOutputRecords(ContractModel):
-    stdout: RetainedPayloadStreamRecord
-    stderr: RetainedPayloadStreamRecord
-
-
-class ExecutionResultRecord(ContractModel):
-    execution_id: ExecutionId
-    outcome: ExecutionOutcome
-    attribution: ExecutionAttribution
-    protocol_outputs: tuple[IdentityDocument, ...]
-    payload_outputs: PayloadOutputRecords
-    measurements: ExecutionMeasurements
-
-
-class PreparedRecord(ContractModel):
-    state: Literal[RecordState.PREPARED] = RecordState.PREPARED
-    header: RunRecordHeader
-    declaration: RunDeclaration
-
-
-class RunningRecord(ContractModel):
-    state: Literal[RecordState.RUNNING] = RecordState.RUNNING
-    header: RunRecordHeader
-    declaration: RunDeclaration
-    process: ProcessRecord
-
-
-class FinalizedRecord(ContractModel):
-    state: Literal[RecordState.FINALIZED] = RecordState.FINALIZED
-    header: RunRecordHeader
-    declaration: RunDeclaration
-    result: ExecutionResultRecord
-    outputs: OutputArtifactRecords
-
-
-type RunRecord = Annotated[
-    PreparedRecord | RunningRecord | FinalizedRecord,
-    Field(discriminator="state"),
-]
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedRun:
-    execution_id: ExecutionId
-    record_dir: Path
-
-
-@dataclass(frozen=True, slots=True)
-class RunningRun:
-    execution_id: ExecutionId
-    record_dir: Path
-
-
-type FinalizableRun = PreparedRun | RunningRun
-
-
-class RunStore(Protocol):
-    def prepare(
-        self,
-        record: PreparedRecord,
-        /,
-    ) -> PreparedRun:
-        ...
-
-    def mark_running(
-        self,
-        prepared_run: PreparedRun,
-        process: ProcessRecord,
-        /,
-    ) -> RunningRun:
-        ...
-
-    def finalize(
-        self,
-        run: FinalizableRun,
-        result: ExecutionResult,
-        /,
-    ) -> RealRecordReceipt:
-        ...
-
-    def load(
-        self,
-        record_dir: Path,
-        /,
-    ) -> RunRecord:
-        ...
-
-
-@dataclass(frozen=True, slots=True)
-class DirectoryRunStore:
-    root: Path
-
-    def prepare(
-        self,
-        declaration: RunDeclaration,
-        /,
-    ) -> PreparedRun:
-        ...
-
-    def mark_running(
-        self,
-        prepared_run: PreparedRun,
-        process: ProcessRecord,
-        /,
-    ) -> RunningRun:
-        ...
-
-    def finalize(
-        self,
-        run: FinalizableRun,
-        result: ExecutionResult,
-        /,
-    ) -> RealRecordReceipt:
-        ...
-
-    def load(
-        self,
-        record_dir: Path,
-        /,
-    ) -> RunRecord:
-        ...
-```
-
-`DirectoryRunStore` is the only qualified v1 production implementation. It
-implements the crash-consistent lifecycle described below. A prepare failure
-prevents spawn and raises; after an attempt begins, finalization degradation is
-returned through `RecordReceipt` without replacing the execution outcome.
-`RunDeclaration` is the safe persisted projection of a live `ExecutionJob`: it
-contains target and request identities rather than raw stdin, source, request
-payloads, or environment values.
-
-Every state is one complete execution-local snapshot. `RunRecordHeader` carries
-only record schema and executor provenance; it contains no pool capacity, queue
-depth, worker lease, or pool-session reference. Dr-platform owns durable
-workflow and lease context, while worker telemetry and the release benchmark
-own host-level scheduling observations.
-
-The target record's discriminant and full
-`canonical_declaration_sha256` together are the v1 durable invocation evidence.
-The digest covers the complete versioned target declaration, while the record
-deliberately exposes no recoverable argv, source, stdin, request-payload, or
-environment-value excerpt. Python target records add the request identity,
-containment profile, and runtime record without changing that rule. Projection
-and decoding diagnostics identify the failed field or rule without embedding a
-rejected secret-bearing value.
-
-### Environment grants
-
-The live grant owns resolved values and never serializes them directly.
-
-```python
-@verify(UNIQUE)
-class EnvGrantKind(StrEnum):
-    NONE = "none"
-    NAMED = "named"
-    FIXED = "fixed"
-    OVERLAY = "overlay"
-
-
-@dataclass(frozen=True, slots=True)
-class EnvVar:
-    name: str
-    value: str = field(repr=False)
-
-
-@dataclass(frozen=True, slots=True)
-class EnvGrant:
-    kind: EnvGrantKind
-    variables: tuple[EnvVar, ...]
-    excluded_var_names: tuple[str, ...] = ()
-
-    @classmethod
-    def none(cls) -> EnvGrant:
-        ...
-
-    @classmethod
-    def named(cls, var_names: Iterable[str]) -> EnvGrant:
-        ...
-
-    @classmethod
-    def fixed(cls, variables: Mapping[str, str]) -> EnvGrant:
-        ...
-
-    @classmethod
-    def overlay(
-        cls,
-        extra_variables: Mapping[str, str],
-        *,
-        exclusions: Iterable[str] = (),
-    ) -> EnvGrant:
-        ...
-
-
-class EnvGrantRecord(ContractModel):
-    kind: EnvGrantKind
-    var_names: tuple[str, ...]
-    excluded_var_names: tuple[str, ...]
-    canonical_values_sha256: str
-```
-
-Parent-derived values are snapshotted when an `EnvGrant` is constructed.
-Records contain names, exclusions, and the canonical value digest, never the
-secret values.
-
-### Workload budgets
-
-An unbudgeted axis is a first-class value rather than `None`. Unit-specific
-finite models prevent byte, duration, and count values from being exchanged.
-
-```python
-@verify(UNIQUE)
-class LimitKind(StrEnum):
-    UNBUDGETED = "unbudgeted"
-    FINITE = "finite"
-
-
-class UnbudgetedLimit(ContractModel):
-    kind: Literal[LimitKind.UNBUDGETED] = LimitKind.UNBUDGETED
-
-
-class FiniteByteLimit(ContractModel):
-    kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
-    max_bytes: PositiveInt
-
-
-class FiniteDurationLimit(ContractModel):
-    kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
-    max_ns: PositiveInt
-
-
-class FiniteCountLimit(ContractModel):
-    kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
-    max_count: PositiveInt
-
-
-type ByteBudget = Annotated[
-    UnbudgetedLimit | FiniteByteLimit,
-    Field(discriminator="kind"),
-]
-type DurationBudget = Annotated[
-    UnbudgetedLimit | FiniteDurationLimit,
-    Field(discriminator="kind"),
-]
-type CountBudget = Annotated[
-    UnbudgetedLimit | FiniteCountLimit,
-    Field(discriminator="kind"),
-]
-```
-
-Output combines its finite limit with the selected overflow behavior:
-
-```python
-@verify(UNIQUE)
-class OutputOverflowPolicy(StrEnum):
-    FAIL = "fail"
-    MARKED_TRUNCATION = "marked_truncation"
-
-
-class UnbudgetedOutput(ContractModel):
-    kind: Literal[LimitKind.UNBUDGETED] = LimitKind.UNBUDGETED
-
-
-class StreamRetentionBudget(ContractModel):
-    head_bytes: NonNegativeInt
-    tail_bytes: NonNegativeInt
-
-
-class PayloadRetentionBudget(ContractModel):
-    stdout: StreamRetentionBudget
-    stderr: StreamRetentionBudget
-
-
-class FiniteOutput(ContractModel):
-    kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
-    max_bytes: PositiveInt
-    overflow_policy: OutputOverflowPolicy
-    retention: PayloadRetentionBudget
-
-
-type OutputBudget = Annotated[
-    UnbudgetedOutput | FiniteOutput,
-    Field(discriminator="kind"),
-]
-
-
-class Budgets(ContractModel):
-    wall_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
-    input_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    payload_output: OutputBudget = Field(
-        default_factory=UnbudgetedOutput,
-    )
-    memory_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    cpu_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
-    process_count: CountBudget = Field(default_factory=UnbudgetedLimit)
-    file_size_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    open_file_count: CountBudget = Field(default_factory=UnbudgetedLimit)
-    disk_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-
-    @classmethod
-    def unbudgeted(cls) -> Budgets:
-        return cls()
-```
-
-Unsupported finite axes fail declaration validation before spawn. They are
-never accepted or silently treated as unbudgeted.
-
-`FiniteOutput` validates that `max_bytes` equals the sum of the four declared
-head and tail allocations. This pins deterministic stdout/stderr retention
-independently of drain scheduling. If aggregate payload production does not
-exceed `max_bytes`, the result retains every produced byte rather than padding
-or forcing the configured segment split. In `FAIL` mode the same finite total
-is the termination threshold; in `MARKED_TRUNCATION` mode it is the maximum
-retained-byte total while the engine continues draining and counting through
-EOF.
-
-### Executor self-budgets
-
-Executor self-budgets use the same explicit limit values without becoming
-caller workload budgets:
-
-```python
-class ExecutorSelfBudgets(ContractModel):
-    protocol_frame_bytes: ByteBudget = Field(
-        default_factory=UnbudgetedLimit,
-    )
-    protocol_total_bytes: ByteBudget = Field(
-        default_factory=UnbudgetedLimit,
-    )
-    protocol_output_count: CountBudget = Field(
-        default_factory=UnbudgetedLimit,
-    )
-    json_depth: CountBudget = Field(default_factory=UnbudgetedLimit)
-    manifest_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    narration_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    recording_failure_count: CountBudget = Field(
-        default_factory=UnbudgetedLimit,
-    )
-    failure_detail_bytes: ByteBudget = Field(
-        default_factory=UnbudgetedLimit,
-    )
-    startup_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
-    termination_time: DurationBudget = Field(
-        default_factory=UnbudgetedLimit,
-    )
-    join_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
-
-    @classmethod
-    def unbudgeted(cls) -> ExecutorSelfBudgets:
-        return cls()
-```
-
-There is no unset state, built-in finite profile, machine-derived limit, or
-capacity-derived limit. `ExecutorSelfBudgets.unbudgeted()` is the production
-default. A caller may later supply a deliberately finite value on any axis, and
-the complete effective configuration participates in executor-config identity.
+frame, identity, and record model under the exact pinned Pydantic and
+dr-serialize releases.
+
+### Capability governance and execution outcomes
+
+The executor, runtime, and run-store capability boundaries are stable
+behavioral Protocols. They deliberately freeze foundational behavior before
+multiple production implementations exist. Adding or changing one is a loud
+boundary change requiring explicit contract review. Every supported
+implementation must satisfy shared behavioral conformance; structural typing
+alone does not establish semantic or durability qualification. Serialized
+variants remain closed validated models or discriminated unions rather than
+Protocols.
+
+The executor capability is one blocking, thread-safe operation for one complete
+attempt. The production path validates the declaration, prepares durable state,
+creates a scratch workspace, launches one fresh child, exchanges protocol
+messages, captures payload output, enforces budgets, tears down and reaps the
+child, finalizes the record, and returns. Mutable per-attempt process state does
+not live on the reusable executor.
+
+Recognized spawn, child, budget, cancellation, and protocol failures are outcome
+data. Invalid pre-spawn declarations and machinery failures that prevent a
+trustworthy result raise the source-defined typed exceptions; underlying causes
+remain available. A record-prepare failure prevents spawn, while recording
+degradation after an attempt begins remains receipt data and does not replace
+the execution outcome. Previously accepted complete protocol outputs survive a
+later protocol failure. A HumanEval attempt ordinarily returns one aggregate
+domain output containing all per-test outcomes.
+
+The caller supplies stable logical job identity, while every physical attempt
+receives a distinct identity. A result and its record receipt always identify
+the same attempt. The contract-enforcing fake uses the same executor capability,
+is thread-safe, records immutable calls, and returns an explicit not-applicable
+receipt instead of pretending a production run record exists.
+
+### Runtime and child transports
+
+The isolated host runtime resolves and validates its absolute executable when
+constructed and always prepares the fixed
+`<executable> -I -c <driver-source>` command. Runtime implementations do not
+spawn processes, choose budgets, resolve environment grants, or write records.
+The future verified uv-provisioned runtime may implement the same capability,
+but conformance alone does not add it to the v1 support matrix.
+
+An untrusted Python child inherits stdin on fd 0, payload stdout on fd 1,
+payload stderr on fd 2, and the executor-owned protocol write pipe on fd 3.
+Command targets receive only fds 0, 1, and 2. Callers cannot grant arbitrary
+descriptors, and fd 3 is never part of an environment grant.
+
+On macOS, the engine creates close-on-exec pipes and uses spawn file actions to
+duplicate only the intended child ends onto fds 0 through 3, close the originals,
+and create the child session in the same spawn operation. It neither mutates
+parent-global descriptor numbers nor uses a pre-exec callback, so concurrent
+executor calls do not inherit Python runtime state across a fork boundary.
+
+The Python request is the complete canonical identity-document bytes on stdin,
+with no byte-order mark, length prefix, delimiter, or trailing newline; the
+parent then closes stdin. Its canonical length is checked against the workload
+input budget before spawn and becomes the recorded input-byte measurement. The
+driver reads through EOF, performs bounded strict JSON and identity-document
+validation, and emits no protocol output for an invalid request.
+
+The driver opens fd 3 before executing domain code and retains the handle even
+if payload code replaces its language-level stdout or stderr objects. Payload
+code can still discover, close, or write directly to inherited descriptors;
+malformed protocol bytes are therefore an executor protocol failure under the
+honest process-boundary-only profile, not a claim of in-process tamper
+resistance.
+
+### Durable store and secret-safe records
+
+The durable-store capability uses distinct lifecycle handles so invalid state
+transitions are not represented by one ambiguous handle. The qualified v1
+directory store implements the crash-consistent lifecycle described below. A
+prepare failure prevents spawn and raises; after an attempt begins, finalization
+degradation is returned in the record receipt without replacing the execution
+outcome.
+
+Every published state is one complete execution-local snapshot. Its header
+contains record schema and executor provenance, never pool capacity, queue
+depth, worker lease, or a pool-session reference. Dr-platform owns durable
+workflow and lease context; worker telemetry and the release benchmark own
+host-level scheduling observations.
+
+The target discriminant and full digest of the canonical, versioned declaration
+together form durable invocation evidence. Records expose no recoverable argv,
+source, stdin, request payload, or environment-value excerpt. Python records
+add request identity, containment profile, and runtime evidence without
+changing that rule. Projection and decoding diagnostics identify the failed
+field or rule without embedding rejected secret-bearing values.
+
+Parent-derived environment values are snapshotted when the live grant is
+created. Durable records retain the declared names, exclusions, and canonical
+value digest, never the values themselves.
+
+Production receipts distinguish complete recording from machine-readable
+degradation and report the latest valid lifecycle state and structured failures.
+The fake's not-applicable receipt is not a production no-record option.
+
+### Budgets and deterministic retention
+
+Every workload and executor self-budget axis is either finite or explicitly
+unbudgeted; there is no unset state, adaptive limit, machine-derived limit, or
+capacity-derived limit. Unit-specific finite values keep byte, duration, and
+count limits distinct. Unsupported finite workload axes fail declaration
+validation before spawn rather than being silently treated as unbudgeted. The
+complete effective executor policy participates in executor-config identity.
 
 Unbudgeted affects volume and waiting policy, not validity. Canonical framing,
 closed schemas, message order, request identity, secret exclusion, and
-unavoidable operating-system limits remain mandatory. The request has no
-second hidden executor byte cap: its actual canonical length is checked only
-against the caller's `input_bytes` workload budget, while the decoder receives
-that already-known finite length as its safe materialization bound.
-
-When configured finitely, protocol volume or structure overflow is a protocol
-failure that preserves earlier accepted outputs; manifest, narration, or
-recording-detail exhaustion degrades observability without replacing the run
-outcome. Finite startup, termination, and join values supply watchdog and
-escalation deadlines. When those time axes are unbudgeted, `Executor.run()` may
-wait indefinitely and v1 makes no bounded-return claim.
-
-### Execution targets and jobs
-
-`ExecutionTarget` is the complete structured target, while
-`ExecutionTargetKind` is only its classification.
-
-```python
-@verify(UNIQUE)
-class ExecutionTargetKind(StrEnum):
-    TRUSTED_COMMAND = "trusted_command"
-    UNTRUSTED_COMMAND = "untrusted_command"
-    UNTRUSTED_PYTHON = "untrusted_python"
-
-
-@verify(UNIQUE)
-class ContainmentProfile(StrEnum):
-    PROCESS_BOUNDARY_ONLY = "process_boundary_only"
-
-
-class TrustedCommandTarget(ContractModel):
-    kind: Literal[ExecutionTargetKind.TRUSTED_COMMAND] = (
-        ExecutionTargetKind.TRUSTED_COMMAND
-    )
-    argv: tuple[str, ...]
-    stdin: bytes = b""
-
-
-class UntrustedCommandTarget(ContractModel):
-    kind: Literal[ExecutionTargetKind.UNTRUSTED_COMMAND] = (
-        ExecutionTargetKind.UNTRUSTED_COMMAND
-    )
-    argv: tuple[str, ...]
-    stdin: bytes = b""
-    containment_profile: ContainmentProfile
-
-
-class UntrustedPythonTarget(ContractModel):
-    kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = (
-        ExecutionTargetKind.UNTRUSTED_PYTHON
-    )
-    driver_source: str
-    request: IdentityDocument
-    containment_profile: ContainmentProfile
-
-
-type ExecutionTarget = Annotated[
-    TrustedCommandTarget
-    | UntrustedCommandTarget
-    | UntrustedPythonTarget,
-    Field(discriminator="kind"),
-]
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionJob:
-    job_id: JobId
-    target: ExecutionTarget
-    env: EnvGrant
-    budgets: Budgets = field(default_factory=Budgets.unbudgeted)
-```
-
-`IdentityDocument` is supplied by `dr-serialize`. The owning domain chooses its
-schema, schema version, and complete request payload after using the selected
-`dr-serialize` conversion policy. The logical workflow persists its domain
-request; the worker resolves live environment values and constructs the
-`ExecutionJob` immediately before admission.
-
-### Results and outcomes
-
-```python
-class RetainedPayloadStream(ContractModel):
-    head: bytes
-    tail: bytes
-    produced_bytes: NonNegativeInt
-    dropped_bytes: NonNegativeInt
-
-
-class PayloadOutputs(ContractModel):
-    stdout: RetainedPayloadStream
-    stderr: RetainedPayloadStream
-```
-
-The raw outcome is separate from its evidence-based owner:
-
-```python
-@verify(UNIQUE)
-class OutcomeKind(StrEnum):
-    EXITED = "exited"
-    SIGNALED = "signaled"
-    SPAWN_ABSENT = "spawn_absent"
-    SPAWN_FAILED = "spawn_failed"
-    BUDGET_EXCEEDED = "budget_exceeded"
-    PROTOCOL_FAILED = "protocol_failed"
-    CANCELLED = "cancelled"
-
-
-class ExitedOutcome(ContractModel):
-    kind: Literal[OutcomeKind.EXITED] = OutcomeKind.EXITED
-    exit_code: int
-
-
-class SignaledOutcome(ContractModel):
-    kind: Literal[OutcomeKind.SIGNALED] = OutcomeKind.SIGNALED
-    signal_number: PositiveInt
-
-
-class SpawnAbsentOutcome(ContractModel):
-    kind: Literal[OutcomeKind.SPAWN_ABSENT] = OutcomeKind.SPAWN_ABSENT
-    executable: str
-
-
-class SpawnFailedOutcome(ContractModel):
-    kind: Literal[OutcomeKind.SPAWN_FAILED] = OutcomeKind.SPAWN_FAILED
-    errno: int
-    error_message: str
-
-
-@verify(UNIQUE)
-class BudgetAxis(StrEnum):
-    WALL_TIME = "wall_time"
-    INPUT_BYTES = "input_bytes"
-    PAYLOAD_OUTPUT = "payload_output"
-    MEMORY_BYTES = "memory_bytes"
-    CPU_TIME = "cpu_time"
-    PROCESS_COUNT = "process_count"
-    FILE_SIZE_BYTES = "file_size_bytes"
-    OPEN_FILE_COUNT = "open_file_count"
-    DISK_BYTES = "disk_bytes"
-
-
-class BudgetExceededOutcome(ContractModel):
-    kind: Literal[OutcomeKind.BUDGET_EXCEEDED] = (
-        OutcomeKind.BUDGET_EXCEEDED
-    )
-    axis: BudgetAxis
-
-
-@verify(UNIQUE)
-class ProtocolFailureCode(StrEnum):
-    MALFORMED_FRAME = "malformed_frame"
-    OVERSIZED_FRAME = "oversized_frame"
-    UNEXPECTED_FRAME = "unexpected_frame"
-    ID_MISMATCH = "id_mismatch"
-    DUPLICATE_OUTPUT = "duplicate_output"
-    INCOMPLETE_STREAM = "incomplete_stream"
-
-
-class ProtocolFailedOutcome(ContractModel):
-    kind: Literal[OutcomeKind.PROTOCOL_FAILED] = OutcomeKind.PROTOCOL_FAILED
-    failure_code: ProtocolFailureCode
-    failure_detail: str
-    accepted_output_count: NonNegativeInt
-
-
-class CancelledOutcome(ContractModel):
-    kind: Literal[OutcomeKind.CANCELLED] = OutcomeKind.CANCELLED
-
-
-type ExecutionOutcome = Annotated[
-    ExitedOutcome
-    | SignaledOutcome
-    | SpawnAbsentOutcome
-    | SpawnFailedOutcome
-    | BudgetExceededOutcome
-    | ProtocolFailedOutcome
-    | CancelledOutcome,
-    Field(discriminator="kind"),
-]
-
-
-@verify(UNIQUE)
-class FailureOwner(StrEnum):
-    NONE = "none"
-    PAYLOAD = "payload"
-    EXECUTOR = "executor"
-    MACHINE = "machine"
-
-
-class ExecutionAttribution(ContractModel):
-    owner: FailureOwner
-    detail: str | None = None
-
-
-class ExecutionMeasurements(ContractModel):
-    started_at: AwareDatetime
-    finished_at: AwareDatetime
-    duration_ns: NonNegativeInt
-    teardown_duration_ns: NonNegativeInt
-    protocol_bytes_received: NonNegativeInt
-
-
-class ExecutionResult(ContractModel):
-    execution_id: ExecutionId
-    outcome: ExecutionOutcome
-    attribution: ExecutionAttribution
-    protocol_outputs: tuple[IdentityDocument, ...]
-    payload_outputs: PayloadOutputs
-    measurements: ExecutionMeasurements
-```
-
-The protected protocol may preserve multiple accepted incremental outputs. A
-HumanEval execution ordinarily returns one aggregate output document containing
-all per-test outcomes.
-
-### Record receipts and completed executions
-
-```python
-@verify(UNIQUE)
-class RecordReceiptKind(StrEnum):
-    COMPLETE = "complete"
-    DEGRADED = "degraded"
-    NOT_APPLICABLE = "not_applicable"
-
-
-class RecordingFailure(ContractModel):
-    operation: str
-    errno: int | None
-    detail: str
-
-
-class CompleteRecordReceipt(ContractModel):
-    kind: Literal[RecordReceiptKind.COMPLETE] = RecordReceiptKind.COMPLETE
-    execution_id: ExecutionId
-    record_dir: Path
-    latest_state: Literal[RecordState.FINALIZED] = RecordState.FINALIZED
-
-
-class DegradedRecordReceipt(ContractModel):
-    kind: Literal[RecordReceiptKind.DEGRADED] = RecordReceiptKind.DEGRADED
-    execution_id: ExecutionId
-    record_dir: Path
-    latest_state: RecordState
-    failures: tuple[RecordingFailure, ...]
-
-
-class FakeRecordReceipt(ContractModel):
-    kind: Literal[RecordReceiptKind.NOT_APPLICABLE] = (
-        RecordReceiptKind.NOT_APPLICABLE
-    )
-    execution_id: ExecutionId
-
-
-type RealRecordReceipt = CompleteRecordReceipt | DegradedRecordReceipt
-
-
-type RecordReceipt = Annotated[
-    CompleteRecordReceipt
-    | DegradedRecordReceipt
-    | FakeRecordReceipt,
-    Field(discriminator="kind"),
-]
-
-
-class CompletedExecution(ContractModel):
-    result: ExecutionResult
-    record_receipt: RecordReceipt
-```
-
-`CompletedExecution` validates that the result and receipt carry the same
-`ExecutionId`. `ProcessExecutor` can return only complete or degraded record
-receipts. `FakeRecordReceipt` exists solely so the contract-enforcing fake can
-satisfy `Executor` without pretending that a run record exists; it is not a
-production no-record option.
-
-### Executor Protocol and production implementation
-
-The stable executor capability contains one blocking, thread-safe operation:
-
-```python
-class Executor(Protocol):
-    def run(
-        self,
-        job: ExecutionJob,
-        /,
-    ) -> CompletedExecution:
-        ...
-```
-
-The production implementation is immutable and has three public fields. The
-third remains ergonomic by defaulting every executor axis explicitly to
-unbudgeted:
-
-```python
-@dataclass(frozen=True, slots=True)
-class ProcessExecutor:
-    runtime: Runtime
-    run_store: RunStore
-    self_budgets: ExecutorSelfBudgets = field(
-        default_factory=ExecutorSelfBudgets.unbudgeted,
-    )
-
-    def run(
-        self,
-        job: ExecutionJob,
-        /,
-    ) -> CompletedExecution:
-        ...
-
-    def run_many(
-        self,
-        jobs: Iterable[ExecutionJob],
-        /,
-        *,
-        config: ExecutionPoolConfig | None = None,
-    ) -> Iterator[CompletedExecution]:
-        ...
-
-    def open_pool(
-        self,
-        *,
-        config: ExecutionPoolConfig | None = None,
-    ) -> ExecutionPool:
-        ...
-```
-
-`run()` performs one complete attempt: validate, prepare the record, create the
-scratch workspace, launch one fresh child, exchange protocol messages, capture
-payload output, enforce budgets, tear down and reap, finalize the record, and
-return. Mutable per-run process state never lives on `ProcessExecutor`.
-
-Recognized spawn, child, budget, and protocol outcomes return data. Invalid
-pre-spawn declarations and machinery failures that prevent a trustworthy result
-raise typed exceptions. A record-prepare failure prevents spawn; later
-recording degradation remains in `RecordReceipt`.
-
-```python
-class DeclarationError(ValueError):
-    ...
-
-
-class ExecutorFailure(RuntimeError):
-    ...
-```
-
-`DeclarationError` is exclusively pre-spawn. `ExecutorFailure` preserves its
-underlying cause and is reserved for machinery failure that prevents a
-trustworthy `ExecutionResult`; recognized process and protocol failures do not
-use exception control flow.
-
-`run_many()` and `open_pool()` are convenience methods on the concrete
-production implementation, not additional methods on the foundational
-`Executor` Protocol. Both delegate to the same `ExecutionPool`, which delegates
-every job to `Executor.run()`. `FakeExecutor` satisfies the same one-method
-Protocol and may therefore be used under the pool in consumer logic tests.
-
-The fake's mutable script and call history remain private and synchronized:
-
-```python
-class FakeExecutor:
-    _responses: deque[CompletedExecution]
-    _calls: list[ExecutionJob]
-    _lock: Lock
-
-    def __init__(
-        self,
-        responses: Iterable[CompletedExecution] = (),
-    ) -> None:
-        ...
-
-    def run(
-        self,
-        job: ExecutionJob,
-        /,
-    ) -> CompletedExecution:
-        ...
-
-    @property
-    def calls(self) -> tuple[ExecutionJob, ...]:
-        ...
-```
-
-### Pool capacity and lifecycle
-
-```python
-@dataclass(frozen=True, slots=True)
-class AutoPoolCapacity:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class FixedPoolCapacity:
-    max_active_jobs: int
-
-    def __post_init__(self) -> None:
-        if self.max_active_jobs < 1:
-            raise ValueError("max_active_jobs must be positive")
-
-
-type PoolCapacity = AutoPoolCapacity | FixedPoolCapacity
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionPoolConfig:
-    capacity: PoolCapacity = field(default_factory=AutoPoolCapacity)
-    max_prefetched_jobs: int = 0
-
-    def __post_init__(self) -> None:
-        if self.max_prefetched_jobs < 0:
-            raise ValueError("max_prefetched_jobs must be nonnegative")
-
-
-@verify(UNIQUE)
-class CapacitySource(StrEnum):
-    AUTO = "auto"
-    FIXED = "fixed"
-
-
-class EffectivePoolCapacity(ContractModel):
-    source: CapacitySource
-    cpu_count: PositiveInt
-    max_active_jobs: PositiveInt
-    max_prefetched_jobs: NonNegativeInt
-    native_threads_per_job: Literal[1] = 1
-
-
-@verify(UNIQUE)
-class ExecutionPoolState(StrEnum):
-    CREATED = "created"
-    RUNNING = "running"
-    DRAINING = "draining"
-    CLOSED = "closed"
-    BROKEN = "broken"
-```
-
-`AutoPoolCapacity` resolves once when a pool opens as the usable CPU count, with
-at least one active job. Every v1 job has one scheduling slot; heterogeneous
-weighted jobs are outside v1. The effective values and fixed single-native-
-thread policy are recorded. `ProcessExecutor.run()` adds the standard numeric-
-library thread-limit variables to every submitted job's resolved `EnvGrant`,
-whether called directly or through a pool. An incompatible caller-supplied
-value is a declaration error rather than an implicit override. This is an
-oversubscription control for known libraries, not a CPU-enforcement guarantee
-against arbitrary payload code.
-
-The default `max_prefetched_jobs=0` leaves the authoritative backlog in the
-caller or durable workflow queue. A finite nonzero value admits only that many
-additional jobs.
-
-### Streaming context and `ExecutionPool`
-
-Caller context is carried locally and never serialized by dr-exec:
-
-```python
-ContextT = TypeVar("ContextT")
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionSubmission(Generic[ContextT]):
-    job: ExecutionJob
-    context: ContextT
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionCompletion(Generic[ContextT]):
-    completed_execution: CompletedExecution
-    context: ContextT
-```
-
-`ExecutionPool` is mutable lifecycle state and therefore is not a dataclass:
-
-```python
-class ExecutionPool:
-    _executor: Executor
-    _config: ExecutionPoolConfig
-    _effective_capacity: EffectivePoolCapacity | None
-    _state: ExecutionPoolState
-    _scheduler: _ExecutionScheduler | None
-
-    def __init__(
-        self,
-        *,
-        executor: Executor,
-        config: ExecutionPoolConfig,
-    ) -> None:
-        ...
-
-    @property
-    def effective_capacity(self) -> EffectivePoolCapacity:
-        ...
-
-    async def __aenter__(self) -> ExecutionPool:
-        ...
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        ...
-
-    async def run_stream(
-        self,
-        submissions: AsyncIterable[ExecutionSubmission[ContextT]],
-        /,
-    ) -> AsyncIterator[ExecutionCompletion[ContextT]]:
-        ...
-
-    async def drain(self) -> None:
-        ...
-
-    async def abort(self) -> None:
-        ...
-```
-
-For every available slot, `run_stream()` requests one submission, calls the
-blocking `Executor.run()` under one bounded parent-side supervisor, yields the
-completion in completion order, and then requests the next submission. It does
-not eagerly consume the async iterable. Completed-result buffering is also
-bounded, so a slow consumer eventually applies backpressure.
-
-Each execution gets a fresh child process. The pool reuses scheduling capacity,
-not interpreters or child processes, and it never adds a `ProcessPoolExecutor`
-around the subprocess engine. Ordinary per-job failures remain completion data
-and do not terminate the stream; a scheduler-wide failure breaks the pool.
-
-Normal closure stops intake and drains active jobs. `abort()` stops intake and
+unavoidable operating-system limits remain mandatory. The request has no hidden
+second byte cap: its known canonical length is checked against the caller's
+input budget and also supplies the decoder's safe materialization bound.
+
+A finite output declaration allocates its entire retained-byte total across the
+stdout head, stdout tail, stderr head, and stderr tail. That allocation makes
+retention deterministic and independent of drain scheduling. If aggregate
+production remains within the limit, every byte is retained. Fail-on-overflow
+uses the same total as a termination threshold; marked truncation continues
+draining and counting through EOF while retaining no more than the declared
+total.
+
+Finite protocol volume or structural limits map overflow to a protocol failure
+while preserving earlier accepted outputs. Exhausted manifest, narration, or
+recording-detail limits degrade observability without replacing the run outcome.
+Finite startup, termination, and join values provide watchdog and escalation
+deadlines; explicitly unbudgeted time axes carry no bounded-return guarantee.
+
+### Execution sharing, pool capacity, and lifecycle
+
+One execution job is the independent scheduling and setup-sharing boundary. The
+caller chooses the work that shares runtime setup, scratch space, and one child
+lifetime; dr-exec chooses how many independent jobs are active. Every job uses
+one scheduling slot and a fresh child process. The pool reuses scheduling
+capacity, not interpreters or child processes, and does not wrap the subprocess
+engine in another process pool.
+
+Automatic capacity resolves once when a pool opens from the usable CPU count,
+with at least one active slot. Fixed capacity uses a caller-selected positive
+slot count. Heterogeneous weighted jobs are outside v1. Effective capacity and
+the single-native-thread policy are recorded. The production path adds standard
+numeric-library thread limits to resolved job environments; an incompatible
+caller value is a declaration error rather than an implicit override. This
+controls known oversubscription but does not enforce CPU use by arbitrary
+payload code.
+
+Admission is bounded by active capacity plus explicitly configured prefetch;
+without prefetch, the authoritative backlog stays in the caller or durable
+workflow queue. Streaming intake requests new work only when capacity exists,
+does not eagerly consume its source, and bounds completed-result buffering so a
+slow consumer eventually applies backpressure. Caller context travels with a
+submission and completion but is never serialized by dr-exec.
+
+Completions are yielded in completion order. Ordinary per-job failures remain
+completion data and do not terminate the stream; a scheduler-wide failure
+breaks the pool. Finite iteration uses the same scheduler without materializing
+the input or creating one future, thread, or process per job.
+
+Normal closure stops intake and drains active work. Abort stops intake and
 terminates active process groups under the accepted v1 lifecycle contract. A
 closed pool cannot reopen.
 
-`run_many()` adapts a finite lazy iterable into this same scheduler, drains it,
-and closes the pool. It returns results in completion order with stable job IDs;
-it never materializes the entire input.
-
 ## Core engine behavior
 
-The following details remain v1 obligations independent of the final public
-signatures:
+The following details remain v1 obligations independent of the Python API
+shape:
 
 - Command resolution uses the granted environment's `PATH`. With no granted
   `PATH`, only an absolute executable resolves; a relative executable is a
@@ -1540,8 +547,8 @@ dropped_bytes
 The retained pieces remain structurally separate. The executor does not insert
 a marker or concatenate them as if the omitted bytes had never existed. The
 allocation of a finite aggregate output budget between stdout head, stdout
-tail, stderr head, and stderr tail is pinned by `FiniteOutput` and cannot depend
-on drain-thread scheduling. The fail-on-overflow action may
+tail, stderr head, and stderr tail is pinned by the declaration and cannot
+depend on drain-thread scheduling. The fail-on-overflow action may
 terminate the run, while marked truncation continues draining through EOF; both
 return the retained structural evidence and exact produced/dropped counts.
 
@@ -1552,40 +559,13 @@ line breaks, so LF is an unambiguous frame boundary. The wire permits no BOM,
 blank line, CRLF, leading or trailing whitespace, missing terminal LF, or bytes
 after the completion frame.
 
-The closed v1 frame sequence has this shape:
+The closed v1 wire schema is:
 
-```python
-@verify(UNIQUE)
-class ProtocolFrameKind(StrEnum):
-    PRELUDE = "prelude"
-    OUTPUT = "output"
-    COMPLETE = "complete"
-
-
-class ProtocolPrelude(ContractModel):
-    version: Literal[1] = 1
-    kind: Literal[ProtocolFrameKind.PRELUDE] = ProtocolFrameKind.PRELUDE
-    request_id_sha256: Sha256Digest
-
-
-class ProtocolOutput(ContractModel):
-    version: Literal[1] = 1
-    kind: Literal[ProtocolFrameKind.OUTPUT] = ProtocolFrameKind.OUTPUT
-    sequence: NonNegativeInt
-    document: IdentityDocument
-
-
-class ProtocolComplete(ContractModel):
-    version: Literal[1] = 1
-    kind: Literal[ProtocolFrameKind.COMPLETE] = ProtocolFrameKind.COMPLETE
-    output_count: NonNegativeInt
-
-
-type ProtocolFrame = Annotated[
-    ProtocolPrelude | ProtocolOutput | ProtocolComplete,
-    Field(discriminator="kind"),
-]
-```
+| Frame | Required fields | Meaning |
+| --- | --- | --- |
+| Prelude | `version`: `1`; `kind`: `"prelude"`; `request_id_sha256`: full SHA-256 digest | Opens the stream and binds it to the canonical request identity. |
+| Output | `version`: `1`; `kind`: `"output"`; `sequence`: nonnegative integer; `document`: identity document | Carries one complete, validated domain output at its zero-based position. |
+| Complete | `version`: `1`; `kind`: `"complete"`; `output_count`: nonnegative integer | Terminates the stream and declares the number of output frames. |
 
 Exactly one prelude comes first and echoes the full request-identity digest.
 Zero or more outputs follow with consecutive zero-based sequence numbers.
@@ -1793,16 +773,10 @@ process state.
 
 ### Finite batch execution
 
-`ProcessExecutor.run_many()` accepts a lazy iterable of `ExecutionJob`s. It
-opens one `ExecutionPool`, admits only its active capacity plus bounded
-prefetch, yields `CompletedExecution`s in completion order, drains the finite
-input, and closes. One job failure does not fail fast or erase other results.
-
-Conceptually:
-
-```python
-results = executor.run_many(execution_jobs)
-```
+Finite batch execution consumes jobs lazily through one pool, admits only its
+active capacity plus bounded prefetch, yields completed executions in completion
+order, drains the finite input, and closes. One job failure does not fail fast
+or erase other results.
 
 A caller may produce hundreds of thousands of jobs without materializing the
 collection or creating one future, thread, or process per job.
@@ -1824,33 +798,13 @@ within one sample and bounded parallelism across samples.
 ### Durable streaming worker
 
 A long-lived evaluation worker keeps one `ExecutionPool` open and connects it
-to dr-platform's durable workflow queue:
-
-```python
-async def submissions():
-    while True:
-        lease = await platform.lease_next("human-eval")
-        yield ExecutionSubmission(
-            job=human_eval.execution_job(lease.payload),
-            context=lease,
-        )
-
-
-async with process_executor.open_pool() as pool:
-    async for completion in pool.run_stream(submissions()):
-        await platform.complete_evaluation(
-            lease=completion.context,
-            result=human_eval.interpret(
-                completion.completed_execution.result,
-            ),
-        )
-```
-
-`run_stream()` asks the source for a lease only when local admission capacity
-exists. dr-platform owns the durable backlog, leases, lease renewal, retry
-policy, workflow transitions, and idempotent result publication. The worker
-owns translation between workflow payloads and dr-exec types. dr-exec owns
-local bounded execution and durable per-attempt records.
+to dr-platform's durable workflow queue. The worker leases the next evaluation
+only when local admission capacity exists, translates the workflow payload into
+an execution job, and publishes the interpreted completion idempotently.
+Dr-platform owns the durable backlog, leases, lease renewal, retry policy,
+workflow transitions, and idempotent result publication. The worker owns
+translation between workflow payloads and dr-exec values. Dr-exec owns local
+bounded execution and durable per-attempt records.
 
 The integration assumes at-least-once delivery. Stable `JobId`s, distinct
 `AttemptId`s, and idempotent workflow completion prevent a retried lease from
