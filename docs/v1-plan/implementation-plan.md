@@ -53,9 +53,10 @@
 - Treat agreed implementation scope as a ceiling. Audit and review findings are
   evidence to triage, not authority to add behavior, guarantees, abstractions,
   validation, or hardening.
-- Make only the minimal correction required for an agreed behavior to remain
-  truthful. Prefer weakening an immature guarantee, simplifying the model, or
-  documenting a limitation over adding premature machinery.
+- Treat agreed guarantees as binding. Make the smallest coherent correction
+  required for agreed behavior to remain truthful and safe. For guarantees not
+  included in the agreed scope, prefer weakening the claim, simplifying the
+  model, or documenting a limitation over adding premature machinery.
 - During autonomous implementation, record scope-expanding recommendations in
   the relevant plan or handoff and surface them in the final report; do not
   silently build them.
