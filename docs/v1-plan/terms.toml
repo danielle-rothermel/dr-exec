@@ -64,11 +64,11 @@ fresh child; work inside the job may be sequential so setup is paid once."""
 [[terms]]
 name = "execution pool"
 definition = """
-The concrete v1 host-local scheduler that keeps at most its effective capacity \
-of independent execution jobs active, bounds completed-result buffering to the \
-same capacity, applies backpressure to its source, and yields completions in \
-completion order. It reuses scheduling capacity, never child processes or \
-interpreters."""
+The concrete v1 host-local scheduler that keeps running/admitted job submissions \
+and completed-but-undelivered submissions within one shared resident bound equal \
+to its effective capacity, applies backpressure to its source, and yields \
+completions in completion order. It reuses scheduling capacity, never child \
+processes or interpreters."""
 
 [[terms]]
 name = "execution protocol"

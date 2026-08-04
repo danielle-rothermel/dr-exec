@@ -299,7 +299,7 @@ The job shape lets domain code amortize compilation, loading, and interpreter \
 startup across related internal work while dr-exec controls concurrency across \
 independent jobs without reusing poisonable child state."""
 enforcement_modes = ["constructed_invariant"]
-enforcement = "Executor.run maps each ExecutionJob to one fresh child and one CompletedExecution, ExecutionPool bounds admitted jobs and completed-result buffering to its effective capacity, and callers choose another sharing boundary by constructing another job."
+enforcement = "Executor.run maps each ExecutionJob to one fresh child and one CompletedExecution, ExecutionPool keeps running/admitted job submissions and completed-but-undelivered submissions within one shared resident bound equal to its effective capacity, and callers choose another sharing boundary by constructing another job."
 
 [[extensions]]
 parent_title = "Containment profiles are mechanism-independent and fail closed"
