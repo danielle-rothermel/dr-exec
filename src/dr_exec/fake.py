@@ -4,13 +4,16 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from threading import Lock
 
+from dr_exec.cancel import CancelToken
 from dr_exec.declare import ExecutionJob
 from dr_exec.record import CompletedExecution
 
 
 class FakeExecutor:
     _responses: deque[CompletedExecution]
-    _responder: Callable[[ExecutionJob], CompletedExecution] | None
+    _responder: (
+        Callable[[ExecutionJob, CancelToken | None], CompletedExecution] | None
+    )
     _calls: list[ExecutionJob]
     _lock: Lock
 
@@ -18,7 +21,10 @@ class FakeExecutor:
         self,
         responses: Iterable[CompletedExecution] = (),
         *,
-        responder: Callable[[ExecutionJob], CompletedExecution] | None = None,
+        responder: (
+            Callable[[ExecutionJob, CancelToken | None], CompletedExecution]
+            | None
+        ) = None,
     ) -> None:
         response_items = tuple(responses)
         if response_items and responder is not None:
@@ -32,6 +38,8 @@ class FakeExecutor:
         self,
         job: ExecutionJob,
         /,
+        *,
+        cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         raise NotImplementedError("FakeExecutor.run is not implemented")
 

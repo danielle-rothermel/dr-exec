@@ -10,6 +10,18 @@
 - **Deferred:** robustness, portability, and extension work without a current
   contract requirement.
 
+## Explicitly excluded from this stack
+
+- Package-level throughput benchmark; measure the first representative domain
+  integration instead.
+- Pool prefetch; source intake and resident work are bounded by active capacity.
+- Automatic numerical-library thread environment policy; callers own it through
+  explicit environment grants.
+- Public dr-serialize conformance-corpus API or packaged vectors; dr-serialize
+  keeps internal golden coverage.
+- Exhaustive causal attribution proof; v1 records best-effort diagnostic
+  classification from available evidence.
+
 ## Implementation rules
 
 - Build from the canonical source API; do not carry forward alternate public
@@ -28,6 +40,17 @@
 - Preserve useful failure scenarios as requirements; rederive code and tests
   against the canonical contracts instead of transplanting incompatible
   implementations.
+- Treat agreed implementation scope as a ceiling. Audit and review findings are
+  evidence to triage, not authority to add behavior, guarantees, abstractions,
+  validation, or hardening.
+- Make only the minimal correction required for an agreed behavior to remain
+  truthful. Prefer weakening an immature guarantee, simplifying the model, or
+  documenting a limitation over adding premature machinery.
+- During autonomous implementation, record scope-expanding recommendations in
+  the relevant plan or handoff and surface them in the final report; do not
+  silently build them.
+- Stop and report a blocker when truthful or safe implementation requires
+  authority beyond the agreed scope.
 - Maintain one open implementation stack.
 
 ## Prerequisite: dr-serialize
@@ -51,14 +74,9 @@ Implement and release only the capabilities specified in
    - exactly 64 lowercase hexadecimal characters;
    - explicit parse failure;
    - compatible with existing full-hash APIs.
-4. **Reusable conformance vectors**
-   - canonical text;
-   - canonical bytes;
-   - identity bytes;
-   - full hashes.
-
 Non-goals:
 
+- public conformance-corpus API or packaged vector data;
 - execution models;
 - Pydantic base models/codecs;
 - NDJSON scanning or protocol state;
@@ -163,7 +181,7 @@ Implement one private execution path for every target:
 - deterministic structural head/tail retention;
 - finite supported workload budgets;
 - reject finite memory, CPU, process, file-size, open-file, and disk budgets;
-- pinned attribution precedence;
+- best-effort attribution with documented limits;
 - group-targeted teardown and direct-child reaping;
 - scratch cleanup;
 - mandatory run-store lifecycle;
@@ -189,6 +207,7 @@ Implement:
 - thread-safe scripted response queue;
 - optional declaration-dependent responder, mutually exclusive with queued
   responses;
+- responder access to the call's cancellation token;
 - immutable call capture;
 - declaration validation parity;
 - fake record receipt enforcement;
@@ -218,63 +237,38 @@ Required behavior:
 - automatic capacity resolved once from usable CPUs;
 - fixed positive capacity;
 - one active slot per job;
-- bounded prefetch;
 - bounded completion buffering;
-- one resident bound covering running, ready, and completed-but-undelivered
-  submissions;
+- one resident bound covering running and completed-but-undelivered
+  submissions, capped by capacity;
 - lazy finite input;
 - capacity-driven streaming intake;
 - completion-order delivery;
 - ordinary per-job failures as completion data;
 - scheduler-wide failure as pool failure;
 - normal drain;
-- abort with active process-group termination;
-- zero-prefetch durable-worker mode;
-- private shipped-executor cancellation hook without widening the public
-  one-method `Executor` Protocol;
+- one `CancelToken` per active call;
+- `Executor.run(..., cancellation=...)` as the single public cancellation
+  boundary;
+- abort stops intake, cancels active tokens, and waits for executor teardown;
+- pre-spawn cancellation records a `CancelledOutcome` without spawning;
+- post-spawn cancellation performs group-targeted teardown and direct-child
+  reaping before returning `CancelledOutcome`;
 - closed-pool finality;
 - caller context preserved in memory only;
-- one native numeric-library thread per job.
+- no automatic numeric-library environment policy.
 
 Verify with deterministic gates:
 
 - active count never exceeds capacity;
-- intake never exceeds capacity plus prefetch;
+- intake never exceeds capacity;
 - slow consumers apply backpressure;
 - completions arrive in completion order;
 - per-job failure does not fail the stream;
 - drain accepts no new work and completes active work;
 - abort terminates active work;
+- pre-spawn and post-spawn cancellation produce recorded terminal outcomes;
 - no future, thread, or process per queued job;
 - sync and async entry points share scheduler semantics.
-
-### PR 7: throughput qualification
-
-Add a reproducible, domain-shaped benchmark without domain types:
-
-- one job compiles/loads one generated sample once;
-- the child runs its cheap internal cases sequentially;
-- independent jobs run concurrently;
-- input is lazy and substantially larger than pool capacity.
-
-Record:
-
-- jobs per second;
-- internal cases per second;
-- active-job high-water mark;
-- prefetched/queued high-water mark;
-- child-startup share;
-- peak memory;
-- effective capacity and native-thread policy.
-
-Acceptance:
-
-- benchmark input requires an explicit representative upstream
-  sample-production rate and reports pass/fail against it;
-- no acceptance claim is made until that product input is pinned;
-- no scheduler-created unbounded process, thread, queue, or result growth;
-- every job produces one completion and one durable attempt record;
-- no container, provisioned runtime, or process per internal test case.
 
 ## Delivery sequence
 
@@ -283,9 +277,11 @@ Acceptance:
 3. Build the dr-exec PRs in order; keep reviews non-blocking while stacking.
 4. Run adversarial review per PR and exact-tip validation at stack completion.
 5. Release dr-serialize; replace local source with released pin.
-6. Run full dr-exec qualification and throughput benchmark.
+6. Run full dr-exec qualification.
 7. Release dr-exec.
-8. Integrate consumers only through the released pin.
+8. Integrate consumers only through the released pin; measure throughput in the
+   first representative domain integration and report optimization or
+   hardening recommendations separately.
 
 ## Review checkpoints
 
@@ -294,5 +290,3 @@ Acceptance:
   injection.
 - **After PR 4:** one real run satisfies the full call-scoped lifecycle.
 - **After PR 6:** finite and streaming scheduling remain bounded.
-- **After PR 7:** the representative workload satisfies the product acceptance
-  criterion.

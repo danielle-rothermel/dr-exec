@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from dr_exec.cancel import CancelToken
 from dr_exec.declare import ExecutionJob, UntrustedPythonTarget
 from dr_exec.record import (
     CompletedExecution,
@@ -21,6 +22,8 @@ class Executor(Protocol):
         self,
         job: ExecutionJob,
         /,
+        *,
+        cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         raise NotImplementedError
 

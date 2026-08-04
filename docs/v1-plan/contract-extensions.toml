@@ -199,19 +199,21 @@ absence, crash, kill, timeout, overflow, and nonzero exit into unusable \
 control flow. Raw outcome data plus explicit policy keeps domain \
 interpretation with the caller while preserving retry and debugging evidence."""
 parent_date = "2026-07-31"
-title = "Recognized outcomes and pinned attribution"
+title = "Recognized outcomes and best-effort attribution"
 statement = """
 V1 returns `CompletedExecution` containing an `ExecutionResult` for every \
 trustworthy recognized execution outcome, including spawn absence, budgets, \
 protocol failure, cancellation, signals, and ordinary exit statuses; it raises \
 only for invalid pre-spawn declarations or machinery failure that prevents a \
-trustworthy result, and assigns exactly one attribution in pinned precedence."""
+trustworthy result. It records one best-effort attribution classification from \
+available evidence; the classification is diagnostic data, not causal proof or \
+a retry guarantee."""
 rationale = """
 A single modeled outcome boundary preserves distinctions consumers need for \
-scoring and retry while leaving exit-status meaning in the caller's declared \
-policy."""
+scoring while leaving exit-status meaning in the caller's declared policy and \
+avoiding a stronger causal claim than process-boundary evidence can support."""
 enforcement_modes = ["validation_rejection", "modeled_outcome", "runtime_guarantee"]
-enforcement = "Declaration validation raises before spawn, recognized spawn and child outcomes construct a result, machinery failures without trustworthy evidence raise, and one post-teardown attribution is selected from recorded evidence."
+enforcement = "Declaration validation raises before spawn, recognized spawn and child outcomes construct a result, machinery failures without trustworthy result evidence raise, and post-teardown attribution is selected from recorded evidence without claiming causal completeness."
 
 [[extensions]]
 parent_title = "Output delivery modes are explicit"
@@ -297,7 +299,7 @@ The job shape lets domain code amortize compilation, loading, and interpreter \
 startup across related internal work while dr-exec controls concurrency across \
 independent jobs without reusing poisonable child state."""
 enforcement_modes = ["constructed_invariant"]
-enforcement = "Executor.run maps each ExecutionJob to one fresh child and one CompletedExecution, ExecutionPool bounds concurrent jobs and prefetch, and callers choose another sharing boundary by constructing another job."
+enforcement = "Executor.run maps each ExecutionJob to one fresh child and one CompletedExecution, ExecutionPool bounds admitted jobs and completed-result buffering to its effective capacity, and callers choose another sharing boundary by constructing another job."
 
 [[extensions]]
 parent_title = "Containment profiles are mechanism-independent and fail closed"

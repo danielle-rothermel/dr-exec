@@ -188,17 +188,6 @@ Verification covers exact valid boundaries, every non-hexadecimal class,
 uppercase input, lengths 63 and 65, display-prefix rejection, and round trips
 through the existing full-hash functions.
 
-## Qualification addition: reusable conformance vectors
-
-Dr-serialize publishes a small immutable canonical/identity conformance corpus
-as package data available through a documented public loader. The corpus pins
-representative input together with canonical text, canonical bytes, and full
-digest outputs.
-
-This prevents each package from copying canonicalization logic. Dr-exec still
-owns separate goldens for its models, identity payloads, protocol frames, and
-records and calls only the public dr-serialize implementation.
-
 ## Explicit non-goals for dr-serialize
 
 The v1 integration does not add any of the following to dr-serialize:
@@ -212,7 +201,8 @@ The v1 integration does not add any of the following to dr-serialize:
 - path containment, sidecar layout, file hashing, atomic writes, fsync, or
   same-filesystem replacement;
 - Parquet, Arrow, NumPy, tensor, or other bulk domain formats;
-- schema registries or migrations; or
+- schema registries or migrations;
+- a public conformance-corpus loader or packaged vector data; or
 - the future verified-runtime tree-digest algorithm.
 
 Those behaviors derive meaning from execution, persistence, or a consuming
@@ -250,7 +240,7 @@ bytes remain dr-exec golden contracts under a pinned Pydantic release.
    without changing existing text or hash results.
 2. Implement the bounded strict decoder and its adversarial test matrix.
 3. Implement the validated full SHA-256 value.
-4. Publish the conformance vectors as package data and release dr-serialize.
+4. Release dr-serialize with internal golden coverage for the shared behavior.
 5. Pin that release and Pydantic in dr-exec before implementing its boundary
    models, protocol codec, or record codec.
 

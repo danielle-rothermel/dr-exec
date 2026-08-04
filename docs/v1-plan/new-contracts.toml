@@ -73,9 +73,11 @@ title = "One bounded execution pool owns host utilization"
 statement = """
 V1 makes `ExecutionJob` the only independently schedulable work unit and \
 `ExecutionPool` the concrete host-local concurrency owner. Automatic capacity \
-resolves once from usable CPUs, active jobs and prefetch remain bounded, finite \
+resolves once from usable CPUs, admitted jobs remain bounded by capacity, finite \
 and streaming inputs share the same scheduler, and every attempt receives one \
-fresh child."""
+fresh child. `Executor.run` accepts one optional call-scoped `CancelToken`; pool \
+abort stops intake, cancels every active token, and waits for each executor call \
+to complete its declared teardown before closing."""
 rationale = """
 Large HumanEval-style workflows must compile or load each generated sample once, \
 run its internal tests sequentially, and evaluate many samples concurrently \
@@ -83,7 +85,7 @@ without creating one container, process, thread, or future per internal test or 
 queued job."""
 date = "2026-08-03"
 enforcement_modes = ["constructed_invariant", "runtime_guarantee", "governance"]
-enforcement = "run_many and run_stream delegate to ExecutionPool; running, ready, and completed-but-undelivered submissions share one capacity-plus-prefetch resident bound; durable workers use zero prefetch; the source is pulled only when capacity exists; worker telemetry and the release benchmark record effective capacity and resource high-water marks; and qualification compares measured throughput with an explicit representative upstream rate."
+enforcement = "run_many and run_stream delegate to ExecutionPool; running and completed-but-undelivered submissions share one capacity-sized resident bound; the source is pulled only when capacity exists; pre-spawn and post-spawn cancellation run shared Executor conformance cases; abort waits for cancelled calls to return terminal outcomes after teardown; and representative throughput is measured in the first domain integration rather than by a v1 package benchmark."
 
 [[contracts]]
 title = "Python request and protocol transports are exact"

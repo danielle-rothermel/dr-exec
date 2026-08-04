@@ -205,6 +205,8 @@ Next boundary:
   and canonicalized by dr-exec.
 - Required shared additions and qualification:
   [dr-serialize additions](dr-serialize-additions.md).
+- Shared behavior is pinned by dr-serialize's internal goldens; v1 does not add
+  a public conformance-corpus loader or packaged vector data.
 - Forbidden completion state: dr-exec codec or record code depends on an
   unreleased sibling checkout or locally duplicates a proposed shared
   capability.
@@ -406,6 +408,8 @@ frame, identity, and record model under exact pinned dependency releases.
 ### Executor
 
 - One blocking, thread-safe operation per complete attempt.
+- One optional call-scoped `CancelToken`; cancellation is cooperative at the
+  Protocol boundary and lifecycle-enforced by each conforming implementation.
 - Production sequence:
   1. validate declaration;
   2. prepare durable state;
@@ -447,7 +451,7 @@ frame, identity, and record model under exact pinned dependency releases.
 - Validates declarations.
 - Records immutable calls.
 - Selects behavior from the complete declaration through an optional responder
-  callable.
+  callable that receives the job and its cancellation token.
 - Supports an in-order scripted-result queue as a mutually exclusive
   convenience.
 - Returns scripted results.
@@ -461,7 +465,9 @@ frame, identity, and record model under exact pinned dependency releases.
 
 - Resolve and validate absolute executable at construction.
 - Run one fixed construction-time `-I` probe and retain its runtime record.
-- Prepare fixed `<executable> -I -c <driver-source>` command.
+- Prepare fixed `<executable> -I -c <library-wrapper-source>` command; the
+  wrapper embeds the declared consumer `driver_source` as data, opens the
+  protocol handle, decodes the request, resolves `dr_exec_main`, and invokes it.
 - Do not:
   - spawn per preparation or payload invocation;
   - choose budgets;
@@ -658,15 +664,17 @@ framing, configured-limit, identity, duplicate-key, and incomplete-stream case.
   - relative executable without `PATH`: pre-spawn declaration error;
   - spawn `ENOENT`: spawn absence;
   - other spawn errors: preserve errno; machine attribution.
-- **Attribution precedence after teardown:**
+- **Best-effort attribution precedence after teardown:**
   1. spawn absence;
   2. output budget;
   3. wall-clock budget;
   4. exit-status interpretation.
-- **Attribution meaning:** outcome carries the failure category; `owner` names
-  the responsible actor. Budget and malformed child-protocol outcomes are
-  payload-owned, spawn absence is machine-owned, and executor/bootstrap
-  machinery failures raise when no trustworthy result exists.
+- **Attribution meaning:** outcome carries the observed failure category;
+  `owner` is a best-effort diagnostic classification, not causal proof or a
+  retry guarantee. Evidence selects among payload, executor, and machine; when
+  evidence is insufficient, the existing executor fallback remains explicitly
+  non-probative. Executor/bootstrap machinery failures raise when no trustworthy
+  result exists.
 - **Race rule:** recorded output violation beats deadline or clean exit.
 - **Timing:**
   - duration: spawn through reap; monotonic clock;
@@ -704,7 +712,7 @@ framing, configured-limit, identity, duplicate-key, and incomplete-stream case.
   pool-session reference.
 - External ownership:
   - dr-platform: workflow and lease context;
-  - worker telemetry/release benchmark: host scheduling observations.
+  - worker telemetry/domain integration: host scheduling observations.
 
 ### Secret-safe durable evidence
 
@@ -876,27 +884,19 @@ Synchronization rules:
   - amortize compile/load/interpreter startup across cases sharing one sample;
   - evaluate independent samples concurrently;
   - bound machine-level concurrency;
-  - exceed upstream LLM sample-production rate on representative workload;
   - avoid scheduler-created unbounded process, thread, queue, or result growth;
   - preserve every per-sample result and record.
-- **Unbudgeted exposure:** per-run data may exhaust memory/disk; benchmark makes
-  exposure measurable; policy is not capacity protection.
+- **Unbudgeted exposure:** per-run data may exhaust memory/disk; policy is not
+  capacity protection.
 - **Automatic failure of criterion:**
   - container/provisioned environment per sample;
   - process per test case;
   - sequential outer sample stream;
   - full-sweep materialization before progress;
   - consumer must rebuild admission/concurrency control.
-- **Release benchmark outputs:**
-  - samples/second;
-  - cases/second;
-  - active-request high-water mark;
-  - queued-request high-water mark;
-  - child-startup share;
-  - peak memory;
-  - effective concurrency configuration.
-- **Reproducibility:** pin representative suite cost and upstream production
-  rate; do not infer acceptance from synthetic process-start timing.
+- **Performance qualification:** measure the representative workload in its
+  first domain integration; report optimization or hardening recommendations
+  separately instead of adding a package benchmark to v1.
 
 ### Execution job
 
@@ -928,22 +928,17 @@ Synchronization rules:
   - minimum one active slot.
 - Fixed capacity: caller-selected positive slot count.
 - Heterogeneous weighted jobs: outside v1.
-- Record effective capacity and single-native-thread policy.
-- Numeric-library thread limits:
-  - production path adds standard limits to resolved job environment;
-  - incompatible caller value is declaration error;
-  - controls known oversubscription only;
-  - does not enforce arbitrary payload CPU usage.
-- Admission bound: active capacity plus explicit prefetch.
-- No prefetch: authoritative backlog stays with caller/durable workflow.
+- Record effective capacity.
+- Numeric-library thread policy: caller-owned through the explicit environment
+  grant; dr-exec does not inject or reject numerical-library settings.
+- Admission bound: active capacity.
+- Authoritative backlog stays with the caller or durable workflow.
 - Streaming intake: request work only when capacity exists.
 - Completion buffering: bounded; slow consumer eventually backpressures intake.
-- Resident scheduling bound: running plus ready plus completed-but-undelivered
-  submissions never exceeds active capacity plus explicit prefetch.
+- Resident scheduling bound: running plus completed-but-undelivered submissions
+  never exceeds active capacity.
 - A completed result continues to occupy that bound until delivered; completion
   does not admit replacement work when the bound is full.
-- Durable workflow workers use zero prefetch so unstarted authoritative work
-  remains in the workflow queue.
 - Caller context: travels with submission/completion; never serialized by
   dr-exec.
 
@@ -958,20 +953,21 @@ Synchronization rules:
   - no full materialization;
   - no future/thread/process per job.
 - Normal close: stop intake; drain active work.
-- Abort: stop intake; discard only explicitly prefetched ephemeral submissions;
-  invoke the shipped executor's private cancellation hook for active calls;
-  terminate active groups under the v1 lifecycle contract; wait for worker
-  calls to reach terminal outcomes; then close.
-- Pool abort qualification applies to the shipped process and fake executors.
-  The one-method public `Executor` Protocol remains the direct-call substitution
-  boundary; an alternative executor needs the private pool-cancellation hook to
-  participate in the concrete v1 pool.
+- Cancellation boundary: `Executor.run()` accepts one optional `CancelToken`;
+  the pool creates one token per active call, and every supported executor runs
+  the shared cancellation conformance cases.
+- Pre-spawn cancellation: finalize a recorded `CancelledOutcome` without
+  spawning.
+- Post-spawn cancellation: perform group-targeted teardown, reap the direct
+  child, finalize the record, and return `CancelledOutcome`.
+- Abort: stop intake, cancel every active token, wait for executor calls to
+  finish required teardown, then close.
 - Closed pool: cannot reopen.
 
 ### Finite batch
 
 - Consume lazily through one pool.
-- Admit active capacity plus bounded prefetch only.
+- Admit active capacity only.
 - Yield in completion order.
 - Drain finite input; then close.
 - One job failure never fails fast or erases other results.

@@ -52,14 +52,17 @@ enforcement = "No v1 public entry point returns a live child handle or offers pe
 title = "Supervised interaction and shutdown"
 statement = """
 V1 excludes supervised interactions, protocol cancellation, incremental \
-supervised output, drain, stop, and external-deadline shutdown orchestration."""
+supervised output, per-request child-protocol cancellation, stop, and \
+external-deadline shutdown orchestration. One call-scoped `CancelToken` supports \
+direct-call cancellation and pool abort without creating a supervised child \
+interaction surface."""
 rationale = """
 Interaction, drain, and stop have distinct ownership and budget semantics that \
 cannot be represented faithfully by exposing fragments of call-scoped \
 termination."""
 related_contracts = ["Supervision separates interaction, drain, and stop"]
 enforcement_modes = ["scope_exclusion"]
-enforcement = "The v1 API has no supervised interaction, cancellation, drain, stop, or external-deadline operation."
+enforcement = "The v1 API exposes no live child handle, supervised interaction, child-protocol cancel message, stop operation, or external-deadline orchestration; Executor.run accepts only the call-scoped cancellation token used by direct callers and ExecutionPool abort."
 
 [[exclusions]]
 title = "Fleet execution"

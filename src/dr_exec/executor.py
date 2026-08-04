@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
+from dr_exec.cancel import CancelToken
 from dr_exec.declare import ExecutionJob, ExecutorSelfBudgets
 from dr_exec.pool import ExecutionPool, ExecutionPoolConfig
 from dr_exec.protocols import RunStore, Runtime
@@ -21,6 +22,8 @@ class ProcessExecutor:
         self,
         job: ExecutionJob,
         /,
+        *,
+        cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         raise NotImplementedError("ProcessExecutor.run is not implemented")
 

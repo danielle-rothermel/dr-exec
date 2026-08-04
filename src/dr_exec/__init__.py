@@ -1,5 +1,6 @@
 """Public dr-exec v1 capability and data-contract surface."""
 
+from dr_exec.cancel import CancelToken
 from dr_exec.declare import (
     Budgets,
     ByteBudget,
@@ -122,6 +123,7 @@ __all__ = [
     "BudgetExceededOutcomeRecord",
     "Budgets",
     "ByteBudget",
+    "CancelToken",
     "CancelledOutcome",
     "CancelledOutcomeRecord",
     "CapacitySource",

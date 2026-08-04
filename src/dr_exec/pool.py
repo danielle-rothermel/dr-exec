@@ -3,9 +3,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Generic, Literal, TypeVar, cast
+from typing import Generic, TypeVar, cast
 
-from pydantic import NonNegativeInt, PositiveInt
+from pydantic import PositiveInt
 
 from dr_exec._model import ContractModel
 from dr_exec.declare import ExecutionJob
@@ -38,19 +38,12 @@ type PoolCapacity = AutoPoolCapacity | FixedPoolCapacity
 @dataclass(frozen=True, slots=True)
 class ExecutionPoolConfig:
     capacity: PoolCapacity = field(default_factory=AutoPoolCapacity)
-    max_prefetched_jobs: int = 0
-
-    def __post_init__(self) -> None:
-        if self.max_prefetched_jobs < 0:
-            raise ValueError("max_prefetched_jobs must be nonnegative")
 
 
 class EffectivePoolCapacity(ContractModel):
     source: CapacitySource
     cpu_count: PositiveInt
     max_active_jobs: PositiveInt
-    max_prefetched_jobs: NonNegativeInt
-    native_threads_per_job: Literal[1] = 1
 
 
 ContextT = TypeVar("ContextT")

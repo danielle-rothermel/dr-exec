@@ -65,8 +65,8 @@ fresh child; work inside the job may be sequential so setup is paid once."""
 name = "execution pool"
 definition = """
 The concrete v1 host-local scheduler that keeps at most its effective capacity \
-of independent execution jobs active, bounds prefetch and completed-result \
-buffering, applies backpressure to its source, and yields completions in \
+of independent execution jobs active, bounds completed-result buffering to the \
+same capacity, applies backpressure to its source, and yields completions in \
 completion order. It reuses scheduling capacity, never child processes or \
 interpreters."""
 
