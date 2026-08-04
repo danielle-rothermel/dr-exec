@@ -10,6 +10,16 @@
 - **Deferred:** robustness, portability, and extension work without a current
   contract requirement.
 
+### Progress
+
+| Work item | Status | Current state |
+| --- | --- | --- |
+| High-level planning | **Finished** | Merged in PR #3; this document is committed on `main`. |
+| Canonical API scaffold | **Finished** | Published and green in open PR #9. |
+| Dr-serialize prerequisite | **In progress** | Isolated implementation worktree exists; scope alignment and publication remain. |
+| Dr-exec PRs 1–6 | **Not started** | Begin after the dr-serialize prerequisite is published. |
+| Representative performance measurement | **Deferred** | Run during the first domain integration; not a v1 package PR. |
+
 ## Explicitly excluded from this stack
 
 - Package-level throughput benchmark; measure the first representative domain
@@ -53,7 +63,7 @@
   authority beyond the agreed scope.
 - Maintain one open implementation stack.
 
-## Prerequisite: dr-serialize
+## Prerequisite: dr-serialize — in progress
 
 Implement and release only the capabilities specified in
 [dr-serialize additions](dr-serialize-additions.md):
@@ -74,6 +84,7 @@ Implement and release only the capabilities specified in
    - exactly 64 lowercase hexadecimal characters;
    - explicit parse failure;
    - compatible with existing full-hash APIs.
+
 Non-goals:
 
 - public conformance-corpus API or packaged vector data;
@@ -90,7 +101,7 @@ dependency with the released pin before declaring v1 complete.
 
 ## Dr-exec implementation stack
 
-### PR 1: serialization, identities, and runtime preparation
+### PR 1: serialization, identities, and runtime preparation — not started
 
 Implement:
 
@@ -112,7 +123,7 @@ Verify:
 - secret-bearing values absent from projections;
 - public API import and model validation.
 
-### PR 2: directory run store
+### PR 2: directory run store — not started
 
 Implement:
 
@@ -137,7 +148,7 @@ Verify:
 - concurrent collision-free writers;
 - malformed/mismatched record rejection.
 
-### PR 3: protected Python request and protocol
+### PR 3: protected Python request and protocol — not started
 
 Implement:
 
@@ -163,7 +174,7 @@ Verify:
 - exact finite frame/aggregate/count/depth edges;
 - unbudgeted policy without a hidden finite limit.
 
-### PR 4: single-run macOS engine
+### PR 4: single-run macOS engine — not started
 
 Implement one private execution path for every target:
 
@@ -200,7 +211,7 @@ Verify:
 - no returned result before required teardown/reap completes.
 - finite join exhaustion raises without manufacturing a trustworthy result.
 
-### PR 5: fake executor and conformance
+### PR 5: fake executor and conformance — not started
 
 Implement:
 
@@ -223,7 +234,7 @@ Verify:
 - no scratch workspace, process, or real record creation;
 - production and fake declaration-validation parity.
 
-### PR 6: execution pool, finite batch, and streaming
+### PR 6: execution pool, finite batch, and streaming — not started
 
 Implement one scheduler core used by:
 
