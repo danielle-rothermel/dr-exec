@@ -307,7 +307,8 @@ dr-exec or domain boundary model
 ```text
 bounded bytes acquired by dr-exec
   -> dr-serialize bounded strict JSON decode
-  -> dr-exec Pydantic model or frame validation
+  -> dr-serialize canonical re-encode and byte-for-byte equality check
+  -> dr-exec strict Pydantic JSON-mode validation of the same original bytes
   -> dr-exec protocol, identity, and lifecycle validation
 ```
 
@@ -320,6 +321,11 @@ bounded bytes acquired by dr-exec
   - non-finite numbers;
   - malformed or trailing data;
   - depth overflow.
+- Dr-exec canonicalizes the decoded `Jsonable` only to verify byte-for-byte
+  equality with the original input. It passes those same verified original
+  bytes to `model_validate_json(..., strict=True)` or
+  `TypeAdapter.validate_json(..., strict=True)`; it never passes the decoded
+  `Jsonable` to Pydantic Python-mode validation.
 - Dr-exec translates shared failures into its closed protocol or record-load
   taxonomy.
 - Dr-exec additionally validates:
@@ -339,7 +345,7 @@ bounded bytes acquired by dr-exec
 - **Request/result document:** identity document only when schema, version, and
   payload define the boundary.
 - **Record manifest:** closed, versioned dr-exec model; canonical-byte path;
-  lifecycle validation after decode/model validation.
+  lifecycle validation after strict JSON-mode model validation.
 - **Payload stdout/stderr:** raw bytes; direct sidecar writes; exact lengths;
   streaming SHA-256; no JSON normalization.
 - **Bulk domain formats:** outside generic JSON lane; adapter records media
@@ -511,7 +517,9 @@ qualification measures that cost before v1 acceptance.
   length prefix, delimiter, or trailing LF.
 - Before spawn: compare canonical length with workload input budget.
 - Measurement: canonical length is recorded input bytes.
-- Driver: read through EOF; bounded strict decode; identity validation.
+- Driver: read through EOF; bounded strict decode and canonical byte
+  verification; strict Pydantic JSON-mode identity validation of the same
+  original bytes.
 - Invalid request: no protocol output.
 
 ### Driver protocol handle
@@ -645,7 +653,8 @@ protocol.
   2. strict decode;
   3. canonical re-encode;
   4. require byte-for-byte equality;
-  5. validate closed Pydantic frame model.
+  5. validate the closed Pydantic frame model from the same original frame
+     bytes in strict JSON mode.
 - Never head/tail truncate protocol bytes.
 - Any protocol failure preserves previously accepted complete outputs.
 - Domain owns result completeness; dr-exec never synthesizes missing outputs.

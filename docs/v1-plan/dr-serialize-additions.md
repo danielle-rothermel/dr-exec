@@ -146,8 +146,11 @@ record-load errors at its own boundary.
 The decoder consumes one complete JSON value. It does not scan NDJSON streams,
 find frame boundaries, enforce frame order, understand Pydantic models, select a
 schema, or validate domain completeness. Dr-exec first acquires one bounded
-complete frame or manifest, then calls this decoder, then applies its own
-`TypeAdapter` or model validation.
+complete frame or manifest, calls this decoder and canonical re-encoding to
+verify the original bytes, then passes those same original bytes to its own
+`model_validate_json(..., strict=True)` or
+`TypeAdapter.validate_json(..., strict=True)`. The decoded `Jsonable` is
+verification material, not input to Pydantic Python-mode validation.
 
 ### Verification
 
@@ -225,7 +228,8 @@ The validated read path is:
 ```text
 bounded bytes acquired by dr-exec
   -> dr-serialize strict bounded JSON decode
-  -> dr-exec Pydantic model or frame validation
+  -> dr-serialize canonical re-encode and byte-for-byte equality check
+  -> dr-exec strict Pydantic JSON-mode validation of the same original bytes
   -> dr-exec protocol, identity, or lifecycle semantics
 ```
 
