@@ -342,8 +342,8 @@ title = "Exact fake behavior and testing ownership"
 statement = """
 V1's `FakeExecutor` satisfies the same one-method `Executor` Protocol, validates \
 and records each immutable `ExecutionJob`, returns scripted \
-`CompletedExecution` values with a distinct fake record receipt and executor \
-identity, and remains safe under `ExecutionPool`; dr-exec owns spawn-path tests \
+`CompletedExecution` values with a distinct fake record receipt, and remains \
+safe under `ExecutionPool`; dr-exec owns spawn-path tests \
 while consumers retain real-engine oracle tests whose meaning depends on \
 execution."""
 rationale = """

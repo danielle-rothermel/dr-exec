@@ -1,7 +1,7 @@
 [project]
 name = "dr-exec"
 version = "0.1.0"
-description = "Execution utils with carefully chosen defaults"
+description = "Contract-driven local process execution"
 readme = "README.md"
 authors = [
     { name = "Danielle Rothermel", email = "danielle.rothermel@gmail.com" }
