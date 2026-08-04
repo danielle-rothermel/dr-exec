@@ -6,4 +6,8 @@ class ExecutorFailure(RuntimeError):
     """Executor machinery could not produce a trustworthy result."""
 
 
-__all__ = ["DeclarationError", "ExecutorFailure"]
+class RecordLoadError(ValueError):
+    """A persisted run record is malformed or internally inconsistent."""
+
+
+__all__ = ["DeclarationError", "ExecutorFailure", "RecordLoadError"]

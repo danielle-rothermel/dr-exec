@@ -153,12 +153,16 @@ Implement one private execution path for every target:
 - fresh scratch workspace;
 - exact environment grant;
 - direct argv resolution;
-- macOS spawn/file actions;
+- library-owned Python spawn bootstrap;
+- close-on-exec setup-status pipe;
+- bootstrap session creation, scratch `chdir`, exact fd mapping, and direct
+  payload `exec`;
 - fresh session and process group;
 - intended fd 0-3 mapping only;
 - concurrent stdin, payload stdout/stderr, and protocol handling;
 - deterministic structural head/tail retention;
 - finite supported workload budgets;
+- reject finite memory, CPU, process, file-size, open-file, and disk budgets;
 - pinned attribution precedence;
 - group-targeted teardown and direct-child reaping;
 - scratch cleanup;
@@ -176,12 +180,15 @@ Verify:
 - process-group termination and re-session escape non-claim;
 - cleanup and recording degradation;
 - no returned result before required teardown/reap completes.
+- finite join exhaustion raises without manufacturing a trustworthy result.
 
 ### PR 5: fake executor and conformance
 
 Implement:
 
 - thread-safe scripted response queue;
+- optional declaration-dependent responder, mutually exclusive with queued
+  responses;
 - immutable call capture;
 - declaration validation parity;
 - fake record receipt enforcement;
@@ -213,6 +220,8 @@ Required behavior:
 - one active slot per job;
 - bounded prefetch;
 - bounded completion buffering;
+- one resident bound covering running, ready, and completed-but-undelivered
+  submissions;
 - lazy finite input;
 - capacity-driven streaming intake;
 - completion-order delivery;
@@ -220,6 +229,9 @@ Required behavior:
 - scheduler-wide failure as pool failure;
 - normal drain;
 - abort with active process-group termination;
+- zero-prefetch durable-worker mode;
+- private shipped-executor cancellation hook without widening the public
+  one-method `Executor` Protocol;
 - closed-pool finality;
 - caller context preserved in memory only;
 - one native numeric-library thread per job.
@@ -257,8 +269,9 @@ Record:
 
 Acceptance:
 
-- local evaluation exceeds the pinned representative upstream sample-production
-  rate;
+- benchmark input requires an explicit representative upstream
+  sample-production rate and reports pass/fail against it;
+- no acceptance claim is made until that product input is pinned;
 - no scheduler-created unbounded process, thread, queue, or result growth;
 - every job produces one completion and one durable attempt record;
 - no container, provisioned runtime, or process per internal test case.

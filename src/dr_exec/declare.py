@@ -225,6 +225,20 @@ class EnvGrantRecord(ContractModel):
         "canonical_values_sha256"
     )(_validate_sha256_digest)
 
+    @model_validator(mode="after")
+    def names_must_be_canonical_and_disjoint(self) -> EnvGrantRecord:
+        for name in (*self.var_names, *self.excluded_var_names):
+            _validate_env_var_name(name)
+        if self.var_names != tuple(sorted(set(self.var_names))):
+            raise ValueError("var_names must be sorted and unique")
+        if self.excluded_var_names != tuple(
+            sorted(set(self.excluded_var_names))
+        ):
+            raise ValueError("excluded_var_names must be sorted and unique")
+        if set(self.var_names) & set(self.excluded_var_names):
+            raise ValueError("granted and excluded variable names must differ")
+        return self
+
 
 def _validate_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
     if not argv:
@@ -259,7 +273,12 @@ class UntrustedPythonTarget(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = (
         ExecutionTargetKind.UNTRUSTED_PYTHON
     )
-    driver_source: str
+    driver_source: str = Field(
+        description=(
+            "Python source defining dr_exec_main(request, emit); the "
+            "library-owned bootstrap opens fd 3 before loading it"
+        )
+    )
     request: IdentityDocument
     containment_profile: ContainmentProfile
 

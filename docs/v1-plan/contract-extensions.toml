@@ -82,7 +82,7 @@ descriptor leaks, makes stdin completion deterministic, and isolates concurrent 
 runs without hidden process-global state. The executor-owned fd keeps structured \
 protocol output separate from untrusted payload stdout and stderr."""
 enforcement_modes = ["constructed_invariant", "validation_rejection", "runtime_guarantee"]
-enforcement = "EnvGrant resolves parent-derived values when constructed, exclusions are checked before spawn, and os.posix_spawn file actions map only the target's stdin/stdout/stderr pipes plus fd 3 for untrusted Python. The engine validates canonical Python request bytes against the input budget before spawn, closes stdin after its complete contents, and creates and cleans one scratch cwd per call."
+enforcement = "EnvGrant resolves parent-derived values when constructed, exclusions are checked before spawn, and a library-owned Python bootstrap creates the session, changes to the scratch cwd, maps only the target's stdin/stdout/stderr pipes plus fd 3 for untrusted Python, closes originals, and directly execs the declared command. The engine validates canonical Python request bytes against the input budget before spawn, closes stdin after its complete contents, and creates and cleans one scratch cwd per call."
 
 [[extensions]]
 parent_title = "Budgets come from declared meaning"
@@ -341,8 +341,9 @@ parent_date = "2026-07-31"
 title = "Exact fake behavior and testing ownership"
 statement = """
 V1's `FakeExecutor` satisfies the same one-method `Executor` Protocol, validates \
-and records each immutable `ExecutionJob`, returns scripted \
-`CompletedExecution` values with a distinct fake record receipt, and remains \
+and records each immutable `ExecutionJob`, returns `CompletedExecution` values \
+from a queued script or a mutually exclusive declaration-dependent responder, \
+uses a distinct fake record receipt, and remains \
 safe under `ExecutionPool`; dr-exec owns spawn-path tests \
 while consumers retain real-engine oracle tests whose meaning depends on \
 execution."""
@@ -351,4 +352,4 @@ One strict fake makes job-contract changes visible to consumer tests without \
 pretending a durable real run exists, while explicit test ownership prevents \
 either duplicated lifecycle suites or tautological execution oracles."""
 enforcement_modes = ["constructed_invariant", "validation_rejection", "governance"]
-enforcement = "The library supplies the fake against Executor.run and shared job validation, returns FakeRecordReceipt, records calls under synchronization, owns engine lifecycle coverage, and uses the production engine for real-execution oracle cases."
+enforcement = "The library supplies the fake against Executor.run and shared job validation, rejects simultaneous queued responses and a responder, returns FakeRecordReceipt, records calls under synchronization, owns engine lifecycle coverage, and uses the production engine for real-execution oracle cases."

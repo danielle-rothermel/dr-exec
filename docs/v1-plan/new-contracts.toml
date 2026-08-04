@@ -83,7 +83,7 @@ without creating one container, process, thread, or future per internal test or 
 queued job."""
 date = "2026-08-03"
 enforcement_modes = ["constructed_invariant", "runtime_guarantee", "governance"]
-enforcement = "run_many and run_stream delegate to ExecutionPool, worker telemetry and the release benchmark record effective capacity, admission and completion buffering are bounded, the source is pulled only when capacity exists, and implementation benchmarks pin throughput and resource high-water marks for the representative workload."
+enforcement = "run_many and run_stream delegate to ExecutionPool; running, ready, and completed-but-undelivered submissions share one capacity-plus-prefetch resident bound; durable workers use zero prefetch; the source is pulled only when capacity exists; worker telemetry and the release benchmark record effective capacity and resource high-water marks; and qualification compares measured throughput with an explicit representative upstream rate."
 
 [[contracts]]
 title = "Python request and protocol transports are exact"
@@ -100,7 +100,7 @@ testable. A separate descriptor prevents ordinary payload output from becoming \
 protocol framing while retaining the honest process-boundary-only threat model."""
 date = "2026-08-03"
 enforcement_modes = ["validation_rejection", "runtime_guarantee", "governance"]
-enforcement = "The macOS engine maps fd 3 with os.posix_spawn file actions, validates canonical request bytes against the input budget before spawn, scans LF-terminated frames within executor self-budgets, strictly decodes each frame, requires canonical byte equality, validates the closed frame model, preserves accepted outputs, and golden-tests the exact valid and invalid byte streams."
+enforcement = "The macOS engine uses a library-owned Python bootstrap to open fd 3 before domain code, evaluates driver source defining dr_exec_main(request, emit), validates canonical request bytes against the input budget before spawn, scans LF-terminated frames within executor self-budgets, strictly decodes each frame, requires canonical byte equality, validates the closed frame model, preserves accepted outputs, and golden-tests the exact valid and invalid byte streams."
 
 [[contracts]]
 title = "V1 identities are loose, role-specific, and versioned"

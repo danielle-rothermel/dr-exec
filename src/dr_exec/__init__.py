@@ -24,7 +24,7 @@ from dr_exec.declare import (
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
-from dr_exec.errors import DeclarationError, ExecutorFailure
+from dr_exec.errors import DeclarationError, ExecutorFailure, RecordLoadError
 from dr_exec.executor import ProcessExecutor
 from dr_exec.fake import FakeExecutor
 from dr_exec.kinds import (
@@ -191,6 +191,7 @@ __all__ = [
     "ProtocolFailedOutcomeRecord",
     "ProtocolFailureCode",
     "RealRecordReceipt",
+    "RecordLoadError",
     "RecordReceipt",
     "RecordReceiptKind",
     "RecordState",

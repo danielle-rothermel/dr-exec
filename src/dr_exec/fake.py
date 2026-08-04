@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from threading import Lock
 
 from dr_exec.declare import ExecutionJob
@@ -10,14 +10,21 @@ from dr_exec.record import CompletedExecution
 
 class FakeExecutor:
     _responses: deque[CompletedExecution]
+    _responder: Callable[[ExecutionJob], CompletedExecution] | None
     _calls: list[ExecutionJob]
     _lock: Lock
 
     def __init__(
         self,
         responses: Iterable[CompletedExecution] = (),
+        *,
+        responder: Callable[[ExecutionJob], CompletedExecution] | None = None,
     ) -> None:
-        self._responses = deque(responses)
+        response_items = tuple(responses)
+        if response_items and responder is not None:
+            raise ValueError("responses and responder are mutually exclusive")
+        self._responses = deque(response_items)
+        self._responder = responder
         self._calls = []
         self._lock = Lock()
 

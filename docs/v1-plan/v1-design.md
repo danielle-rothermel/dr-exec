@@ -182,6 +182,10 @@ Next boundary:
 - **Finite termination/join self-budget:** escalation and return deadlines.
 - **Unbudgeted termination/join:** may wait indefinitely; no bounded-return
   guarantee.
+- **Finite join exhaustion:** after group teardown, if inherited pipes still do
+  not reach EOF, close the parent ends and raise `ExecutorFailure`; output and
+  measurements are not trustworthy enough to manufacture a result, and the
+  latest durable lifecycle record remains incomplete/degraded.
 - **Reach limit:** original process group only.
 - **Known escape:** descendant creates a new session; may survive.
 - **Reproducibility/lifecycle controls, not containment:**
@@ -442,8 +446,10 @@ frame, identity, and record model under exact pinned dependency releases.
 - Implements the same thread-safe executor Protocol.
 - Validates declarations.
 - Records immutable calls.
-- Selects behavior from the complete declaration.
-- Supports an in-order scripted-result queue as a convenience.
+- Selects behavior from the complete declaration through an optional responder
+  callable.
+- Supports an in-order scripted-result queue as a mutually exclusive
+  convenience.
 - Returns scripted results.
 - Uses explicit not-applicable fake receipt.
 - Never executes payloads, creates scratch workspaces, or creates production
@@ -454,9 +460,10 @@ frame, identity, and record model under exact pinned dependency releases.
 ### Runtime responsibility
 
 - Resolve and validate absolute executable at construction.
+- Run one fixed construction-time `-I` probe and retain its runtime record.
 - Prepare fixed `<executable> -I -c <driver-source>` command.
 - Do not:
-  - spawn;
+  - spawn per preparation or payload invocation;
   - choose budgets;
   - resolve environment grants;
   - write records.
@@ -474,13 +481,22 @@ frame, identity, and record model under exact pinned dependency releases.
 - fd 3 is never part of an environment grant.
 - macOS engine:
   - create close-on-exec pipes;
-  - use spawn file actions;
-  - duplicate only intended child ends to fds 0–3;
-  - close originals;
-  - create session in the same spawn operation;
+  - start one library-owned Python bootstrap with `close_fds=True` and only the
+    intended pipe ends plus a close-on-exec setup-status pipe;
+  - never use a shell or caller-controlled command composition;
+  - in the fresh bootstrap process: create the session, change to the scratch
+    directory, duplicate intended child ends to fds 0–3, close originals, and
+    `exec` the declared command directly;
+  - report bootstrap/setup failure through the private status pipe; successful
+    payload `exec` closes that pipe and is observed as EOF;
   - never mutate parent-global descriptor numbers;
   - never use a pre-exec callback;
-  - never inherit Python runtime state through a fork boundary.
+  - never run caller or package Python callbacks between a possible fork and
+    the first bootstrap `exec`.
+
+This deliberately favors a small Python bootstrap over a native macOS spawn
+extension. It adds one fixed helper interpreter startup per job; the throughput
+qualification measures that cost before v1 acceptance.
 
 ### Python request
 
@@ -494,8 +510,15 @@ frame, identity, and record model under exact pinned dependency releases.
 
 ### Driver protocol handle
 
-- Open fd 3 before domain code.
+- Library bootstrap opens fd 3 before domain code.
 - Retain handle even if domain code replaces language-level stdout/stderr.
+- Consumer `driver_source` defines exactly
+  `dr_exec_main(request, emit)`. The library-owned wrapper decodes and validates
+  the request, evaluates the source, resolves that function, and supplies an
+  emitter that validates and writes complete canonical output frames.
+- Missing/non-callable entrypoint, source-load failure, or callback failure is
+  a payload-owned protocol outcome; bootstrap or writer machinery failure is
+  executor-owned.
 - Honest limitation: payload can discover, close, or write inherited
   descriptors directly.
 - Malformed protected bytes: executor protocol failure; not in-process tamper
@@ -519,6 +542,11 @@ frame, identity, and record model under exact pinned dependency releases.
   - operating-system constraints.
 - Request has no hidden second cap: known canonical length is both caller input
   check and safe decoder materialization bound.
+- V1 finite workload enforcement supports wall time, input bytes, and payload
+  output only.
+- Memory, CPU time, process count, file size, open-file count, and disk must be
+  explicitly unbudgeted; a finite declaration for one of those axes is rejected
+  before record preparation or spawn.
 
 ### Payload-output retention
 
@@ -635,6 +663,10 @@ framing, configured-limit, identity, duplicate-key, and incomplete-stream case.
   2. output budget;
   3. wall-clock budget;
   4. exit-status interpretation.
+- **Attribution meaning:** outcome carries the failure category; `owner` names
+  the responsible actor. Budget and malformed child-protocol outcomes are
+  payload-owned, spawn absence is machine-owned, and executor/bootstrap
+  machinery failures raise when no trustworthy result exists.
 - **Race rule:** recorded output violation beats deadline or clean exit.
 - **Timing:**
   - duration: spawn through reap; monotonic clock;
@@ -803,6 +835,9 @@ Excludes:
   - failure is observability degradation, not payload failure.
 - Canonicalization: pinned shared path; dr-exec owns manifest model, safe
   projection, lifecycle validation, and transaction semantics.
+- Load boundary: malformed bytes, invalid lifecycle models, unsafe paths, and
+  sidecar length/digest mismatches raise `RecordLoadError`; the original shared
+  decoding or validation exception remains the cause.
 
 ### Qualification
 
@@ -903,6 +938,12 @@ Synchronization rules:
 - No prefetch: authoritative backlog stays with caller/durable workflow.
 - Streaming intake: request work only when capacity exists.
 - Completion buffering: bounded; slow consumer eventually backpressures intake.
+- Resident scheduling bound: running plus ready plus completed-but-undelivered
+  submissions never exceeds active capacity plus explicit prefetch.
+- A completed result continues to occupy that bound until delivered; completion
+  does not admit replacement work when the bound is full.
+- Durable workflow workers use zero prefetch so unstarted authoritative work
+  remains in the workflow queue.
 - Caller context: travels with submission/completion; never serialized by
   dr-exec.
 
@@ -917,7 +958,14 @@ Synchronization rules:
   - no full materialization;
   - no future/thread/process per job.
 - Normal close: stop intake; drain active work.
-- Abort: stop intake; terminate active groups under v1 lifecycle contract.
+- Abort: stop intake; discard only explicitly prefetched ephemeral submissions;
+  invoke the shipped executor's private cancellation hook for active calls;
+  terminate active groups under the v1 lifecycle contract; wait for worker
+  calls to reach terminal outcomes; then close.
+- Pool abort qualification applies to the shipped process and fake executors.
+  The one-method public `Executor` Protocol remains the direct-call substitution
+  boundary; an alternative executor needs the private pool-cancellation hook to
+  participate in the concrete v1 pool.
 - Closed pool: cannot reopen.
 
 ### Finite batch
