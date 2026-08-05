@@ -32,6 +32,9 @@ Execution runs on macOS; the engine refuses other platforms at the
 declaration boundary, and the tests that need real process semantics are
 marked accordingly.
 
+- Terms and contracts sheet:
+  [danielle-rothermel.github.io/dr-exec](https://danielle-rothermel.github.io/dr-exec/)
+  (source: [`.defs/`](.defs/))
 - Exact public API: [`src/dr_exec/__init__.py`](src/dr_exec/__init__.py)
 - Stable capability boundaries:
   [`src/dr_exec/protocols.py`](src/dr_exec/protocols.py)
