@@ -154,12 +154,18 @@ def decode_frame(frame_bytes: bytes, /, *, max_depth: int) -> ProtocolFrame:
             f"frame is not strict JSON: {type(error).__name__}",
         ) from error
     try:
-        return _FRAME_ADAPTER.validate_json(frame_bytes, strict=True)
+        frame = _FRAME_ADAPTER.validate_json(frame_bytes, strict=True)
     except ValidationError as error:
         raise ProtocolViolation(
             ProtocolFailureCode.MALFORMED_FRAME,
             "frame is not a valid protocol frame",
         ) from error
+    if "version" not in frame.model_fields_set:
+        raise ProtocolViolation(
+            ProtocolFailureCode.MALFORMED_FRAME,
+            "frame does not contain an explicit protocol version",
+        )
+    return frame
 
 
 def _finite_bytes(budget: ByteBudget, /) -> int | None:

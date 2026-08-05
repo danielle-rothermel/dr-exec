@@ -38,15 +38,9 @@ from dr_exec import (
     UntrustedPythonTarget,
 )
 from dr_exec.core.model import ContractModel, canonical_model_bytes
-from dr_exec.runtime.wire import (
-    ProtocolComplete,
-    ProtocolOutput,
-    ProtocolPrelude,
-)
 
 ALL_ZERO_DIGEST_WITH_TRAILING_F = Sha256Digest("0" * 63 + "f")
 ALL_A_DIGEST = Sha256Digest("a" * 64)
-ALL_E_DIGEST = Sha256Digest("e" * 64)
 
 
 def _uuid_scalar_model() -> ContractModel:
@@ -286,34 +280,4 @@ def test_untrusted_python_target_wire_spelling_is_pinned(
         b'"kind":"untrusted_python","request":{"payload":{"a":[1,'
         b'{"z":null}],"b":2},"schema":"dr_exec.test_request",'
         b'"schema_version":1}}'
-    )
-
-
-def test_protocol_prelude_wire_spelling_is_pinned() -> None:
-    frame = ProtocolPrelude(version=1, request_id_sha256=ALL_E_DIGEST)
-    assert canonical_model_bytes(frame) == (
-        b'{"kind":"prelude","request_id_sha256":"eeeeeeeeeeeeeeeeeeeeeeee'
-        b'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","version":1}'
-    )
-
-
-def test_protocol_output_wire_spelling_is_pinned(
-    request_document: IdentityDocument,
-) -> None:
-    frame = ProtocolOutput(
-        version=1,
-        sequence=0,
-        document=request_document,
-    )
-    assert canonical_model_bytes(frame) == (
-        b'{"document":{"payload":{"a":[1,{"z":null}],"b":2},"schema":'
-        b'"dr_exec.test_request","schema_version":1},"kind":"output",'
-        b'"sequence":0,"version":1}'
-    )
-
-
-def test_protocol_complete_wire_spelling_is_pinned() -> None:
-    frame = ProtocolComplete(version=1, output_count=1)
-    assert canonical_model_bytes(frame) == (
-        b'{"kind":"complete","output_count":1,"version":1}'
     )

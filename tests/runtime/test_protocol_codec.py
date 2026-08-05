@@ -81,12 +81,27 @@ def _stream(digest: Sha256Digest, output_count: int, /) -> bytes:
 
 def test_the_prelude_frame_has_exactly_its_pinned_bytes() -> None:
     frame = ProtocolPrelude(
-        version=1,
         request_id_sha256=Sha256Digest("a" * 64),
     )
     assert encode_frame(frame) == (
         b'{"kind":"prelude","request_id_sha256":"' + b"a" * 64 + b'",'
         b'"version":1}\n'
+    )
+
+
+def test_the_output_frame_has_exactly_its_pinned_bytes() -> None:
+    frame = ProtocolOutput(sequence=0, document=_output_document(0))
+    assert encode_frame(frame) == (
+        b'{"document":{"payload":{"index":0},"schema":'
+        b'"dr_exec.test_output","schema_version":1},"kind":"output",'
+        b'"sequence":0,"version":1}\n'
+    )
+
+
+def test_the_complete_frame_has_exactly_its_pinned_bytes() -> None:
+    frame = ProtocolComplete(output_count=1)
+    assert encode_frame(frame) == (
+        b'{"kind":"complete","output_count":1,"version":1}\n'
     )
 
 
