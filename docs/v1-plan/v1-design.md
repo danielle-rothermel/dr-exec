@@ -6,19 +6,17 @@
 
 ## Status and authority
 
-- **Planning status:** high-level v1 decisions closed.
+- **Planning status:** accepted; implementation and qualification pending.
 - **Primary platform:** macOS.
 - **Primary workload:** high-volume HumanEval-style local evaluation.
 - **API authority:** pinned releases of the
   [public package surface](../../src/dr_exec/__init__.py) and
   [stable capability boundaries](../../src/dr_exec/protocols.py).
-- **Behavioral authority:** this document plus the structured contracts and
-  terms listed below.
+- **Planned behavioral authority:** [v1 contracts](contracts.toml), activated
+  only after the complete implementation passes qualification.
 - **Dependency plan:** [dr-serialize additions](dr-serialize-additions.md).
 - **Future runtime:**
   [verified uv-provisioned Python runtime](../future-plans/verified-python-runtime.md).
-- **Proposed package constraints:** single engine; pinned releases; see
-  [new contracts](new-contracts.toml).
 
 Exact public imports, names, constructors, fields, defaults, unions, exceptions,
 and signatures belong in source. This document specifies behavior, wire formats,
@@ -26,77 +24,22 @@ persistence, safety boundaries, ownership, and qualification.
 
 ### Repository contracts
 
-Standing repository authority:
-
-- [core terminology](../../.defs/terms.toml);
-- [standing contracts](../../.defs/contracts.toml).
-
-V1 proposals, classified against a frozen standing-contract revision:
-
-- [v1 terminology](terms.toml);
-- [compatible contract extensions](contract-extensions.toml);
-- [contract contradictions](contract-contradictions.toml);
-- [new contracts](new-contracts.toml);
-- [intentional scope exclusions](intentionally-out-of-scope.toml);
-- [unaddressed contracts](unaddressed-contracts.toml).
+The [standing repository contracts](../../.defs/contracts.toml) remain active
+until the [planned v1 contracts](contracts.toml) qualify and replace them. Core
+and v1-specific vocabulary remain in [core terminology](../../.defs/terms.toml)
+and [v1 terminology](terms.toml), respectively.
 
 Source changes must preserve accepted boundaries and qualification obligations.
 
-## V1 boundary summary
-
-| Area | V1 decision |
-| --- | --- |
-| Runtime | Isolated host Python only; resolved interpreter; `-I`; no hermetic claim. |
-| Identity | Versioned role-specific identity documents plus nominal full SHA-256 digests. |
-| Budgets | Every workload and executor axis: finite or explicitly unbudgeted; default: unbudgeted. |
-| Recording | Mandatory for real executions; execution-local records; temporary stores in engine tests. |
-| Containment | Process-boundary-only; no filesystem, network, or full-tree containment claim. |
-| Lifecycle | Fresh session/process group; direct child reaped; group-targeted teardown completed before return. |
-| Output | Raw stdout/stderr payload bytes; deterministic structural head/tail retention. |
-| Protocol | Protected canonical NDJSON stream on fd 3; independent accounting and failures. |
-| Scheduling | One job per independent setup-sharing unit; bounded concurrent fresh children. |
-| Streaming | One host-level pool; durable backlog, leases, and retries remain in dr-platform. |
-
 ## Scope and consumers
 
-### Included
-
-- Target use cases:
-  - use cases 1 and 2;
-  - captured-output subset of trusted-tool use case 4;
-  - job-oriented local scheduling for the initial HumanEval workload.
-- Execution:
-  - local, call-scoped;
-  - direct argv invocation;
-  - explicit inherited state;
-  - captured payload output;
-  - process-group lifecycle management;
-  - durable local recording.
-- Test support:
-  - self-invocation probes;
-  - library-owned execution fake;
-  - production engine owns spawn-path verification.
-- Foundation:
-  - one shared call-scoped engine for later use cases;
-  - no partial containment, supervision, or fleet surface.
-
+V1 provides machine-local, call-scoped execution and bounded job scheduling for
+the initial HumanEval-style workload, plus the captured-output subset of trusted
+tool execution. It uses direct argv invocation, explicit inherited state,
+captured output, process-group lifecycle management, and durable local records.
 See [target use cases](../high-level-plan/target-usecases.md).
 
-### Excluded
-
-- Filesystem sandboxing.
-- Network sandboxing.
-- Aggregate RAM enforcement.
-- Full process-tree containment.
-- Supervised ownership.
-- Interactive multi-process orchestration.
-- Fleet behavior.
-- Full dimension-aware batch contract from use case 3.
-- Multi-call trusted-tool aggregation.
-
-### Deferred consumers
-
-Consumers needing a deferred surface retain their own execution path:
+Consumers that require a deferred surface retain their existing execution path:
 
 | Consumer | Missing surface |
 | --- | --- |
@@ -109,95 +52,30 @@ Consumers needing a deferred surface retain their own execution path:
 
 ### Isolated host Python
 
-- **Mode:** isolated host Python; only v1 Python runtime.
-- **Construction:** resolve and validate one concrete host interpreter as an
-  absolute path.
-- **Invocation:** `<interpreter> -I -c <source>`.
-- **Python isolation provided:**
-  - no user site directory;
-  - no current/script directory on `sys.path`;
-  - no `PYTHON*` environment influence.
-- **Additional executor behavior:**
-  - no Python-specific stdio framing;
-  - no undeclared environment injection.
-- **Not provided:**
-  - interpreter-byte verification;
-  - standard-library-byte verification;
-  - installed-package closure identity;
-  - filesystem restriction;
-  - network restriction;
-  - general hermetic execution;
-  - manifest-bearing provisioned runtime.
-- **Public claim:** isolated host invocation; never hermetic execution.
+- Resolve and validate one concrete host interpreter as an absolute path.
+- Probe it once at runtime construction and retain the resulting runtime record.
+- Invoke `<interpreter> -I -c <library-wrapper-source>`.
+- Use no Python-specific stdio framing or undeclared environment injection.
 
-Next boundary:
-[verified uv-provisioned Python runtime](../future-plans/verified-python-runtime.md).
-
-### Workload and executor budgets
-
-- **Representation:** every axis is finite or explicitly unbudgeted.
-- **Defaults:** every axis is unbudgeted.
-- **Forbidden states:** unset; inferred finite; adaptive; hidden finite.
-- **Workload axes:**
-  - wall clock;
-  - input;
-  - output;
-  - memory;
-  - CPU time;
-  - process count;
-  - file size;
-  - open-file count;
-  - disk, where represented by the declaration model.
-- **Unsupported enforcement:** axis remains explicitly unbudgeted in the
-  effective declaration and durable record.
-- **Unsupported finite declaration:** fail validation before spawn.
-- **Executor self-budgets:** separate mechanics; same finite-or-unbudgeted
-  representation; same unbudgeted defaults.
-- **Mandatory spawn validation:** platform constraints, including source and
-  aggregate argv-plus-environment limits; not caller workload budgets.
-- **RAM:**
-  - no default enforcement;
-  - no aggregate enforcement;
-  - no RAM-protection claim;
-  - future aggregate protection must be faithfully enforceable;
-  - future protection cannot reinterpret v1 `unbudgeted`.
-- **Meaning of unbudgeted:** no library policy limit; not infinite machine
-  capacity.
-- **Observable external limits:** memory exhaustion, disk exhaustion,
-  operating-system limits, machinery failure.
+The [planned runtime contract](contracts.toml) defines the deliberately limited
+public claim. The implementation path to a verified runtime remains
+[outside v1](../future-plans/verified-python-runtime.md).
 
 ### Containment and lifecycle
 
-- **Profile:** process-boundary-only.
-- **Required acknowledgment:** every untrusted target explicitly accepts the
-  profile.
-- **Payload reach:** invoking user's filesystem, network, credentials, and
-  process-spawning permissions.
-- **Security claim:** none beyond the declared process boundary.
-- **Per-run lifecycle:**
-  - fresh session;
-  - fresh process group;
-  - direct child reaped;
-  - configured group-targeted termination completed before a result returns.
-- **Finite termination/join self-budget:** escalation and return deadlines.
-- **Unbudgeted termination/join:** may wait indefinitely; no bounded-return
-  guarantee.
+- The bootstrap creates the fresh session and process group before payload
+  execution.
+- The engine completes configured process-group teardown and reaps the direct
+  child before returning a completed result.
+- Finite termination and join limits control escalation and return deadlines.
 - **Finite join exhaustion:** after group teardown, if inherited pipes still do
   not reach EOF, close the parent ends and raise `ExecutorFailure`; output and
   measurements are not trustworthy enough to manufacture a result, and the
   latest durable lifecycle record remains incomplete/degraded.
-- **Reach limit:** original process group only.
-- **Known escape:** descendant creates a new session; may survive.
-- **Reproducibility/lifecycle controls, not containment:**
-  - explicit environment grant;
-  - fresh scratch cwd;
-  - closed descriptor table;
-  - direct argv invocation;
-  - workload budgets.
+- Scratch cleanup runs on every exit path; cleanup failure is narrated and does
+  not replace an otherwise trustworthy result.
 
-## Serialization ownership
-
-### Dependencies
+## Serialization dependencies
 
 - Pin released `dr-serialize`; do not copy or fork its canonicalization or
   identity behavior.
@@ -205,90 +83,8 @@ Next boundary:
   and canonicalized by dr-exec.
 - Required shared additions and qualification:
   [dr-serialize additions](dr-serialize-additions.md).
-- Shared behavior is pinned by dr-serialize's internal goldens; v1 does not add
-  a public conformance-corpus loader or packaged vector data.
-- Forbidden completion state: dr-exec codec or record code depends on an
-  unreleased sibling checkout or locally duplicates a proposed shared
-  capability.
-
-### Ownership matrix
-
-| Owner | Responsibilities |
-| --- | --- |
-| `dr-serialize` | Strict materialized-JSON validation; canonical JSON text/bytes; `IdentityDocument` canonicalization and hashing; bounded strict decode of one complete JSON value; validated full SHA-256 value. |
-| `dr-exec` | Contract models; scalar spellings; secret-safe projections; execution identity payloads; request/frame schemas; frame scanning/state; lifecycle records; sidecar references; path safety; atomic store publication. |
-| Domain adapters | Request/result identity-document schemas; domain completeness; bulk artifact formats; accepted-output interpretation. |
-
-### Forbidden serializer uses
-
-- `Serializer.to_jsonable()` does not define:
-  - request data;
-  - protocol frames;
-  - records;
-  - identity material;
-  - raw payload bytes;
-  - secret-bearing values.
-- Reason: normalization is intentionally lossy.
-- `model_dump_json()` is not the canonical wire or persistence format.
-- Required path: validated Pydantic JSON-mode projection -> strict
-  `dr-serialize` validation -> canonical UTF-8 bytes.
-
-## Identity scheme
-
-### Role selection
-
-- **Scheme:** intentionally loose, versioned hybrid.
-
-| Material | Identity form | Rationale |
-| --- | --- | --- |
-| Executor | `IdentityDocument` | Versioned semantics. |
-| Executor configuration | `IdentityDocument` | Versioned policy semantics. |
-| Runtime | `IdentityDocument` | Versioned runtime facts. |
-| Domain request | `IdentityDocument` | Domain-owned schema and completeness. |
-| Protocol output | `IdentityDocument` | Domain-owned schema and completeness. |
-| Target declaration | Full nominal SHA-256 | Opaque value-sensitive material; safe structure recorded separately. |
-| Canonical environment values | Full nominal SHA-256 | Secret-derived value material; values never persisted. |
-
-### Executor identity
-
-- **Schema:** `dr_exec.executor`.
-- **Version:** `1`.
-- **Payload keys:** `kind`, `package_version`, `source_commit`, `source_state`,
-  `session_id`.
-- **Kind:** `process_executor`.
-- **Source commit:**
-  - full Git object ID embedded at package build when available;
-  - editable fallback inspects package source checkout, never process cwd;
-  - snapshot when the executor is constructed.
-- **Source state:** `clean`, `dirty`, or `unknown`.
-- **Session identity:** dirty or unknown source gets a construction-scoped
-  session ID; unverified states cannot compare equal only because they share a
-  commit or package version.
-
-### Executor-configuration identity
-
-- **Schema:** `dr_exec.executor_config`.
-- **Version:** `1`.
-- **Payload:** complete effective executor self-budgets.
-- **Default representation:** every axis explicitly unbudgeted.
-- **Separation:** source provenance and success-affecting execution policy use
-  different identities.
-
-### Runtime identity
-
-- **Schema:** `dr_exec.isolated_host_python_runtime`.
-- **Version:** `1`.
-- **Payload keys:** `kind`, `resolved_executable`, `implementation`,
-  `python_version`, `cache_tag`, `platform`.
-- **Construction probe:** selected interpreter; once; under `-I`.
-- **Distinguishes:** ordinary host-runtime changes.
-- **Does not verify:** interpreter bytes, standard library, installed packages.
-
-### Domain identities
-
-- Domain adapter owns schema, version, complete payload, and change rules.
-- Adding an identity-bearing field requires a schema-version change.
-- Fields never grow silently under one version.
+- Release and pin the shared additions before dr-exec codec or record code uses
+  them.
 
 ## Validated serialization paths
 
@@ -365,22 +161,7 @@ bounded bytes acquired by dr-exec
 6. Run end-to-end conformance across canonical bytes, protocol failures,
    partial outputs, crash-consistent records, and adapter completeness.
 
-## Representation contracts
-
-### Model boundary
-
-- Persistence, subprocess, fixture, and untrusted-input values: strict, frozen,
-  closed validated models.
-- Internal values that never cross a serialization boundary: frozen slotted
-  dataclasses.
-- Live execution job: never serialized wholesale; environment may contain
-  secrets.
-- Engine output: separate secret-safe request and record projections.
-- Persisted vocabularies: unique pinned strings; closed variants.
-- Persisted payload construction: explicit schemas; no enum iteration or field
-  reflection.
-
-### Scalar wire spellings
+## Scalar wire spellings
 
 | Scalar | Required spelling |
 | --- | --- |
@@ -398,25 +179,11 @@ bounded bytes acquired by dr-exec
 Golden vectors cover each scalar alone and nested in every relevant request,
 frame, identity, and record model under exact pinned dependency releases.
 
-## Capability contracts
-
-### Governance
-
-- Stable Protocols: executor, runtime, run store.
-- Purpose: freeze foundational behavior before multiple production
-  implementations exist.
-- Protocol addition/change: loud boundary change; explicit contract review.
-- Implementation qualification: shared behavioral conformance; structural
-  typing alone is insufficient.
-- Serialized variants: closed validated models or discriminated unions; never
-  Protocols.
+## Capability mechanics
 
 ### Executor
 
-- One blocking, thread-safe operation per complete attempt.
-- One optional call-scoped `CancelToken`; cancellation is cooperative at the
-  Protocol boundary and lifecycle-enforced by each conforming implementation.
-- Production sequence:
+- Production execution follows one sequence:
   1. validate declaration;
   2. prepare durable state;
   3. create scratch workspace;
@@ -427,22 +194,15 @@ frame, identity, and record model under exact pinned dependency releases.
   8. tear down and reap;
   9. finalize record;
   10. return result.
-- Reusable executor stores no mutable per-attempt process state.
-- Logical job identity: caller supplied and stable.
-- Physical attempt identity: distinct for every attempt.
-- Result and record receipt: same attempt identity.
+- A cancellation observed before spawn finalizes without launching a child; one
+  observed after spawn enters the same teardown step.
 
 ### Outcomes and exceptions
 
-- Outcome data:
-  - recognized spawn failures;
-  - child outcomes;
-  - budget outcomes;
-  - cancellation;
-  - protocol failures.
-- Typed exceptions:
-  - invalid pre-spawn declarations;
-  - machinery failures preventing a trustworthy result.
+- The engine constructs outcome data for recognized spawn, child, budget,
+  cancellation, and protocol states.
+- Invalid pre-spawn declarations and machinery failures that prevent a
+  trustworthy result raise typed exceptions.
 - Exception translation preserves underlying cause.
 - Record prepare failure: prevent spawn; raise.
 - Recording degradation after attempt start: receipt data; does not replace
@@ -450,20 +210,6 @@ frame, identity, and record model under exact pinned dependency releases.
 - Later protocol failure: preserve previously accepted complete outputs.
 - HumanEval normal result: one aggregate domain output containing per-test
   outcomes.
-
-### Fake executor
-
-- Implements the same thread-safe executor Protocol.
-- Validates declarations.
-- Records immutable calls.
-- Selects behavior from the complete declaration through an optional responder
-  callable that receives the job and its cancellation token.
-- Supports an in-order scripted-result queue as a mutually exclusive
-  convenience.
-- Returns scripted results.
-- Uses explicit not-applicable fake receipt.
-- Never executes payloads, creates scratch workspaces, or creates production
-  run records.
 
 ## Runtime and transport contracts
 
@@ -539,28 +285,6 @@ qualification measures that cost before v1 acceptance.
   resistance.
 
 ## Budget and retention contracts
-
-### General rules
-
-- Every workload/self-budget axis: finite or explicitly unbudgeted.
-- No unset, adaptive, machine-derived, or capacity-derived limit.
-- Unit-specific finite values keep bytes, durations, and counts distinct.
-- Effective executor policy participates in executor-config identity.
-- Unbudgeted affects volume/wait policy; never validity.
-- Always mandatory:
-  - canonical framing;
-  - closed schemas;
-  - message order;
-  - request identity;
-  - secret exclusion;
-  - operating-system constraints.
-- Request has no hidden second cap: known canonical length is both caller input
-  check and safe decoder materialization bound.
-- V1 finite workload enforcement supports wall time, input bytes, and payload
-  output only.
-- Memory, CPU time, process count, file size, open-file count, and disk must be
-  explicitly unbudgeted; a finite declaration for one of those axes is rejected
-  before record preparation or spawn.
 
 ### Payload-output retention
 
@@ -696,32 +420,23 @@ framing, configured-limit, identity, duplicate-key, and incomplete-stream case.
 - **Digests:** SHA-256 over explicitly canonicalized bytes.
 - **Environment identity:** sorted declared names plus canonical name/value
   payload digest; values never persisted.
-- **Production provenance:** loose versioned executor, executor-config, and
-  runtime documents defined above.
-- **Fake provenance:** no production record; no manufactured production
-  provenance.
-- **Pinned identity details:** exact keys, literals, canonicalization, and
-  identity strings live in validated models and golden tests; never mutable
-  field reflection.
 
 ## Durable recording
 
 ### Store contract
 
-- Concrete v1 store: `DirectoryRunStore`.
-- Real execution: recording mandatory; part of production engine path.
-- Engine tests: same store pointed at temporary test-owned storage.
-- Fake execution: no run record; explicit fake receipt.
-- Lifecycle handles: distinct types; invalid transitions not representable by
+- `DirectoryRunStore.prepare()` allocates one run directory, publishes the
+  complete `prepared` manifest, and returns a prepared handle.
+- `mark_running()` publishes the process-bearing `running` manifest and returns
+  a running handle.
+- `finalize()` accepts either lifecycle handle, flushes retained-output
+  sidecars, publishes the `finalized` manifest, and returns the record receipt.
+- Distinct lifecycle handles make invalid transitions unrepresentable through
   one ambiguous handle.
-- Prepare failure: prevent spawn; raise.
-- Post-start finalization degradation: receipt data; do not replace outcome.
-- Published state: complete execution-local snapshot.
-- Excluded header context: pool capacity, queue depth, worker lease,
-  pool-session reference.
-- External ownership:
-  - dr-platform: workflow and lease context;
-  - worker telemetry/domain integration: host scheduling observations.
+- Prepare failure prevents spawn; post-start publication failure returns
+  structured degradation without replacing the execution outcome.
+- `load()` validates the canonical manifest, lifecycle state, safe relative
+  paths, sidecar lengths, and sidecar digests.
 
 ### Secret-safe durable evidence
 
@@ -909,25 +624,17 @@ Synchronization rules:
 
 ### Execution job
 
-- One job = one independently schedulable setup-sharing boundary.
-- Caller chooses shared setup, runtime, scratch workspace, child lifetime.
-- Dr-exec chooses number of active independent jobs.
-- Dr-exec never interprets generated samples, compilers, or tests.
-- Every job gets one fresh child.
-- Work inside a job may be sequential; expensive setup paid once.
-- Persistent child reuse across unrelated jobs: outside v1; prevents poisoned
-  interpreter/process state from crossing job boundaries.
-- Python driver:
-  - retain protected protocol handle before consumer stdout replacement;
-  - emit complete validated outputs incrementally;
-  - direct descriptor writes remain a declared containment hole.
-- Load-phase failure:
-  - complete domain output when domain schema supports it;
-  - otherwise executor protocol failure.
-- Partial work: preserve accepted outputs; never manufacture domain items.
+- One submission contains one immutable job and caller context.
+- Admission assigns one capacity slot and one fresh child to the submission.
+- The child retains the protected protocol handle and emits complete validated
+  outputs incrementally while its domain work may remain sequential.
+- Completion pairs the same caller context with the one completed execution;
+  accepted outputs survive a later protocol or child failure.
 
 ### Pool capacity and admission
 
+- `ProcessExecutor.open_pool()`, `ProcessExecutor.run_many()`, and
+  `ExecutionPool.run_stream()` route through the same scheduler.
 - Pool reuses scheduling capacity; never interpreters or children.
 - No outer process pool around subprocess engine.
 - One job consumes one slot.
@@ -975,13 +682,10 @@ Synchronization rules:
 
 ### Finite batch
 
-- Consume lazily through one pool.
-- Admit active capacity only.
-- Yield in completion order.
-- Drain finite input; then close.
-- One job failure never fails fast or erases other results.
-- Hundreds of thousands of jobs require neither collection materialization nor
-  one scheduler primitive per job.
+- `run_many()` consumes the finite iterable lazily through the shared pool
+  scheduler and admits only while resident capacity exists.
+- It yields in completion order, preserves per-job failures as completion data,
+  drains admitted work after input exhaustion, and then closes the pool.
 
 ### HumanEval adapter
 
