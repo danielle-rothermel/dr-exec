@@ -13,8 +13,16 @@ by machinery failure: the post-spawn body is wrapped so that returning and
 raising leave through the same lifecycle work. Second, the durable record
 is mandatory and ordered: ``prepare`` precedes the spawn, ``mark_running``
 follows only a successful spawn, and exactly one ``finalize`` runs on every
-path that got as far as a prepared handle -- including recognized pre-spawn
-outcomes, which finalize from ``prepared`` without ever launching a child.
+path that produces a ``CompletedExecution`` -- including recognized
+pre-spawn outcomes, which finalize from ``prepared`` without ever launching
+a child.
+
+A machinery failure that prevents a trustworthy result raises instead of
+finalizing, and that is deliberate: join exhaustion, a bootstrap that could
+not launch, and a store or thread failure of an unexpected type all leave
+the call with no result worth recording, so the latest lifecycle state that
+was successfully published -- ``prepared`` or ``running`` -- stays as the
+durable record rather than being completed with a manufactured outcome.
 
 Recording degradation never replaces an execution outcome. A post-start
 recording failure becomes a degraded receipt naming the latest lifecycle
@@ -969,9 +977,11 @@ class _EngineCall:
         """Execute one job and return its one completion.
 
         Validation and platform refusal happen before anything durable
-        exists. From the prepared handle onward every exit path finalizes
-        exactly once, and from the spawn onward every exit path also
-        tears down the group and reaps the child.
+        exists. Every path that returns a completion finalizes exactly
+        once; a machinery failure that leaves no trustworthy result raises
+        instead, leaving the latest published lifecycle state on disk. From
+        the spawn onward every exit path, returning or raising, tears down
+        the group and reaps the child.
         """
         _validate_platform()
         target = _target_of(job, self.runtime)
@@ -1266,14 +1276,20 @@ class _EngineCall:
                 setup_failure.stage != SETUP_STAGE_SESSION
             )
             return
-        observation.running = self._mark_running(
-            observation.prepared, process, started_at
-        )
         state = _DrainState(
             retention=PayloadRetention.for_budget(job.budgets.payload_output)
         )
         observation.state = state
+        # Draining comes first, before any further parent-side work. The
+        # status pipe reaches EOF at the payload's ``exec``, so the payload
+        # is already running and already able to fill a pipe buffer; any
+        # parent step taken before the transports are live blocks the child
+        # in the kernel and charges that stall to the payload's wall-clock
+        # budget. ``mark_running`` in particular is a durable publish.
         self._start_transports(target, transports, state)
+        observation.running = self._mark_running(
+            observation.prepared, process, started_at
+        )
         observation.stop = _await_child(
             process,
             state,

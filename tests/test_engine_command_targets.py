@@ -1295,6 +1295,140 @@ def test_the_running_manifest_is_published_while_the_child_is_alive(
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
 
 
+@dataclass(frozen=True, slots=True)
+class _GatedMarkingStore(DirectoryRunStore):
+    """A conforming store whose `running` publish waits on an explicit gate.
+
+    A slow ``mark_running`` is an ordinary implementation -- a contended
+    disk, a network mount, a cold cache -- so the engine must already be
+    draining the child before it publishes. The gate makes the ordering
+    exact rather than probable: the publish returns only once the test
+    releases it, and the test releases it only after the child has proved
+    it pushed more than one pipe buffer through.
+    """
+
+    gate: Gate
+
+    def mark_running(
+        self,
+        prepared_run: PreparedRun,
+        process: ProcessRecord,
+        /,
+    ) -> RunningRun:
+        self.gate.receive()
+        # Not ``super()``: ``slots=True`` rebuilds the class, so the
+        # zero-argument form's closure cell names the pre-rebuild class.
+        return DirectoryRunStore.mark_running(self, prepared_run, process)
+
+
+@requires_macos
+def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
+    tmp_path: Path,
+) -> None:
+    """Draining is live across the durable `running` publish.
+
+    macOS pipes hold 64 KiB, so a child writing more than that blocks in
+    the kernel until someone reads. If the parent published the `running`
+    manifest before starting the transports, the child would be stalled for
+    the whole publish and charged for it against its own wall-clock budget.
+
+    The two gates pin the ordering with no timing at all: the publish waits
+    on `proceed`, and `proceed` is released only after the child announces
+    on `written`, which it can only reach once the full oversized write has
+    completed. Under the wrong order the two waits are a deadlock the
+    case's watchdog reports; under the right order the child streams
+    through and exits cleanly with every byte retained.
+    """
+    produced_bytes = 200_000
+    assert produced_bytes > 64 * 1024
+    root = tmp_path / "gated"
+    root.mkdir()
+    proceed = Gate.create(tmp_path, "proceed")
+    written = Gate.create(tmp_path, "written")
+    store = _GatedMarkingStore(root=root, gate=proceed)
+
+    def release_after_the_oversized_write() -> None:
+        written.receive()
+        proceed.release()
+
+    watcher = threading.Thread(
+        target=release_after_the_oversized_write, daemon=True
+    )
+    watcher.start()
+    completed = Harness(store=store, root=root).execute(
+        ExecutionJob(
+            job_id=JobId(uuid4()),
+            target=TrustedCommandTarget(
+                argv=python_command(
+                    "import sys\n"
+                    f"sys.stdout.buffer.write(b'x' * {produced_bytes})\n"
+                    "sys.stdout.flush()\n"
+                    f"open({str(written.path)!r}, 'w').write('done')\n"
+                )
+            ),
+            env=EnvGrant.none(),
+            budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+        ),
+    )
+    watcher.join()
+
+    assert completed.result.outcome == ExitedOutcome(exit_code=0)
+    assert completed.result.attribution.owner is FailureOwner.NONE
+    stdout = completed.result.payload_outputs.stdout
+    assert stdout.produced_bytes == produced_bytes
+    (record_dir,) = sorted(root.iterdir())
+    assert store.load(record_dir).state is RecordState.FINALIZED
+
+
+@requires_macos
+def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
+    tmp_path: Path,
+) -> None:
+    """The same ordering in the input direction, which fails identically.
+
+    A child that reads its whole stdin first cannot see EOF until the feed
+    thread has pushed every byte, and the feed thread blocks after one pipe
+    buffer. The gate releases the `running` publish only once the child has
+    echoed a full oversized stdin back, so the publish provably overlapped
+    a live feed rather than preceding it.
+    """
+    stdin_bytes = b"y" * 200_000
+    root = tmp_path / "gated-stdin"
+    root.mkdir()
+    proceed = Gate.create(tmp_path, "proceed")
+    echoed = Gate.create(tmp_path, "echoed")
+    store = _GatedMarkingStore(root=root, gate=proceed)
+
+    def release_after_the_full_read() -> None:
+        echoed.receive()
+        proceed.release()
+
+    watcher = threading.Thread(target=release_after_the_full_read, daemon=True)
+    watcher.start()
+    completed = Harness(store=store, root=root).execute(
+        ExecutionJob(
+            job_id=JobId(uuid4()),
+            target=TrustedCommandTarget(
+                argv=python_command(
+                    "import sys\n"
+                    "received = sys.stdin.buffer.read()\n"
+                    f"open({str(echoed.path)!r}, 'w').write(str(len(received)))\n"
+                    "sys.stdout.buffer.write(str(len(received)).encode())\n"
+                ),
+                stdin=stdin_bytes,
+            ),
+            env=EnvGrant.none(),
+            budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+        ),
+    )
+    watcher.join()
+
+    assert completed.result.outcome == ExitedOutcome(exit_code=0)
+    assert completed.result.payload_outputs.stdout.head == (
+        str(len(stdin_bytes)).encode()
+    )
+
+
 # --- Recording degradation -----------------------------------------------
 
 
