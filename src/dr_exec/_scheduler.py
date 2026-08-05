@@ -76,8 +76,15 @@ def usable_cpu_count() -> int:
 
 @dataclass(frozen=True, slots=True)
 class _Admitted(Generic[ContextT]):  # noqa: UP046
-    """One admitted submission and the token cancelling exactly its call."""
+    """One admitted submission and the token cancelling exactly its call.
 
+    ``ticket`` names this submission's occupancy of the shared resident
+    bound. It is what the scheduler's live-token map is keyed by, so the
+    token is discarded at exactly the moment the submission stops being a
+    resident rather than at the pool's end of life.
+    """
+
+    ticket: int
     job: ExecutionJob
     context: ContextT
     cancellation: CancelToken
@@ -90,8 +97,13 @@ class _Completion(Generic[ContextT]):  # noqa: UP046
     The context is carried through in memory and never serialized: it is
     whatever object the caller submitted, moved from the submission to the
     completion untouched.
+
+    The ticket rides along for the same reason: delivery is where the
+    resident slot is released, so delivery is where the submission's
+    cancellation token is dropped.
     """
 
+    ticket: int
     completed_execution: CompletedExecution
     context: ContextT
 
@@ -119,6 +131,13 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
     `_pending` holds admitted work no worker has picked up yet, `_ready`
     holds finished completions in completion order, and `_running` counts
     calls currently inside `Executor.run`.
+
+    `_tokens` holds exactly the residents' cancellation tokens, keyed by
+    ticket. It is sized by the bound like every other structure here, not
+    by how many submissions the scheduler has ever seen: a token is
+    discarded when its submission leaves the bound, which is what lets one
+    long-lived pool run a hundred thousand jobs without accumulating a
+    hundred thousand tokens and their locks.
     """
 
     __slots__ = (
@@ -127,6 +146,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         "_condition",
         "_executor",
         "_intake_closed",
+        "_next_ticket",
         "_pending",
         "_ready",
         "_residents",
@@ -143,8 +163,9 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         self._condition = Condition()
         self._pending: deque[_Admitted[ContextT]] = deque()
         self._ready: deque[_Completion[ContextT]] = deque()
-        self._tokens: list[CancelToken] = []
+        self._tokens: dict[int, CancelToken] = {}
         self._workers: list[Thread] = []
+        self._next_ticket = 0
         self._residents = 0
         self._running = 0
         self._intake_closed = False
@@ -169,24 +190,34 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             self._raise_if_broken()
             return self._residents < self._capacity and not self._intake_closed
 
-    def admit(self, job: ExecutionJob, context: ContextT, /) -> None:
+    def admit(self, job: ExecutionJob, context: ContextT, /) -> bool:
         """Take one resident slot and queue the submission for a worker.
 
         Callers reach here only after `can_admit` returned True, so the
         shared bound is never exceeded: every surface's intake loop is
         gated on that predicate, which is the one place the bound is
         enforced.
+
+        Returns whether the submission was taken. A closed intake answers
+        False rather than raising: closing is a requested lifecycle
+        operation, and a surface that pulled a submission before a
+        concurrent `drain` or `abort` landed is looking at an ordinary
+        end of intake, not at a scheduler that cannot be trusted. Only
+        `_broken` raises.
         """
         with self._condition:
             self._raise_if_broken()
             if self._intake_closed:
-                raise SchedulerBroken("intake is closed")
+                return False
+            ticket = self._next_ticket
+            self._next_ticket += 1
             token = CancelToken()
-            self._tokens.append(token)
-            self._pending.append(_Admitted(job, context, token))
+            self._tokens[ticket] = token
+            self._pending.append(_Admitted(ticket, job, context, token))
             self._residents += 1
             self._ensure_worker()
             self._condition.notify_all()
+            return True
 
     def close_intake(self) -> None:
         """Stop admitting. Admitted work is untouched and still runs."""
@@ -211,9 +242,14 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
         Delivery is the one place a resident slot is released, which is
         what turns a consumed completion into admission room for the next
-        submission. Returns None only when the scheduler holds nothing at
-        all -- no ready completion, no running call, no admitted work --
-        which a surface reaches only after its source is exhausted.
+        submission. It is therefore also where the submission's
+        cancellation token is dropped: the call is over and nothing can
+        cancel it any more, so retaining the token past this point would
+        grow a structure the bound is supposed to size.
+
+        Returns None only when the scheduler holds nothing at all -- no
+        ready completion, no running call, no admitted work -- which a
+        surface reaches only after its source is exhausted.
         """
         with self._condition:
             self._condition.wait_for(
@@ -227,6 +263,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             if not self._ready:
                 return None
             completion = self._ready.popleft()
+            self._tokens.pop(completion.ticket, None)
             self._residents -= 1
             self._condition.notify_all()
             return completion
@@ -242,9 +279,13 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         executor boundary answers with a recorded cancelled outcome and
         no child. Cancellation is therefore delivered as completion data
         for every admitted submission, never as a dropped submission.
+
+        Only current residents are held, so this walks the bound rather
+        than the scheduler's history: an abort after a hundred thousand
+        jobs cancels the handful still in flight.
         """
         with self._condition:
-            for token in self._tokens:
+            for token in tuple(self._tokens.values()):
                 token.cancel()
             self._condition.notify_all()
 
@@ -321,6 +362,13 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             self._run_one(admitted)
 
     def _take_admitted(self) -> _Admitted[ContextT] | None:
+        """The next submission to run, or None when the worker should stop.
+
+        A broken scheduler dispatches nothing: `_finish` has already
+        dropped the queue at the moment of the break, and this guard
+        keeps a worker that was mid-wait from starting a submission
+        admitted in the same window.
+        """
         with self._condition:
             self._condition.wait_for(
                 lambda: (
@@ -329,7 +377,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
                     or self._broken is not None
                 )
             )
-            if not self._pending:
+            if self._broken is not None or not self._pending:
                 return None
             self._running += 1
             return self._pending.popleft()
@@ -348,23 +396,51 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
                 admitted.job, cancellation=admitted.cancellation
             )
         except BaseException as failure:  # noqa: BLE001
-            self._finish(broken=failure)
+            self._finish(ticket=admitted.ticket, broken=failure)
             return
-        self._finish(completion=_Completion(completed, admitted.context))
+        self._finish(
+            ticket=admitted.ticket,
+            completion=_Completion(
+                admitted.ticket, completed, admitted.context
+            ),
+        )
 
     def _finish(
         self,
         *,
+        ticket: int,
         completion: _Completion[ContextT] | None = None,
         broken: BaseException | None = None,
     ) -> None:
+        """Retire one call, publishing its completion or breaking the pool.
+
+        A break drops this submission's token here rather than at
+        delivery, because a broken scheduler delivers nothing: the ticket
+        would otherwise stay resident for the pool's remaining life.
+
+        Breaking also drops the work queued behind the failing call
+        instead of starting it. A broken scheduler delivers nothing --
+        `take_completion` raises before it inspects the ready queue -- so
+        running that queue would spawn children, write durable records,
+        and consume the very capacity the scheduler exists to bound, all
+        for results no consumer can ever receive. The queued submissions
+        were never started, so nothing is dropped mid-flight and no
+        teardown is skipped; their tokens are cancelled and discarded
+        with them.
+        """
         with self._condition:
             self._running -= 1
             if completion is not None:
                 self._ready.append(completion)
+            else:
+                self._tokens.pop(ticket, None)
             if broken is not None and self._broken is None:
                 self._broken = broken
                 self._intake_closed = True
+                for queued in self._pending:
+                    queued.cancellation.cancel()
+                    self._tokens.pop(queued.ticket, None)
+                self._pending.clear()
             self._condition.notify_all()
 
     def _raise_if_broken(self) -> None:

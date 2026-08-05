@@ -37,6 +37,7 @@ from dr_exec import (
     AutoPoolCapacity,
     CancelledOutcome,
     CompletedExecution,
+    ExecutionCompletion,
     ExecutionJob,
     ExecutionPool,
     ExecutionPoolConfig,
@@ -47,7 +48,11 @@ from dr_exec import (
     FixedPoolCapacity,
     JobId,
 )
-from dr_exec._scheduler import SchedulerBroken, usable_cpu_count
+from dr_exec._scheduler import (
+    SchedulerBroken,
+    _ExecutionScheduler,
+    usable_cpu_count,
+)
 from dr_exec.executor import _run_batch
 from dr_exec.kinds import CapacitySource
 
@@ -495,7 +500,7 @@ def test_abort_cancels_work_in_flight_and_awaits_its_teardown() -> None:
     assert set(responder.cancelled) == {job.job_id for job in batch}
     for job in batch:
         assert responder.finished_gate(job.job_id).is_set()
-    assert pool.state is ExecutionPoolState.CLOSED
+    assert pool._state is ExecutionPoolState.CLOSED
 
 
 def test_abort_cancels_admitted_work_no_worker_has_started() -> None:
@@ -597,7 +602,7 @@ def test_abort_does_not_promise_delivery_of_what_it_tore_down() -> None:
 
     assert only.job_id in responder.cancelled
     assert responder.finished_gate(only.job_id).is_set()
-    assert pool.state is ExecutionPoolState.CLOSED
+    assert pool._state is ExecutionPoolState.CLOSED
 
 
 def test_drain_lets_admitted_work_finish_uncancelled() -> None:
@@ -629,7 +634,7 @@ def test_drain_lets_admitted_work_finish_uncancelled() -> None:
 
     assert responder.cancelled == ()
     assert responder.finished_gate(only.job_id).is_set()
-    assert pool.state is ExecutionPoolState.CLOSED
+    assert pool._state is ExecutionPoolState.CLOSED
 
 
 def test_drain_to_empty_delivers_every_admitted_submission() -> None:
@@ -646,7 +651,7 @@ def test_drain_to_empty_delivers_every_admitted_submission() -> None:
     asyncio.run(stream())
 
     assert sorted(collected) == list(range(len(batch)))
-    assert pool.state is ExecutionPoolState.CLOSED
+    assert pool._state is ExecutionPoolState.CLOSED
 
 
 def test_a_closed_pool_cannot_reopen_or_stream() -> None:
@@ -663,7 +668,7 @@ def test_a_closed_pool_cannot_reopen_or_stream() -> None:
 
     asyncio.run(close_then_reuse())
 
-    assert pool.state is ExecutionPoolState.CLOSED
+    assert pool._state is ExecutionPoolState.CLOSED
 
 
 # --- Scheduler-wide failure ----------------------------------------------
@@ -694,6 +699,268 @@ def test_a_failing_executor_call_breaks_the_pool() -> None:
         asyncio.run(stream())
 
     assert isinstance(e.value.__cause__, ExecutorFailure)
+    assert pool._state is ExecutionPoolState.BROKEN
+
+
+def test_a_break_survives_the_close_that_follows_it() -> None:
+    """A closed pool and a broken one are different answers, so it survives.
+
+    Leaving the context manager on the raise aborts the pool, which is a
+    real close: the scheduler shuts down and its workers are joined. What
+    the pool must not do is overwrite the break with an ordinary CLOSED,
+    because then a consumer could no longer tell a pool that delivered
+    everything from one that stopped being able to deliver at all.
+    """
+
+    def explode(
+        _job: ExecutionJob, _token: CancelToken | None, /
+    ) -> CompletedExecution:
+        raise ExecutorFailure("machinery failed")
+
+    pool = fixed_pool(FakeExecutor(responder=explode), 1)
+
+    async def stream() -> None:
+        async with pool:
+            await consume(pool.run_stream(submissions_of(jobs(1))))
+
+    with pytest.raises(SchedulerBroken):
+        asyncio.run(stream())
+
+    assert pool._state is ExecutionPoolState.BROKEN
+
+
+def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
+    """A broken scheduler stops dispatching, it does not drain the queue.
+
+    Two slots and two jobs, so both are admitted and the second is
+    genuinely queued when the first call raises. Its completion could
+    never reach the consumer -- delivery raises before it inspects the
+    ready queue -- so starting it would spawn a child and write a record
+    for a result guaranteed to be discarded.
+
+    The evidence is a state, not a delay: the pool is driven to its
+    terminal break and fully closed, which means every worker has been
+    joined, before the responder's arrival record is read. Any dispatch
+    that was going to happen has necessarily already happened by then.
+    """
+    started: list[JobId] = []
+    first_arrived = threading.Event()
+
+    def explode_on_first(
+        job: ExecutionJob, _token: CancelToken | None, /
+    ) -> CompletedExecution:
+        started.append(job.job_id)
+        if not first_arrived.is_set():
+            first_arrived.set()
+            raise ExecutorFailure("machinery failed")
+        return completion_for(job.job_id)
+
+    batch = jobs(2)
+    pool = fixed_pool(FakeExecutor(responder=explode_on_first), 2)
+
+    async def stream() -> None:
+        async with pool:
+            await consume(pool.run_stream(submissions_of(batch)))
+
+    with pytest.raises(SchedulerBroken):
+        asyncio.run(stream())
+
+    assert pool._closed
+    assert started == [batch[0].job_id]
+
+
+# --- Requested close during intake ---------------------------------------
+
+
+def test_a_drain_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
+    """A requested close is not a scheduler-wide failure.
+
+    Every realistic source awaits between items -- a lease from a
+    workflow queue is a network round trip -- so a `drain` can always
+    land between the admission check and the admission itself. The
+    consumer must see that as the end of the stream, because nothing
+    about the scheduler's ability to produce trustworthy completions has
+    changed; it was simply asked to stop taking new work.
+
+    The window is not hoped for, it is held open: the source parks on an
+    event that the test sets only after the drain has been requested, so
+    the pull is provably in flight across the close.
+
+    What is pinned is the shape of the ending, not a delivery count. The
+    consumer reaches the end of its stream and the pool reports a clean
+    close; which completions a concurrent drain still hands over is not
+    promised, because closing stops delivery -- the same limit
+    `test_abort_does_not_promise_delivery_of_what_it_tore_down` states.
+    What must never arrive is the submission from beyond the close.
+    """
+    parked = asyncio.Event()
+    may_proceed = asyncio.Event()
+
+    async def parking_source() -> AsyncIterator[ExecutionSubmission[int]]:
+        yield ExecutionSubmission(job=jobs(1)[0], context=0)
+        parked.set()
+        await may_proceed.wait()
+        yield ExecutionSubmission(job=jobs(1)[0], context=1)
+
+    pool = fixed_pool(immediate_executor(), 2)
+    delivered: list[int] = []
+
+    async def drain_mid_pull() -> None:
+        async with pool:
+            stream = pool.run_stream(parking_source())
+            consumer = asyncio.create_task(
+                _collect_contexts(stream, delivered)
+            )
+            await asyncio.wait_for(parked.wait(), WATCHDOG_SECONDS)
+            drainer = asyncio.create_task(pool.drain())
+            may_proceed.set()
+            await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
+            await asyncio.wait_for(drainer, WATCHDOG_SECONDS)
+
+    asyncio.run(drain_mid_pull())
+
+    assert 1 not in delivered
+    assert pool._state is ExecutionPoolState.CLOSED
+
+
+def test_an_abort_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
+    """Abort is the same requested close, one step stronger.
+
+    It cancels what is in flight rather than letting it finish, but it is
+    still a lifecycle operation the caller asked for, so the consumer
+    reaches the end of its stream instead of catching a failure that
+    would say the pool could not be trusted.
+    """
+    parked = asyncio.Event()
+    may_proceed = asyncio.Event()
+
+    async def parking_source() -> AsyncIterator[ExecutionSubmission[int]]:
+        yield ExecutionSubmission(job=jobs(1)[0], context=0)
+        parked.set()
+        await may_proceed.wait()
+        yield ExecutionSubmission(job=jobs(1)[0], context=1)
+
+    pool = fixed_pool(immediate_executor(), 2)
+    delivered: list[int] = []
+
+    async def abort_mid_pull() -> None:
+        async with pool:
+            stream = pool.run_stream(parking_source())
+            consumer = asyncio.create_task(
+                _collect_contexts(stream, delivered)
+            )
+            await asyncio.wait_for(parked.wait(), WATCHDOG_SECONDS)
+            aborter = asyncio.create_task(pool.abort())
+            may_proceed.set()
+            await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
+            await asyncio.wait_for(aborter, WATCHDOG_SECONDS)
+
+    asyncio.run(abort_mid_pull())
+
+    assert 1 not in delivered
+    assert pool._state is ExecutionPoolState.CLOSED
+
+
+async def _collect_contexts(
+    stream: AsyncIterator[ExecutionCompletion[int]],
+    into: list[int],
+    /,
+) -> None:
+    """Consume a stream to its end, recording each context delivered."""
+    async for completion in stream:
+        into.append(completion.context)
+
+
+# --- One stream per pool -------------------------------------------------
+
+
+def test_one_open_pool_serves_one_stream_at_a_time() -> None:
+    """A second concurrent stream is refused rather than served wrongly.
+
+    The scheduler's ready queue has no per-stream identity, so two live
+    streams would each take whatever finished first -- including the
+    other's completions, carrying the other's caller contexts, which the
+    context cast would silently present as this stream's declared type.
+    Refusing is what makes that cast true.
+    """
+    executor, responder = gated_executor()
+    batch = jobs(1)
+    pool = fixed_pool(executor, 2)
+
+    async def two_streams() -> None:
+        async with pool:
+            first = pool.run_stream(submissions_of(batch))
+            consumer = asyncio.create_task(consume(first))
+            await asyncio.to_thread(responder.await_arrival, batch[0].job_id)
+            with pytest.raises(ExecutorFailure, match="one source at a time"):
+                await consume(pool.run_stream(submissions_of(jobs(1))))
+            await asyncio.to_thread(responder.release, batch[0].job_id)
+            await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
+
+    asyncio.run(two_streams())
+
+
+def test_a_finished_stream_releases_the_pool_for_the_next_one() -> None:
+    """Exclusivity is the live stream's, not the pool's whole lifetime."""
+    pool = fixed_pool(immediate_executor(), 2)
+    delivered: list[int] = []
+
+    async def sequential_streams() -> None:
+        async with pool:
+            await _collect_contexts(
+                pool.run_stream(submissions_of(jobs(2))), delivered
+            )
+            await _collect_contexts(
+                pool.run_stream(submissions_of(jobs(2))), delivered
+            )
+
+    asyncio.run(sequential_streams())
+
+    assert sorted(delivered) == [0, 0, 1, 1]
+
+
+# --- Bounded retention ---------------------------------------------------
+
+
+def test_cancellation_tokens_are_bounded_by_capacity_not_by_history() -> None:
+    """The long-lived pool shape must not accumulate one token per job.
+
+    A durable streaming worker is one pool over a hundred thousand
+    samples, so any structure that grows per admitted job rather than per
+    resident is a leak -- and a `CancelToken` holds an OS-level lock, not
+    just a Python object. Every other scheduler structure is already
+    sized by the bound; this pins that the token map is too.
+
+    The check runs against delivered work, not a clock: after each
+    delivery the scheduler has provably retired that submission, so the
+    live token count may never exceed the capacity that bounds it.
+    """
+    capacity = 2
+    delivered = 0
+    peak_tokens = 0
+    batch = jobs(40)
+    scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
+        executor=immediate_executor(), capacity=capacity
+    )
+    source = iter(batch)
+    try:
+        while True:
+            while scheduler.can_admit():
+                job = next(source, None)
+                if job is None:
+                    break
+                scheduler.admit(job, None)
+            if scheduler.take_completion() is None:
+                break
+            delivered += 1
+            peak_tokens = max(peak_tokens, len(scheduler._tokens))
+    finally:
+        scheduler.close_intake()
+        scheduler.wait_for_quiescence()
+        scheduler.shutdown()
+
+    assert delivered == len(batch)
+    assert peak_tokens <= capacity
 
 
 # --- Finite batch --------------------------------------------------------

@@ -178,6 +178,28 @@ def untrusted_relative_executable_without_granted_path() -> ExecutionJob:
     return job_for(untrusted_command_target(("dr-exec-test-relative",)))
 
 
+def relative_granted_path_entry() -> ExecutionJob:
+    """A granted PATH resolves only through absolute entries.
+
+    The child changes to its scratch directory before ``exec``, so a
+    relative entry's hit names nothing the parent's search found. The
+    rule reads only the declaration, which is why both executors apply
+    it and why this case belongs to the host-independent half.
+    """
+    return job_for(
+        trusted_target(("dr-exec-test-relative",)),
+        env=EnvGrant.fixed({"PATH": "bin"}),
+    )
+
+
+def empty_granted_path_entry() -> ExecutionJob:
+    """An empty entry is the current directory, spelled shorter."""
+    return job_for(
+        trusted_target(("dr-exec-test-relative",)),
+        env=EnvGrant.fixed({"PATH": "/usr/bin:"}),
+    )
+
+
 def input_exceeding_its_declared_budget() -> ExecutionJob:
     """Declared stdin is larger than the declared input budget."""
     return job_for(
@@ -204,6 +226,10 @@ INVALID_DECLARATIONS = [
         untrusted_relative_executable_without_granted_path,
         id="untrusted-relative-no-path",
     ),
+    pytest.param(
+        relative_granted_path_entry, id="relative-granted-path-entry"
+    ),
+    pytest.param(empty_granted_path_entry, id="empty-granted-path-entry"),
     pytest.param(input_exceeding_its_declared_budget, id="input-over-budget"),
     pytest.param(
         python_request_exceeding_its_declared_budget,

@@ -135,12 +135,22 @@ class ExecutionPool:
     aborting it. A closed pool cannot reopen: reopening would give one
     capacity bound two disjoint lifetimes, and the durable records of the
     second would be indistinguishable from the first's.
+
+    One open pool serves one stream at a time. The scheduler's ready queue
+    is a single completion-ordered queue with no per-stream identity, so
+    two concurrent streams would each deliver whatever finished first --
+    including each other's completions, carrying each other's caller
+    contexts. A second concurrent stream is refused rather than served
+    wrongly; a consumer that wants two independent streams opens two
+    pools, which is also the only way to get two independent bounds.
     """
 
     _executor: Executor
     _config: ExecutionPoolConfig
     _effective_capacity: EffectivePoolCapacity | None
     _state: ExecutionPoolState
+    _streaming: bool
+    _closed: bool
     _scheduler: _ExecutionScheduler[object] | None
 
     def __init__(
@@ -153,11 +163,9 @@ class ExecutionPool:
         self._config = config
         self._effective_capacity = None
         self._state = ExecutionPoolState.CREATED
+        self._streaming = False
+        self._closed = False
         self._scheduler = None
-
-    @property
-    def state(self) -> ExecutionPoolState:
-        return self._state
 
     @property
     def effective_capacity(self) -> EffectivePoolCapacity:
@@ -201,10 +209,10 @@ class ExecutionPool:
         those calls and still awaits their teardown, which is the part
         that is never optional.
         """
-        if self._state in {
-            ExecutionPoolState.CLOSED,
-            ExecutionPoolState.CREATED,
-        }:
+        if self._closed:
+            return
+        if self._state is ExecutionPoolState.CREATED:
+            self._closed = True
             self._state = ExecutionPoolState.CLOSED
             return
         if exc is None:
@@ -230,14 +238,24 @@ class ExecutionPool:
         pool.
 
         The context cast is the one place a type is restored rather than
-        checked. One pool may serve streams of different context types, so
-        the scheduler stores contexts opaquely; what guarantees the cast is
-        the scheduler's pairing invariant -- a completion carries the very
-        object its own submission carried, moved through in memory and
-        never serialized -- so the object leaving this stream is
-        necessarily the one that entered it.
+        checked, and two facts together are what license it. The scheduler
+        stores contexts opaquely because a pool may serve streams of
+        different context types over its life, and its pairing invariant
+        holds that a completion carries the very object its own submission
+        carried, moved through in memory and never serialized. That alone
+        would not be enough: it says the completion is paired correctly,
+        not that it is delivered to the stream that submitted it. The
+        second fact supplies that -- an open pool serves one stream at a
+        time, so every completion this loop takes belongs to a submission
+        this loop admitted, and the object leaving is necessarily the one
+        that entered.
         """
         scheduler = self._running_scheduler()
+        if self._streaming:
+            raise ExecutorFailure(
+                "an execution pool streams one source at a time"
+            )
+        self._streaming = True
         source = aiter(submissions)
         exhausted = False
         try:
@@ -247,7 +265,15 @@ class ExecutionPool:
                     if submission is None:
                         exhausted = True
                         break
-                    scheduler.admit(submission.job, submission.context)
+                    if not scheduler.admit(submission.job, submission.context):
+                        # A concurrent `drain` or `abort` closed intake
+                        # while this pull was awaiting. That is a
+                        # requested close, not a failure, so intake ends
+                        # here exactly as an exhausted source would end
+                        # it and the stream still delivers what was
+                        # already admitted.
+                        exhausted = True
+                        break
                 if exhausted and not await asyncio.to_thread(
                     scheduler.has_residents
                 ):
@@ -268,6 +294,12 @@ class ExecutionPool:
             if self._state is ExecutionPoolState.RUNNING:
                 self._state = ExecutionPoolState.BROKEN
             raise
+        finally:
+            # The exclusivity flag belongs to this stream's lifetime, not
+            # the pool's: a stream that ended -- exhausted, abandoned,
+            # cancelled, or broken -- releases the pool for the next one,
+            # and the state machine is what refuses a closed pool.
+            self._streaming = False
 
     async def drain(self) -> None:
         """Stop intake and let admitted work finish, then close.
@@ -279,11 +311,13 @@ class ExecutionPool:
         scheduler = self._closing_scheduler()
         if scheduler is None:
             return
+        broke = self._state is ExecutionPoolState.BROKEN
         self._state = ExecutionPoolState.DRAINING
         scheduler.close_intake()
         await asyncio.to_thread(scheduler.wait_for_quiescence)
         await asyncio.to_thread(scheduler.shutdown)
-        self._state = ExecutionPoolState.CLOSED
+        self._closed = True
+        self._state = _closed_state(broke)
 
     async def abort(self) -> None:
         """Stop intake, cancel every active call, and await their teardown.
@@ -297,12 +331,14 @@ class ExecutionPool:
         scheduler = self._closing_scheduler()
         if scheduler is None:
             return
+        broke = self._state is ExecutionPoolState.BROKEN
         self._state = ExecutionPoolState.DRAINING
         scheduler.close_intake()
         scheduler.cancel_all()
         await asyncio.to_thread(scheduler.wait_for_quiescence)
         await asyncio.to_thread(scheduler.shutdown)
-        self._state = ExecutionPoolState.CLOSED
+        self._closed = True
+        self._state = _closed_state(broke)
 
     def _running_scheduler(self) -> _ExecutionScheduler[object]:
         if self._state is not ExecutionPoolState.RUNNING:
@@ -318,14 +354,31 @@ class ExecutionPool:
 
         Closing twice is not an error -- `__aexit__` after an explicit
         `drain()` is ordinary -- but closing a pool that never opened has
-        nothing to wait for.
+        nothing to wait for. Whether the pool is already closed is the
+        `_closed` fact rather than the state, because a pool that broke
+        closes like any other but keeps the break as the state a consumer
+        reads afterwards.
         """
-        if self._state is ExecutionPoolState.CLOSED:
+        if self._closed:
             return None
         if self._scheduler is None:
+            self._closed = True
             self._state = ExecutionPoolState.CLOSED
             return None
         return self._scheduler
+
+
+def _closed_state(broke: bool, /) -> ExecutionPoolState:
+    """The terminal state a close lands in, preserving a prior break.
+
+    A broken pool is closed too -- its scheduler was shut down and its
+    workers joined -- but "closed" and "broke" are different answers to
+    the one question a consumer asks afterwards: whether the results it
+    received are all the results there were. Forcing CLOSED over a break
+    would erase that distinction at exactly the moment it matters, so the
+    break is the state that survives.
+    """
+    return ExecutionPoolState.BROKEN if broke else ExecutionPoolState.CLOSED
 
 
 async def _next_submission[T](

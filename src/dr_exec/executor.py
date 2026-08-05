@@ -137,7 +137,9 @@ def _run_batch(
                 if job is None:
                     exhausted = True
                     break
-                scheduler.admit(job, None)
+                if not scheduler.admit(job, None):
+                    exhausted = True
+                    break
             if exhausted and not scheduler.has_residents():
                 return
             completion = scheduler.take_completion()
