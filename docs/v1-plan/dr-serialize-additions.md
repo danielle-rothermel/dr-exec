@@ -1,12 +1,13 @@
-# Proposed dr-serialize additions for dr-exec v1
+# Dr-serialize capabilities for dr-exec v1
 
-## Status and objective
+## Objective and ownership
 
-This document proposes the small general-purpose additions dr-serialize needs
-to support dr-exec v1 without creating a second canonicalization or strict-JSON
-system in dr-exec. It does not broaden dr-serialize into an execution protocol,
-Pydantic model codec, persistence library, schema registry, or domain-format
-owner.
+This document defines the small general-purpose dr-serialize capabilities
+that support dr-exec v1 without creating a second canonicalization or
+strict-JSON system in dr-exec. The released `dr-serialize==0.1.1` pin
+delivers all of them; no additional dr-serialize scope is planned for v1. It does not broaden
+dr-serialize into an execution protocol, Pydantic model codec, persistence
+library, schema registry, or domain-format owner.
 
 The accepted dr-exec plan continues to own the meaning of every target, frame,
 identity payload, result, record, and failure. Dr-serialize owns only reusable
@@ -29,12 +30,11 @@ explicitly lossy normalization lane: it may stringify keys, replace bytes, and
 apply caller-selected handlers. Its output is useful for diagnostics and other
 normalization consumers, not for v1 wire or persistence contracts.
 
-## Required addition 1: canonical JSON bytes
+## Delivered capability 1: canonical JSON bytes
 
 ### Public behavior
 
-Add a public byte-oriented canonicalization function with behavior equivalent
-to:
+Dr-serialize exposes this public byte-oriented canonicalization function:
 
 ```python
 def canonical_json_bytes(value: Jsonable, /) -> bytes:
@@ -58,7 +58,7 @@ change.
 
 ### Identity-document bytes
 
-Also expose the byte sequence already hashed by the identity lane:
+It also exposes the byte sequence already hashed by the identity lane:
 
 ```python
 def canonical_identity_json_bytes(
@@ -83,12 +83,11 @@ Golden tests pin, byte for byte:
 - identity-document bytes across schema and version changes; and
 - unchanged `json_hash()` and `identity_document_hash()` results.
 
-## Required addition 2: bounded strict JSON decoding
+## Delivered capability 2: bounded strict JSON decoding
 
 ### Public behavior
 
-Add one bytes-first strict decoder. The exact public name may follow
-dr-serialize conventions, but its behavior is equivalent to:
+Dr-serialize exposes this bytes-first strict decoder:
 
 ```python
 def decode_strict_json_bytes(
@@ -136,18 +135,23 @@ Callers must be able to distinguish at least:
 - duplicate object keys; and
 - non-finite numeric input.
 
-The exact exception hierarchy is implementation-plan work. It remains a
-dr-serialize error taxonomy rather than importing dr-exec protocol failure
-codes. Dr-exec translates these general failures into its closed protocol or
-record-load errors at its own boundary.
+The public hierarchy is `StrictJsonDecodeError` with
+`JsonByteLimitError`, `JsonDepthLimitError`, `InvalidUtf8Error`,
+`JsonSyntaxError`, `DuplicateJsonKeyError`, and
+`NonFiniteJsonNumberError`. It remains a dr-serialize error taxonomy rather
+than importing dr-exec protocol failure codes. Dr-exec translates these general
+failures into its closed protocol or record-load errors at its own boundary.
 
 ### Scope boundary
 
 The decoder consumes one complete JSON value. It does not scan NDJSON streams,
 find frame boundaries, enforce frame order, understand Pydantic models, select a
 schema, or validate domain completeness. Dr-exec first acquires one bounded
-complete frame or manifest, then calls this decoder, then applies its own
-`TypeAdapter` or model validation.
+complete frame or manifest, calls this decoder and canonical re-encoding to
+verify the original bytes, then passes those same original bytes to its own
+`model_validate_json(..., strict=True)` or
+`TypeAdapter.validate_json(..., strict=True)`. The decoded `Jsonable` is
+verification material, not input to Pydantic Python-mode validation.
 
 ### Verification
 
@@ -164,9 +168,10 @@ Tests cover:
 - exact depth-bound edges without relying on `RecursionError`; and
 - bounded error diagnostics for large adversarial input.
 
-## Required addition 3: validated full SHA-256 values
+## Delivered capability 3: validated full SHA-256 values
 
-Provide one public `Sha256Digest` validation boundary for a full SHA-256 digest:
+Dr-serialize provides one public `Sha256Digest` validation boundary for a full
+SHA-256 digest:
 
 - exactly 64 characters;
 - lowercase hexadecimal only;
@@ -174,30 +179,19 @@ Provide one public `Sha256Digest` validation boundary for a full SHA-256 digest:
 - an explicit parse failure rather than acceptance as an arbitrary `str`.
 
 `Sha256Digest` is one nominal public value rather than a collection of scattered
-validators. Full identity and canonical JSON hash APIs return or are directly
-validatable as this value. Display prefixes remain ordinary presentation
-strings and never satisfy the full-digest type.
+validators. Full identity and canonical JSON hash APIs return this string
+subtype without changing their values. Display prefixes remain ordinary
+presentation strings and never satisfy the full-digest type.
 
 This addition does not make dr-serialize responsible for deciding what bytes a
 digest covers. Dr-exec still owns declaration, environment, executor, runtime,
-manifest, and sidecar digest payloads. `DirectoryRunStore` continues to hash
-raw sidecar bytes with a streaming standard-library SHA-256 implementation; a
-generic file-hashing wrapper is not required.
+manifest, and sidecar digest payloads. `DirectoryRunStore` obtains sidecar
+digests from the pinned Document Directory's `SidecarSummary`; a generic
+file-hashing wrapper is not required.
 
 Verification covers exact valid boundaries, every non-hexadecimal class,
 uppercase input, lengths 63 and 65, display-prefix rejection, and round trips
 through the existing full-hash functions.
-
-## Qualification addition: reusable conformance vectors
-
-Dr-serialize publishes a small immutable canonical/identity conformance corpus
-as package data available through a documented public loader. The corpus pins
-representative input together with canonical text, canonical bytes, and full
-digest outputs.
-
-This prevents each package from copying canonicalization logic. Dr-exec still
-owns separate goldens for its models, identity payloads, protocol frames, and
-records and calls only the public dr-serialize implementation.
 
 ## Explicit non-goals for dr-serialize
 
@@ -212,7 +206,8 @@ The v1 integration does not add any of the following to dr-serialize:
 - path containment, sidecar layout, file hashing, atomic writes, fsync, or
   same-filesystem replacement;
 - Parquet, Arrow, NumPy, tensor, or other bulk domain formats;
-- schema registries or migrations; or
+- schema registries or migrations;
+- a public conformance-corpus loader or packaged vector data; or
 - the future verified-runtime tree-digest algorithm.
 
 Those behaviors derive meaning from execution, persistence, or a consuming
@@ -235,7 +230,8 @@ The validated read path is:
 ```text
 bounded bytes acquired by dr-exec
   -> dr-serialize strict bounded JSON decode
-  -> dr-exec Pydantic model or frame validation
+  -> dr-serialize canonical re-encode and byte-for-byte equality check
+  -> dr-exec strict Pydantic JSON-mode validation of the same original bytes
   -> dr-exec protocol, identity, or lifecycle semantics
 ```
 
@@ -243,16 +239,3 @@ bounded bytes acquired by dr-exec
 field conversion into JSON-mode values; dr-serialize owns the final canonical
 JSON profile. Exact Pydantic spellings for UUIDs, paths, timestamps, and base64
 bytes remain dr-exec golden contracts under a pinned Pydantic release.
-
-## Delivery and release sequence
-
-1. Implement canonical JSON bytes and identity-document bytes in dr-serialize
-   without changing existing text or hash results.
-2. Implement the bounded strict decoder and its adversarial test matrix.
-3. Implement the validated full SHA-256 value.
-4. Publish the conformance vectors as package data and release dr-serialize.
-5. Pin that release and Pydantic in dr-exec before implementing its boundary
-   models, protocol codec, or record codec.
-
-The dr-serialize release is a prerequisite for dr-exec serialization work, but
-not for implementing unrelated dr-exec scheduling and declaration models.

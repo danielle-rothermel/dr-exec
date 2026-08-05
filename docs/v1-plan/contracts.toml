@@ -1,0 +1,568 @@
+[contract_set]
+schema_version = 1
+status = "planned"
+activation = """\
+Replaces the active repository contracts only after the complete v1 \
+implementation passes repository qualification at the pre-release tip. \
+Activation explicitly excludes the first domain-integration throughput \
+measurement, which occurs after release and does not gate this contract set.\
+"""
+replacement_target = ".defs/contracts.toml"
+
+[[contracts]]
+key = "one_canonical_local_engine"
+title = "One canonical local engine owns execution"
+statement = """
+Every production v1 execution path that invokes a machine-local child does so \
+through one private engine that owns direct argv spawn, I/O, lifecycle, budget \
+enforcement, attribution, and recording. V1 production execution invokes no \
+shell, remote executor, in-process evaluator, or alternate spawn path.
+"""
+rationale = """
+A single internal path keeps target variants, direct calls, and pool scheduling \
+on the same safety and observability semantics while preventing consumers from \
+quietly rebuilding foundational execution machinery.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "constructed_invariant", "governance"]
+enforcement = """
+Targets reject empty or NUL-bearing argv, every supported production \
+implementation constructs a direct local process invocation, production public \
+entry points delegate to `dr_exec.engine`, and review rejects consumer imports \
+of the private engine or additional spawn and lifecycle implementations.
+"""
+
+[[contracts]]
+key = "explicit_trust_and_honest_containment"
+title = "Trust and containment claims are explicit and honest"
+statement = """
+Every target has a closed trusted or untrusted variant. Every untrusted target \
+explicitly names `PROCESS_BOUNDARY_ONLY`, which grants the invoking user's \
+filesystem, network, credential, and process-spawning permissions and provides \
+no sandbox or stronger containment. V1 excludes filesystem and network reach \
+restrictions, containment of descendants that leave the original process \
+group, supervised execution and interaction, fleet execution, and additional \
+output-delivery modes or multi-call trusted-tool aggregation.
+"""
+rationale = """
+Binary identity does not establish payload trust, and a permissive process \
+boundary must not be mistaken for a security sandbox. Explicit variants and \
+scope exclusions make the accepted risk and deferred capabilities auditable.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "constructed_invariant", "scope_exclusion"]
+enforcement = """
+The closed target union requires the sole v1 containment profile for untrusted \
+targets, records that selection, and exposes no filesystem, network, namespace, \
+subreaper, job-object, live-child, supervision, interaction, fleet, streamed, \
+spooled, passthrough, or decoded-text surface.
+"""
+
+[[contracts]]
+key = "exact_inherited_state_and_scratch"
+title = "Inherited state and scratch space are exact"
+statement = """
+A child receives environment values only through an immutable `EnvGrant`, a \
+fresh per-run scratch working directory, and exactly the descriptors assigned \
+by its target transport. `NONE` grants contain no variables; only `OVERLAY` \
+grants contain exclusions; parent-derived values are snapshotted when the \
+grant is constructed. Command targets inherit fds 0 through 2, and untrusted \
+Python additionally inherits only the executor-owned protocol fd 3. Command \
+stdin is the declared raw bytes; Python stdin is the canonical request document; \
+both are followed by EOF.
+"""
+rationale = """
+Resolving ambient state before execution makes dependencies reproducible, \
+prevents credential and descriptor leakage, and keeps concurrent or prior runs \
+from sharing mutable workspace state by default.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "constructed_invariant", "runtime_guarantee"]
+enforcement = """
+`EnvGrant` validates kind coherence, unique disjoint names, and NUL-free names \
+and values; the engine creates and cleans one scratch directory per run, maps \
+only the target's declared pipes, closes other descriptors, and uses no ambient \
+cwd or record configuration.
+"""
+
+[[contracts]]
+key = "isolated_host_python_runtime"
+title = "V1 Python uses an isolated host runtime"
+statement = """
+V1 resolves one host Python executable to an absolute path, records the \
+resolved executable and reported Python facts, and invokes it as \
+`<interpreter> -I -c <library-wrapper-source>`. This is isolated host Python, \
+not a hermetic or content-verified interpreter and package closure. A verified \
+uv-provisioned runtime is outside v1 and may later implement the stable runtime \
+capability.
+"""
+rationale = """
+Isolated invocation removes user-site, current-directory, and `PYTHON*` path \
+influence without claiming integrity that host files and installed packages do \
+not provide.
+"""
+date = "2026-08-04"
+enforcement_modes = ["constructed_invariant", "runtime_guarantee", "scope_exclusion"]
+enforcement = """
+`IsolatedHostPythonRuntime` accepts only a resolved executable regular file, \
+uses the fixed isolated invocation, probes and records runtime facts, and the \
+v1 runtime vocabulary contains no hermetic or manifest-bearing variant.
+"""
+
+[[contracts]]
+key = "explicit_unbudgeted_defaults"
+title = "Every budget axis defaults explicitly to unbudgeted"
+statement = """
+Every workload and executor self-budget axis is finite or explicitly \
+`UNBUDGETED`, and every default is `UNBUDGETED`. V1 supports finite workload \
+limits only for wall time, input bytes, and aggregate payload output; other \
+finite workload axes are rejected. Finite executor limits are supported only \
+for protocol frame bytes, total bytes, output count, JSON depth, manifest and \
+narration bytes, recording failure count, failure detail bytes, and startup, \
+termination, and join time. Platform source and aggregate argv-plus-environment \
+constraints remain mandatory validation and are not caller workload budgets.
+"""
+rationale = """
+Explicit unbudgeted values expose the absence of policy without manufacturing \
+limits that have no domain meaning or cannot be enforced faithfully. Rejecting \
+unsupported finite declarations prevents configuration from overstating runtime \
+protection.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "constructed_invariant", "scope_exclusion"]
+enforcement = """
+`Budgets.unbudgeted()` and `ExecutorSelfBudgets.unbudgeted()` populate every \
+axis, declarations have no unset state, effective workload and self-budgets \
+participate in records and identity, and the engine installs no hidden, \
+adaptive, machine-derived, or capacity-derived finite limit. A supported axis \
+is one a declaration may legally spell; each axis is enforced by the single \
+component that owns its boundary. `DirectoryRunStore` carries no self-budgets, \
+so a declared `manifest_bytes` value reaches no enforcement point in v1; the \
+manifest read is instead bounded before decode by a stated, test-pinned \
+structural ceiling, which is a property of reading a manifest into memory \
+rather than a caller-declared limit.
+"""
+
+[[contracts]]
+key = "attributable_budget_enforcement"
+title = "Finite budget enforcement remains attributable"
+statement = """
+Input bounds are checked before spawn, wall-time overflow terminates the run, \
+and aggregate payload-output overflow follows the declared `FAIL` or \
+`MARKED_TRUNCATION` policy. Deterministic stdout and stderr head and tail \
+segments preserve exact produced, retained, and dropped byte counts. A recorded \
+output violation wins a race with deadline or clean exit. Protocol and \
+observability self-budget failures remain distinct from payload output.
+"""
+rationale = """
+Time cannot be truncated, silent byte loss corrupts evidence, and executor \
+limits must not masquerade as payload crashes. Structural head and tail evidence \
+retains both startup and terminal diagnostics without making drain scheduling \
+observable.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "runtime_guarantee", "modeled_outcome"]
+enforcement = """
+The engine validates canonical input length before spawn, drains stdout and \
+stderr concurrently, validates that finite retention segments sum to the \
+aggregate limit, applies the selected overflow behavior, preserves accepted \
+protocol outputs, records exact measurements, and assigns one outcome using \
+the pinned precedence.
+"""
+
+[[contracts]]
+key = "truthful_lifecycle_and_cancellation"
+title = "Lifecycle and cancellation guarantees are truthful"
+statement = """
+Each spawned attempt owns a fresh session and process group. Every post-spawn \
+exit path, including returns and raises caused by machinery failures, performs \
+configured teardown of the original process group and reaps the direct child \
+before the call exits. A descendant that creates a new session can escape this \
+claim. Pre-spawn cancellation records `CancelledOutcome` and launches no child. \
+Direct cancellation and pool abort use a one-shot call-scoped token and await \
+the same teardown; unbudgeted termination and join axes provide no bounded \
+return guarantee.
+"""
+rationale = """
+Concurrent pipe handling and one lifecycle path prevent deadlocks, ordinary \
+background survivors, and zombies while keeping the stated reach no stronger \
+than process-group primitives support.
+"""
+date = "2026-08-04"
+enforcement_modes = ["runtime_guarantee", "modeled_outcome", "scope_exclusion"]
+enforcement = """
+The engine concurrently feeds input and drains every output channel, observes \
+the child through exit, applies configured group signaling and escalation, \
+records pre-spawn cancellation without spawning, and performs original-group \
+teardown and direct-child reaping before any post-spawn return or raise exits \
+the call. It returns `CancelledOutcome` only after the applicable lifecycle work \
+and raises `ExecutorFailure` when join exhaustion prevents a trustworthy result.
+"""
+
+[[contracts]]
+key = "recognized_outcomes_are_data"
+title = "Recognized execution outcomes are data"
+statement = """
+Every trustworthy recognized attempt outcome, including spawn absence, budget \
+exhaustion, cancellation, signal, protocol failure, and ordinary exit status, \
+returns one `CompletedExecution` with one `ExecutionResult`. Invalid pre-spawn \
+declarations and machinery failures that prevent a trustworthy result raise. \
+Ordinary exit status remains raw data for caller interpretation. Attribution is \
+one evidence-based diagnostic classification, not exhaustive causal proof or a \
+retry guarantee.
+"""
+rationale = """
+Modeled outcomes preserve distinctions needed for scoring, recovery, and \
+debugging while leaving domain interpretation with the caller and avoiding \
+claims stronger than process-boundary evidence supports.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "modeled_outcome", "runtime_guarantee"]
+enforcement = """
+The engine validates before spawn, models recognized spawn and child outcomes, \
+preserves accepted protocol outputs on later failure, translates machinery \
+exceptions with their cause, and selects post-teardown outcome and owner from \
+recorded evidence using pinned precedence.
+"""
+
+[[contracts]]
+key = "payload_and_protocol_outputs_are_distinct"
+title = "Payload and protocol outputs remain distinct"
+statement = """
+V1 captures payload stdout and stderr as separate raw byte channels without \
+decoding, newline normalization, or in-band framing. Complete validated protocol \
+output documents travel on the protected protocol channel and remain intact \
+modeled data. Executor narration is parent-owned, and caller-owned artifact \
+paths are recorded separately from output delivery.
+"""
+rationale = """
+Separating arbitrary payload bytes from structured results prevents ordinary \
+program output from corrupting the protocol and preserves the exact evidence \
+needed by initial consumers.
+"""
+date = "2026-08-04"
+enforcement_modes = ["constructed_invariant", "runtime_guarantee", "modeled_outcome"]
+enforcement = """
+The descriptor topology separates stdout, stderr, and protocol fd 3; \
+`PayloadOutputs` retains raw structural segments and counts; accepted protocol \
+documents remain complete inline values; narration and artifact references use \
+separate fields and channels.
+"""
+
+[[contracts]]
+key = "exact_python_request_and_protocol"
+title = "Python request and protocol transports are exact"
+statement = """
+An untrusted Python child receives one canonical request `IdentityDocument` on \
+stdin followed by EOF and emits canonical UTF-8 NDJSON on executor-owned fd 3. \
+The stream contains exactly one versioned request-bound prelude, consecutively \
+sequenced complete output frames, and one count-matching completion frame, with \
+no bytes after completion.
+"""
+rationale = """
+One exact grammar makes byte accounting, identity binding, partial-output \
+preservation, malformed-stream attribution, and cross-version interpretation \
+deterministic and testable.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "runtime_guarantee", "governance"]
+enforcement = """
+The wrapper reads stdin through EOF, strictly validates the canonical request, \
+loads exactly `dr_exec_main(request, emit)`, and writes LF-terminated frames; \
+the engine bounds acquisition, validates canonical bytes, closed frame models, \
+ordering, sequence, request digest, completion count, terminal LF, and EOF, and \
+golden-tests every accepted and rejected grammar form.
+"""
+
+[[contracts]]
+key = "strict_boundary_representation"
+title = "Representation follows the data boundary"
+statement = """
+V1 uses frozen slotted dataclasses for internal value objects that never cross \
+a serialization boundary and strict frozen Pydantic models for persistence, \
+subprocess JSON, fixtures, and untrusted input. Serialized variants are closed \
+models or discriminated unions with pinned scalar spellings; live execution \
+jobs are never serialized wholesale.
+"""
+rationale = """
+The type reveals where validation and schema stability are required while \
+preventing secret-bearing live values and mutable implementation fields from \
+silently defining durable formats.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "constructed_invariant", "governance"]
+enforcement = """
+Boundary models reject unknown or non-strict values, internal objects are frozen \
+and slotted, persisted keys and discriminants are explicit literals rather than \
+enum iteration or field reflection, and golden vectors cover every pinned \
+scalar spelling in relevant boundary models.
+"""
+
+[[contracts]]
+key = "serialization_ownership"
+title = "Canonical serialization has one owner per layer"
+statement = """
+Dr-serialize owns strict bounded JSON decoding, canonical JSON bytes, and shared \
+JSON depth and validity rules. Dr-exec owns secret-safe projections, closed \
+protocol and record models, identities, lifecycle meaning, and error taxonomy. \
+On read, dr-exec checks a dr-serialize canonical re-encode against the original \
+bytes and then performs strict Pydantic JSON-mode validation on those same \
+original canonical bytes, never Python-mode validation of the decoded value.
+"""
+rationale = """
+One canonical byte path prevents divergent digests and wire forms, while \
+layered validation keeps generic JSON semantics separate from execution-specific \
+schema and lifecycle meaning.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "constructed_invariant", "governance"]
+enforcement = """
+Writes project an explicit Pydantic JSON-mode value and pass it through pinned \
+dr-serialize canonicalization; reads bound bytes, strictly decode, require \
+canonical byte equality, validate the original bytes with strict \
+`model_validate_json` or `TypeAdapter.validate_json`, translate failures, and \
+run golden and adversarial conformance against the pinned dependency. V1 adds \
+no public dr-serialize conformance-corpus loader or packaged vector data.
+"""
+
+[[contracts]]
+key = "execution_local_versioned_identity"
+title = "Identities are execution-local, role-specific, and versioned"
+statement = """
+V1 uses separate versioned identity documents for executor, executor \
+configuration, runtime, domain request, and protocol output roles, plus nominal \
+full SHA-256 digests for target declarations and canonical environment values. \
+Executor identity records package version and source commit provenance; runtime \
+identity records resolved interpreter and reported Python facts without claiming \
+content verification.
+"""
+rationale = """
+Role-specific loose identities distinguish the changes most useful during \
+experimentation without pretending to identify an unverified host closure or \
+mixing source, policy, runtime, and domain meaning.
+"""
+date = "2026-08-04"
+enforcement_modes = ["constructed_invariant", "modeled_outcome", "governance"]
+enforcement = """
+Each identity role has exact schema, version, and payload keys; clean source \
+uses embedded package and source-commit provenance where available, unknown \
+source uses a construction-session identity, executor configuration \
+includes effective self-budgets, runtime facts are probed once, and identity- \
+bearing field changes require a schema-version revision.
+"""
+
+[[contracts]]
+key = "mandatory_execution_local_records"
+title = "Real runs have mandatory execution-local records"
+statement = """
+Every real v1 attempt uses one collision-free execution-local directory through \
+`DirectoryRunStore`; recording is mandatory for production execution. Every \
+successfully published lifecycle state is valid, `running` follows only a \
+successful spawn, and recognized pre-child outcomes may finalize directly from \
+`prepared`. Finalization or post-start recording degradation is reflected in \
+the receipt and latest valid lifecycle state. Engine tests use temporary \
+test-owned stores or buffers only for pure serialization units. Fake calls use \
+an explicit fake receipt and never manufacture a production record. The \
+manifest retains secret-safe invocation evidence, grant identity, containment, \
+budgets, runtime, timestamps, outcome, attribution, measurements, complete \
+protocol outputs, output metadata, and executor identities, but no raw argv, \
+source, stdin, request payload, environment values, pool, queue, lease, or \
+worker-session context. Executor narration is separate and verbose by default.
+"""
+rationale = """
+Research attempts need crash-consistent durable evidence from preparation \
+through completion, while test convenience and fake execution must not create a \
+production no-record escape hatch.
+"""
+date = "2026-08-04"
+enforcement_modes = ["runtime_guarantee", "modeled_outcome", "governance"]
+enforcement = """
+`ProcessExecutor` requires a `RunStore`, prepares before spawn, marks `running` \
+only after successful spawn, and permits recognized pre-child outcomes to \
+finalize from `prepared`. It flushes sidecars before successful atomic manifest \
+finalization on qualified local storage, reports finalization or other \
+post-start degradation with the latest valid lifecycle state without replacing \
+the execution outcome, strictly validates loaded manifests and sidecars, and \
+qualifies lifecycle and crash behavior using explicit state synchronization. \
+Exact record keys and literals have golden coverage; narration failure is \
+observability degradation.
+"""
+
+[[contracts]]
+key = "behavioral_protocol_governance"
+title = "Behavioral Protocols are governed capability boundaries"
+statement = """
+`Executor`, `Runtime`, and `RunStore` are the complete stable v1 behavioral \
+Protocol set. Adding or changing a Protocol requires explicit contract review; \
+the normal extension is a new concrete implementation that passes the shared \
+semantic conformance suite. Structural typing alone is not qualification, and \
+`ExecutionPool` remains concrete policy rather than a Protocol.
+"""
+rationale = """
+Small frozen capability boundaries make foundational changes loud and prevent \
+locally plausible implementations from drifting while keeping serialized \
+variants closed and fully validated.
+"""
+date = "2026-08-04"
+enforcement_modes = ["constructed_invariant", "governance"]
+enforcement = """
+The public protocols module exports only the three named Protocols, every \
+supported implementation runs role-specific shared behavioral conformance, and \
+review rejects new scheduling or serialized-data Protocols without a standing \
+contract revision.
+"""
+
+[[contracts]]
+key = "thread_safe_executor_calls"
+title = "Executor calls are thread-safe and attempt-local"
+statement = """
+`Executor.run` is safe to call concurrently from threads in one parent process. \
+Each call keeps mutable process, scratch, recording, I/O, and cancellation state \
+local to its physical attempt and shares no ambient per-run configuration. \
+`ExecutionPool` has one owning async lifecycle and does not imply cross-thread \
+pool control.
+"""
+rationale = """
+Consumers perform parallel evaluation while holding surrounding workflow state; \
+call-local execution prevents one attempt from corrupting another without \
+turning scheduler ownership into process-global mutable state.
+"""
+date = "2026-08-04"
+enforcement_modes = ["runtime_guarantee", "governance"]
+enforcement = """
+Production and fake executors allocate or synchronize all mutable call state, \
+use distinct attempt, scratch, and record identities, pass concurrent isolation \
+conformance, and the pool rejects lifecycle operations outside its owning async \
+context.
+"""
+
+[[contracts]]
+key = "domain_free_execution_jobs"
+title = "Execution jobs remain domain-free sharing units"
+statement = """
+One caller-defined `ExecutionJob` is the independent scheduling, setup-sharing, \
+budget, scratch, and child-lifetime unit and produces one `CompletedExecution`. \
+The request and driver own domain dimensions, internal items, and completeness; \
+dr-exec preserves each complete validated protocol output but never models a \
+cross-product or synthesizes missing domain results.
+"""
+rationale = """
+Opaque jobs let HumanEval compile or load one generated sample once and evaluate \
+its tests sequentially while allowing other domains to choose their own sharing \
+boundary without embedding domain policy in execution infrastructure.
+"""
+date = "2026-08-04"
+enforcement_modes = ["constructed_invariant", "modeled_outcome", "scope_exclusion"]
+enforcement = """
+`Executor.run` maps one immutable `ExecutionJob` to one fresh child and one \
+completion, the protocol preserves complete outputs and request identity, domain \
+adapters validate their own result sets, and the v1 API contains no dimension, \
+per-test, or cross-product scheduling model.
+"""
+
+[[contracts]]
+key = "one_bounded_completion_order_pool"
+title = "One bounded pool delivers in completion order"
+statement = """
+`ExecutionPool` is the one host-local concurrency owner. Automatic capacity \
+resolves once from usable CPUs; fixed capacity is positive. Running and \
+completed-but-undelivered submissions share one resident bound equal to \
+capacity, input is pulled only when capacity exists, and results are delivered \
+in completion order. Every completion carries exactly the caller context paired \
+with its submission, and dr-exec never serializes that context. `run_many`, \
+`run_stream`, and `open_pool` use the same scheduler and create no child, thread, \
+future, or queue entry per unadmitted job. V1 has no pool prefetch, package \
+benchmark, or automatic numerical-library thread policy.
+"""
+rationale = """
+One scheduler supports large finite and streaming workloads without unbounded \
+materialization or competing capacity controls, while applying backpressure when \
+a consumer is slower than completion.
+"""
+date = "2026-08-04"
+enforcement_modes = ["constructed_invariant", "runtime_guarantee", "governance"]
+enforcement = """
+All pool entry points delegate to one scheduler, one job consumes one slot, \
+source advancement requires resident capacity, completed results retain their \
+slot until delivery, per-job failures remain completion data, normal close \
+drains active work, and abort stops intake, cancels active calls, and awaits \
+their teardown before closing. Completion preserves the exact submission context \
+in memory without serializing it. The post-release first domain integration \
+measures representative throughput without gating contract activation, and \
+environment grants remain the only caller-owned path for numerical-library \
+thread settings.
+"""
+
+[[contracts]]
+key = "contract_enforcing_fake"
+title = "The library owns its contract-enforcing fake"
+statement = """
+`FakeExecutor` implements the same thread-safe one-method `Executor` Protocol, \
+validates and records immutable jobs, and returns `CompletedExecution` values \
+from either an in-order queue or a declaration-dependent responder, never both. \
+The responder receives the call's cancellation token. The fake executes no \
+payload, creates no scratch space, and uses an explicit fake record receipt.
+"""
+rationale = """
+One strict library fake keeps consumer tests aligned with declarations and \
+cancellation without pretending that fake calls prove spawn behavior or durable \
+execution.
+"""
+date = "2026-08-04"
+enforcement_modes = ["validation_rejection", "constructed_invariant", "governance"]
+enforcement = """
+Construction rejects simultaneous queued responses and a responder, calls and \
+response selection are synchronized, shared executor conformance covers \
+validation, concurrency, and cancellation, and dr-exec retains real-engine \
+ownership for lifecycle while consumers retain real-execution oracle tests.
+"""
+
+[[contracts]]
+key = "pinned_semantics_revision"
+title = "Pinned semantics change only through contract revision"
+statement = """
+Semantics used in persisted identity, protocol interpretation, scoring, or \
+child-observable behavior change only through an explicit standing-contract \
+revision. This includes invocation shape, scalar spellings, wire keys, \
+canonicalization, outcome precedence, identity schemas, and durable record \
+literals.
+"""
+rationale = """
+Small locally plausible byte or interpretation changes can invalidate caches \
+and experimental comparisons even when ordinary implementation tests pass.
+"""
+date = "2026-08-04"
+enforcement_modes = ["governance"]
+enforcement = """
+Persisted and child-observable literals carry exact golden coverage at pinned \
+dependency versions, and review accepts a semantic change only with the \
+corresponding standing-contract and schema-version revision.
+"""
+
+[[contracts]]
+key = "pinned_release_adoption"
+title = "Consumers adopt complete behavior through pinned releases"
+statement = """
+Consumers depend on an explicit released dr-exec version only after every \
+required behavior is present. A local path dependency is limited to coordinated \
+integration development and is replaced by a pinned release before adoption is \
+complete. Consumers needing arbitrary cwd, passthrough, supervision, readiness, \
+interactive orchestration, or another excluded surface remain on their existing \
+execution path instead of wrapping v1 to emulate it.
+"""
+rationale = """
+Pinned complete releases make foundational changes loud and reproducible; \
+partial adapters would create competing lifecycle semantics and disguise \
+deliberate scope boundaries as missing convenience.
+"""
+date = "2026-08-04"
+enforcement_modes = ["scope_exclusion", "governance"]
+enforcement = """
+Consumer requirements are checked against the supported release before \
+adoption, manifests and lockfiles pin that release, coordinated path sources \
+are removed from finished integrations, and review rejects adapters that \
+reconstruct an excluded surface. Integration review classifies each consumer \
+divergence as a domain obligation or incidental execution artifact, retains \
+domain obligations outside dr-exec, and aligns consumer tests, schemas, and \
+persisted formats without redefining executor behavior.
+"""

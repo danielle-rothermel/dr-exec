@@ -4,8 +4,8 @@ This process turns a design proposal into reviewable terminology and contract
 changes without treating the proposal as repository-wide authority before it is
 accepted. The repository's standing vocabulary and contracts remain in
 `.defs/terms.toml` and `.defs/contracts.toml`. An active plan keeps its proposed
-additions, refinements, contradictions, and omissions beside the design that
-introduced them.
+additions, refinements, contradictions, and omissions beside the design while
+those clauses remain under review.
 
 ## 1. Freeze the comparison baseline
 
@@ -61,27 +61,26 @@ enforced independently.
 
 ## 4. Classify the clauses
 
-Create these files beside the plan:
+Create these classification artifacts beside the plan:
 
-- `contract-extensions.toml` contains compatible refinements of existing
+- The extensions artifact contains compatible refinements of existing
   repository contracts. It must not contain the conflicting part of a proposal.
-- `contract-contradictions.toml` contains proposal clauses that cannot coexist
+- The contradictions artifact contains proposal clauses that cannot coexist
   with their parent contract as written. Each entry explains the exact conflict.
-- `new-contracts.toml` contains independently violable proposal rules that do
-  not directly refine an existing contract.
-- `intentionally-out-of-scope.toml` is a compact index of behavior the plan
+- The new-contracts artifact contains independently violable proposal rules
+  that do not directly refine an existing contract.
+- The intentional-scope artifact is a compact index of behavior the plan
   deliberately excludes. It references related parent titles but does not copy
   their complete text, so reviewers can confirm the boundary quickly before
   concentrating on in-scope rules.
-- `unaddressed-contracts.toml` contains exact copies of current parent contracts
-  the proposal neither implements, refines, contradicts, nor intentionally
-  excludes.
+- The unaddressed-contracts artifact contains exact copies of current parent
+  contracts the proposal neither implements, refines, contradicts, nor
+  intentionally excludes.
 
-An entry in `intentionally-out-of-scope.toml` counts as addressing every parent
-named in `related_contracts`. If a future plan understands a contract but
-postpones deciding its disposition, record that in a separate
-`deferred-contracts.toml`; do not call it intentionally out of scope or
-unaddressed.
+An intentional-scope entry counts as addressing every parent named in
+`related_contracts`. If a future plan understands a contract but postpones
+deciding its disposition, record that in a separate deferred classification;
+do not call it intentionally out of scope or unaddressed.
 
 ## 5. State enforcement explicitly
 
@@ -139,7 +138,7 @@ clause to distinguish.
 
 Parse every file as TOML and verify that baseline metadata agrees. Compare
 copied parent fields with the frozen source revision, check that every current
-parent title appears in an extension, contradiction, intentionally-out-of-scope
+parent title appears in an extension, contradiction, intentional-scope
 reference, or unaddressed entry, and check that proposed titles are unique
 within their class. Review the results in this order:
 
@@ -155,14 +154,68 @@ Coverage is a review aid, not proof that the classification is correct. Review
 must still challenge whether each clause is independently violable, assigned to
 the right parent, and backed by the stated enforcement.
 
-## 7. Promote accepted contracts
+## 7. Consolidate, qualify, and activate accepted contracts
 
-When the plan is accepted, consolidate its surviving clauses into
-`.defs/contracts.toml`: merge compatible refinements, resolve contradictions,
-add genuinely new standing rules, and preserve one coherent contract per
-behavior. Confirm intentional exclusions as part of accepting the plan, but
-promote one into `.defs/contracts.toml` only if the exclusion remains a
-repository-wide standing rule. Update `.defs/terms.toml` for vocabulary that
-has become core. Delete proposal-only contract files once they no longer
-describe an active plan; history belongs in dated changelog entries, not
-standing documentation.
+When a plan is accepted but its implementation is not yet qualified, consolidate
+its surviving clauses into `docs/<plan>/contracts.toml`. Merge compatible
+refinements, resolve contradictions, add genuinely new rules, and preserve one
+coherent present-tense contract per behavior. Confirm intentional exclusions as
+part of acceptance and retain the ones that define the plan's standing scope.
+Delete the superseded classification files after verifying the consolidated set.
+
+The consolidated set is a complete replacement for `.defs/contracts.toml`, not
+a delta. Every current parent contract is either merged into a consolidated
+entry, carried forward verbatim from the unaddressed classification, or
+deliberately retired with the retirement recorded as part of acceptance.
+Replacement at activation is then a pure file swap; no active rule is lost by
+omission.
+
+The planned contract file declares its lifecycle explicitly:
+
+```toml
+[contract_set]
+schema_version = 1
+status = "planned"
+activation = "<qualification required before replacement>"
+replacement_target = ".defs/contracts.toml"
+```
+
+Each `[[contracts]]` entry has a stable `key`, unique `title`, `statement`,
+`rationale`, `date`, `enforcement_modes`, and concrete `enforcement`. It contains
+no frozen-parent or classification history. The repository-wide
+`.defs/contracts.toml` remains active while the plan is implemented and
+qualified.
+
+After the complete plan passes its stated qualification, replace
+`.defs/contracts.toml` with the qualified set and update `.defs/terms.toml` for
+vocabulary that has become core. History belongs in dated changelog entries,
+not standing documentation.
+
+## 8. Converge the plan documents
+
+Document convergence happens at acceptance, alongside contract consolidation;
+later activation changes nothing in the plan documents.
+
+While planning is active, the documents in `docs/<plan>/` are working
+documents: notes, open questions, placeholders, and provisional structure are
+acceptable and are not prematurely polished.
+
+At acceptance, the surviving documents meet these end-state expectations:
+
+- **Single ownership per layer.** The consolidated contracts own what and why,
+  including scope and governance. The design document owns behavioral and
+  implementation mechanics and qualification requirements. The implementation
+  plan owns only the decomposition of remaining work, with qualification
+  pointers into the design rather than duplicated verification lists. Source
+  owns exact names, shapes, defaults, and signatures. Each statement has one
+  owner; everywhere else it is a link.
+- **Forward-facing content only.** No status, progress tracking, PR numbers,
+  review checkpoints, or delivery narration. PRs and dated changelog entries
+  own history and process.
+- **No restatement of standing agent rules.** Global working rules travel with
+  the agent configuration, not the repository; a plan document states only
+  decisions specific to the plan.
+
+Before deleting any clause as process residue, verify it is owned elsewhere —
+by a consolidated contract, a design section, or a standing global rule — and
+move rather than drop anything unowned.

@@ -1,13 +1,17 @@
 [project]
 name = "dr-exec"
 version = "0.1.0"
-description = "Execution utils with carefully chosen defaults"
+description = "Contract-driven local process execution"
 readme = "README.md"
 authors = [
     { name = "Danielle Rothermel", email = "danielle.rothermel@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "dr-serialize==0.1.1",
+    "dr-store>=0.1.1",
+    "pydantic==2.13.4",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.25,<0.12.0"]
@@ -15,18 +19,19 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
+    "pytest>=8.4.2",
     "ruff>=0.16.1",
     "ty>=0.0.65",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
 [tool.ruff]
-include = ["scripts/**/*.py", "src/**/*.py"]
+include = ["scripts/**/*.py", "src/**/*.py", "tests/**/*.py"]
 line-length = 79
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+
 [tool.ty.src]
-include = ["scripts", "src"]
-exclude = ["nbs", "tests"]
+include = ["scripts", "src", "tests"]
+exclude = ["nbs"]

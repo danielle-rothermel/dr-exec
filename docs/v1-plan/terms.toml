@@ -34,7 +34,7 @@ definition = """
 The versioned, deliberately loose identity of the executor machinery that \
 produced a run, carried in every real run record for provenance. V1 identifies \
 the executor kind, installed package version, and source commit when available; \
-dirty or unknown source also receives a construction-session identity so \
+unknown source also receives a construction-session identity so \
 unverified states do not compare equal. Executor identity is distinct from \
 executor-config and runtime identity."""
 
@@ -64,11 +64,11 @@ fresh child; work inside the job may be sequential so setup is paid once."""
 [[terms]]
 name = "execution pool"
 definition = """
-The concrete v1 host-local scheduler that keeps at most its effective capacity \
-of independent execution jobs active, bounds prefetch and completed-result \
-buffering, applies backpressure to its source, and yields completions in \
-completion order. It reuses scheduling capacity, never child processes or \
-interpreters."""
+The concrete v1 host-local scheduler that keeps running/admitted job submissions \
+and completed-but-undelivered submissions within one shared resident bound equal \
+to its effective capacity, applies backpressure to its source, and yields \
+completions in completion order. It reuses scheduling capacity, never child \
+processes or interpreters."""
 
 [[terms]]
 name = "execution protocol"
