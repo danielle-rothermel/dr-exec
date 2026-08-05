@@ -339,8 +339,8 @@ date = "2026-08-04"
 enforcement_modes = ["constructed_invariant", "modeled_outcome", "governance"]
 enforcement = """
 Each identity role has exact schema, version, and payload keys; clean source \
-uses embedded package and source-commit provenance where available, dirty or \
-unknown source uses a construction-session identity, executor configuration \
+uses embedded package and source-commit provenance where available, unknown \
+source uses a construction-session identity, executor configuration \
 includes effective self-budgets, runtime facts are probed once, and identity- \
 bearing field changes require a schema-version revision.
 """

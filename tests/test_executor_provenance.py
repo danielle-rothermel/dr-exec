@@ -122,10 +122,10 @@ def test_the_process_snapshot_is_resolved_once() -> None:
             ExecutorSourceSnapshot(
                 package_version="0.1.0",
                 source_commit="0" * 64,
-                source_state="dirty",
+                source_state="unknown",
                 session_id="0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72",
             ),
-            id="dirty-sha256-object-id",
+            id="unknown-with-sha256-object-id",
         ),
         pytest.param(
             ExecutorSourceSnapshot(
@@ -172,17 +172,17 @@ def test_every_provenance_form_builds_a_valid_identity(
             ExecutorSourceSnapshot(
                 package_version="0.1.0",
                 source_commit="0" * 40,
-                source_state="dirty",
+                source_state="unknown",
                 session_id=None,
             ),
             "requires session_id",
-            id="dirty-without-session",
+            id="unknown-without-session",
         ),
         pytest.param(
             ExecutorSourceSnapshot(
                 package_version="0.1.0",
                 source_commit="abc",
-                source_state="dirty",
+                source_state="unknown",
                 session_id="0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72",
             ),
             "complete lowercase Git object ID",
@@ -192,7 +192,7 @@ def test_every_provenance_form_builds_a_valid_identity(
             ExecutorSourceSnapshot(
                 package_version="0.1.0",
                 source_commit="A" * 40,
-                source_state="dirty",
+                source_state="unknown",
                 session_id="0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72",
             ),
             "complete lowercase Git object ID",
@@ -202,7 +202,7 @@ def test_every_provenance_form_builds_a_valid_identity(
             ExecutorSourceSnapshot(
                 package_version="0.1.0",
                 source_commit="0" * 40,
-                source_state="dirty",
+                source_state="unknown",
                 session_id="not-a-uuid",
             ),
             "canonical UUID",

@@ -33,41 +33,8 @@ EXECUTOR_IDENTITY_SCHEMA = "dr_exec.executor"
 EXECUTOR_CONFIG_IDENTITY_SCHEMA = "dr_exec.executor_config"
 ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA = "dr_exec.isolated_host_python_runtime"
 IDENTITY_SCHEMA_VERSION = 1
+EXECUTOR_IDENTITY_KIND = "process_executor"
 
-_EXECUTOR_CONFIG_IDENTITY_KEYS = frozenset(
-    {
-        "protocol_frame_bytes",
-        "protocol_total_bytes",
-        "protocol_output_count",
-        "json_depth",
-        "manifest_bytes",
-        "narration_bytes",
-        "recording_failure_count",
-        "failure_detail_bytes",
-        "startup_time",
-        "termination_time",
-        "join_time",
-    }
-)
-_EXECUTOR_IDENTITY_KEYS = frozenset(
-    {
-        "kind",
-        "package_version",
-        "source_commit",
-        "source_state",
-        "session_id",
-    }
-)
-_ISOLATED_HOST_RUNTIME_IDENTITY_KEYS = frozenset(
-    {
-        "kind",
-        "resolved_executable",
-        "implementation",
-        "python_version",
-        "cache_tag",
-        "platform",
-    }
-)
 _LOWERCASE_HEXADECIMAL = frozenset("0123456789abcdef")
 
 type _NonemptyString = Annotated[str, StringConstraints(min_length=1)]
@@ -110,10 +77,13 @@ def _validate_normalized_absolute_posix_path(value: str) -> str:
 
 
 class _ExecutorIdentityPayload(ContractModel):
-    kind: Literal["process_executor"] = "process_executor"
+    # ``kind`` carries no default: it is a persisted payload key, so an
+    # identity document that omits it must fail validation rather than
+    # acquire one here.
+    kind: Literal["process_executor"]
     package_version: _NonemptyString
     source_commit: str | None
-    source_state: Literal["clean", "dirty", "unknown"]
+    source_state: Literal["clean", "unknown"]
     session_id: str | None
 
     _validated_source_commit = field_validator("source_commit")(
@@ -131,7 +101,7 @@ class _ExecutorIdentityPayload(ContractModel):
             if self.session_id is not None:
                 raise ValueError("clean source must not have session_id")
         elif self.session_id is None:
-            raise ValueError("dirty or unknown source requires session_id")
+            raise ValueError("unknown source requires session_id")
         return self
 
 
@@ -150,7 +120,7 @@ class _ExecutorConfigIdentityPayload(ContractModel):
 
 
 class _IsolatedHostRuntimeIdentityPayload(ContractModel):
-    kind: Literal["isolated_host_python"] = "isolated_host_python"
+    kind: Literal["isolated_host_python"]
     resolved_executable: str
     implementation: _NonemptyString
     python_version: _NonemptyString
@@ -166,8 +136,14 @@ def _require_identity_role(
     document: IdentityDocument,
     *,
     schema: str,
-    payload_keys: frozenset[str],
 ) -> Mapping[str, object]:
+    """Require one identity document to carry the named role's schema.
+
+    The role's payload model is the sole key authority: under
+    ``ContractModel``'s ``extra="forbid"`` and its fully required fields,
+    an unknown or missing key is already a validation failure, so the key
+    names are never restated here.
+    """
     if document.schema != schema:
         raise ValueError(f"identity must use schema {schema}")
     if document.schema_version != IDENTITY_SCHEMA_VERSION:
@@ -178,8 +154,6 @@ def _require_identity_role(
         raise ValueError(  # noqa: TRY004 - Pydantic validation error
             "identity payload must be a mapping"
         )
-    if set(document.payload) != payload_keys:
-        raise ValueError("identity payload has the wrong keys")
     return cast("Mapping[str, object]", document.payload)
 
 
@@ -189,7 +163,6 @@ def _validate_executor_identity(
     payload = _require_identity_role(
         document,
         schema=EXECUTOR_IDENTITY_SCHEMA,
-        payload_keys=_EXECUTOR_IDENTITY_KEYS,
     )
     _ExecutorIdentityPayload.model_validate(payload)
     return document
@@ -201,10 +174,8 @@ def _validate_executor_config_identity(
     payload = _require_identity_role(
         document,
         schema=EXECUTOR_CONFIG_IDENTITY_SCHEMA,
-        payload_keys=_EXECUTOR_CONFIG_IDENTITY_KEYS,
     )
     _ExecutorConfigIdentityPayload.model_validate(payload)
-    ExecutorSelfBudgets.model_validate(payload)
     return document
 
 
@@ -214,7 +185,6 @@ def _isolated_host_runtime_identity_payload(
     payload = _require_identity_role(
         document,
         schema=ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA,
-        payload_keys=_ISOLATED_HOST_RUNTIME_IDENTITY_KEYS,
     )
     return _IsolatedHostRuntimeIdentityPayload.model_validate(payload)
 
@@ -237,6 +207,7 @@ def _build_executor_identity(
 ) -> IdentityDocument:
     """Build the executor identity from one executor source snapshot."""
     payload = _ExecutorIdentityPayload(
+        kind=EXECUTOR_IDENTITY_KIND,
         package_version=snapshot.package_version,
         source_commit=snapshot.source_commit,
         source_state=snapshot.source_state,

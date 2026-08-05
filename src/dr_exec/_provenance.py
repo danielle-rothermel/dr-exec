@@ -27,7 +27,7 @@ _UNKNOWN = "unknown"
 _LOWERCASE_HEXADECIMAL = frozenset("0123456789abcdef")
 _GIT_OBJECT_ID_LENGTHS = frozenset({40, 64})
 
-type SourceState = Literal["clean", "dirty", "unknown"]
+type SourceState = Literal["clean", "unknown"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,8 +36,8 @@ class ExecutorSourceSnapshot:
 
     ``source_commit`` is present only when a complete Git object ID was
     resolved. ``session_id`` distinguishes otherwise indistinguishable
-    dirty or unknown source states, so unverified builds never compare
-    equal; a clean snapshot carries no session identity.
+    unknown source states, so unverified builds never compare equal; a
+    clean snapshot carries no session identity.
     """
 
     package_version: str

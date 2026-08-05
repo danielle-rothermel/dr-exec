@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dr_serialize import IdentityDocument
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 
 from dr_exec._bootstrap import (
     ISOLATED_INVOCATION_ARGUMENTS,
@@ -16,7 +16,6 @@ from dr_exec._identity import (
     _build_isolated_host_runtime_identity,
     _isolated_host_runtime_identity_payload,
     _IsolatedHostRuntimeIdentityPayload,
-    _validate_isolated_host_runtime_identity,
 )
 from dr_exec._model import ContractModel, IdentityDocumentField
 from dr_exec._probe import probe_interpreter
@@ -29,19 +28,15 @@ class RuntimeRecord(ContractModel):
     resolved_executable: Path
     id_doc: IdentityDocumentField
 
-    _validated_identity = field_validator("id_doc")(
-        _validate_isolated_host_runtime_identity
-    )
-
-    @field_validator("resolved_executable")
-    @classmethod
-    def executable_must_be_absolute(cls, executable: Path) -> Path:
-        if not executable.is_absolute():
-            raise ValueError("resolved_executable must be absolute")
-        return executable
-
     @model_validator(mode="after")
     def fields_must_match_identity(self) -> RuntimeRecord:
+        """Validate the runtime identity and bind the fields to it.
+
+        Parsing the payload is the identity's own validation, and the
+        payload's ``resolved_executable`` is already a normalized
+        absolute POSIX path, so requiring the field to equal it is the
+        single check that establishes both.
+        """
         payload = _isolated_host_runtime_identity_payload(self.id_doc)
         if self.kind.value != payload.kind:
             raise ValueError("runtime kind does not match identity")
@@ -125,6 +120,7 @@ class IsolatedHostPythonRuntime:
 def _describe_resolved_executable(executable: Path, /) -> RuntimeRecord:
     facts = probe_interpreter(executable)
     payload = _IsolatedHostRuntimeIdentityPayload(
+        kind=RuntimeKind.ISOLATED_HOST_PYTHON.value,
         resolved_executable=executable.as_posix(),
         implementation=facts["implementation"],
         python_version=facts["python_version"],

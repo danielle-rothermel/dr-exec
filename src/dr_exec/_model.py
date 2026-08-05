@@ -6,6 +6,7 @@ from typing import Annotated, Any
 from dr_serialize import (
     IdentityDocument,
     Jsonable,
+    SerializationError,
     canonical_json_bytes,
     decode_strict_json_bytes,
     validate_identity_document,
@@ -77,26 +78,6 @@ def require_canonical_json_bytes(
         )
 
 
-def validate_canonical_model_bytes[ContractModelT: ContractModel](
-    model_type: type[ContractModelT],
-    data: bytes,
-    /,
-    *,
-    max_bytes: int,
-    max_depth: int,
-) -> ContractModelT:
-    """Validate bounded canonical bytes into one boundary model.
-
-    The closed-model tail of the shared read path, for callers whose
-    target is a single ``ContractModel`` rather than a discriminated
-    union.
-    """
-    require_canonical_json_bytes(
-        data, max_bytes=max_bytes, max_depth=max_depth
-    )
-    return model_type.model_validate_json(data, strict=True)
-
-
 def require_utc(value: datetime) -> datetime:
     """Reject naive and non-UTC timestamps at a boundary."""
 
@@ -119,9 +100,20 @@ UtcDatetime = Annotated[
 
 
 def _validate_identity_document(value: Any) -> IdentityDocument:
+    """Validate one embedded identity document inside a boundary model.
+
+    The shared validator raises ``SerializationError``, which Pydantic
+    would let escape untranslated; re-raising as ``ValueError`` keeps an
+    embedded identity failure inside the enclosing ``ValidationError``,
+    where the protocol and record-load boundaries translate it into
+    their own closed taxonomy.
+    """
     if isinstance(value, IdentityDocument):
         return value
-    return validate_identity_document(value)
+    try:
+        return validate_identity_document(value)
+    except SerializationError as error:
+        raise ValueError(f"invalid identity document: {error}") from error
 
 
 def _serialize_identity_document(value: IdentityDocument) -> dict[str, Any]:

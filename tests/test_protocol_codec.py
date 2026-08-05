@@ -198,6 +198,59 @@ def test_a_frame_that_is_not_a_closed_canonical_model_is_malformed(
     assert result.outputs == ()
 
 
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param(
+            b'{"payload":{},"schema":"s"}', id="missing-schema-version"
+        ),
+        pytest.param(
+            b'{"extra":1,"payload":{},"schema":"s","schema_version":1}',
+            id="extra-field",
+        ),
+        pytest.param(
+            b'{"payload":{},"schema":1,"schema_version":1}',
+            id="non-string-schema",
+        ),
+        pytest.param(
+            b'{"payload":{},"schema":"s","schema_version":true}',
+            id="boolean-schema-version",
+        ),
+        pytest.param(
+            b'{"payload":{},"schema":"s","schema_version":1.5}',
+            id="non-integer-schema-version",
+        ),
+        pytest.param(b'"not-a-document"', id="non-object-document"),
+    ],
+)
+def test_a_malformed_embedded_document_is_malformed_not_an_escape(
+    document: bytes,
+) -> None:
+    """A bad identity document stays inside the closed frame taxonomy.
+
+    The frame itself is canonical and well-formed JSON, so only the
+    embedded document's shape is invalid. The shared validator's error
+    must be translated rather than escaping the reader, and every output
+    accepted before the bad frame must survive.
+    """
+    digest = Sha256Digest("c" * 64)
+    accepted = _output_document(0)
+    stream = (
+        encode_frame(ProtocolPrelude(request_id_sha256=digest))
+        + encode_frame(ProtocolOutput(sequence=0, document=accepted))
+        + b'{"document":'
+        + document
+        + b',"kind":"output","sequence":1,"version":1}'
+        + FRAME_TERMINATOR
+    )
+
+    result = _read(stream, request_id_sha256=digest)
+
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.MALFORMED_FRAME
+    assert result.outputs == (accepted,)
+
+
 def test_a_crlf_terminator_leaves_a_non_canonical_frame() -> None:
     digest = Sha256Digest("a" * 64)
     stream = (

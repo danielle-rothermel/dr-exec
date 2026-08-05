@@ -19,7 +19,10 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import pytest
+from dr_serialize import canonical_json_bytes
+from dr_store.docdir import DocumentDirectory
 from dr_store.errors import DocumentDirectoryError
+from pydantic import ValidationError
 
 from dr_exec import (
     AttemptId,
@@ -276,6 +279,10 @@ def test_finalizing_twice_degrades_rather_than_replacing_the_record(
 
     assert isinstance(receipt, DegradedRecordReceipt)
     assert _manifest_bytes(prepared_run.record_dir) == first
+    # The handle proves only a lower bound; the receipt must not
+    # understate the finalized record that is durably on disk.
+    assert receipt.latest_state == RecordState.FINALIZED
+    assert receipt.latest_state == store.load(prepared_run.record_dir).state
 
 
 # --- abrupt parent death and valid incomplete recovery ----------------
@@ -608,7 +615,11 @@ def test_a_missing_run_directory_degrades_rather_than_raising(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Finalization degrades even when nothing valid remains on disk."""
+    """Finalization degrades even when nothing valid remains on disk.
+
+    No lifecycle state is readable here, so the handle's own state is
+    the closest remaining claim the receipt can make.
+    """
     missing = PreparedRun(
         execution_id=execution_id,
         record_dir=store.root / "run-absent",
@@ -618,6 +629,8 @@ def test_a_missing_run_directory_degrades_rather_than_raising(
 
     assert isinstance(receipt, DegradedRecordReceipt)
     assert receipt.latest_state == RecordState.PREPARED
+    with pytest.raises(RecordLoadError):
+        store.load(missing.record_dir)
 
 
 def test_a_recording_failure_names_no_rejected_value(
@@ -722,6 +735,80 @@ def test_load_rejects_a_manifest_that_is_not_a_valid_record(
         store.load(run.record_dir)
 
     assert raised.value.__cause__ is not None
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        pytest.param(
+            lambda document: {**document, "extra": 1}, id="extra-field"
+        ),
+        pytest.param(
+            lambda document: {
+                key: value
+                for key, value in document.items()
+                if key != "schema_version"
+            },
+            id="missing-schema-version",
+        ),
+        pytest.param(
+            lambda document: {**document, "schema": 1}, id="non-string-schema"
+        ),
+        pytest.param(lambda document: "not-a-document", id="non-object"),
+    ],
+)
+def test_load_rejects_a_corrupted_embedded_identity_document(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    corrupt: object,
+) -> None:
+    """A bad identity document is a load failure, not an escaping error.
+
+    The manifest stays canonical, so only the embedded document's shape
+    is invalid: the shared validator's error must arrive as
+    ``RecordLoadError`` with the original preserved as ``__cause__``.
+    """
+    run = store.prepare(_prepared_record(execution_id))
+    payload = json.loads(_manifest_bytes(run.record_dir))
+    header = payload["header"]
+    header["executor_identity"] = corrupt(header["executor_identity"])  # type: ignore[operator]
+    (run.record_dir / MANIFEST_NAME).write_bytes(canonical_json_bytes(payload))
+
+    with pytest.raises(RecordLoadError, match="not a valid") as raised:
+        store.load(run.record_dir)
+
+    assert raised.value.__cause__ is not None
+
+
+def test_the_manifest_read_reproduces_the_stored_canonical_bytes(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    """Strict validation runs on bytes equal to the ones on disk.
+
+    The primitive returns a decoded payload rather than the bytes it
+    verified, so the load path re-encodes it. This pins the two pinned
+    packages' canonical profiles agreeing, for every lifecycle state.
+    """
+
+    def stored_bytes_round_trip() -> bytes:
+        raw = _manifest_bytes(run.record_dir)
+        decoded = DocumentDirectory.read_manifest(
+            run.record_dir, manifest_name=MANIFEST_NAME
+        )
+        assert canonical_json_bytes(decoded) == raw
+        return raw
+
+    run = store.prepare(_prepared_record(execution_id))
+    prepared_bytes = stored_bytes_round_trip()
+    running = store.mark_running(
+        run, ProcessRecord(pid=4242, started_at=STARTED_AT)
+    )
+    running_bytes = stored_bytes_round_trip()
+    store.finalize(running, _result(execution_id, stdout=_stream(b"a")))
+    finalized_bytes = stored_bytes_round_trip()
+
+    assert len({prepared_bytes, running_bytes, finalized_bytes}) == 3
 
 
 def test_load_rejects_a_missing_manifest(
@@ -833,12 +920,18 @@ def test_the_finalized_record_binds_the_declaration_to_its_result(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
+    """A result from another run is a caller defect, not a disk failure.
+
+    Degradation describes the storage medium failing. An invalid record
+    construction is dr-exec's own invariant breaking, so it raises
+    rather than being reported as a recording problem.
+    """
     run = store.prepare(_prepared_record(execution_id))
     other = ExecutionId(job_id=JobId(uuid4()), attempt_id=AttemptId(uuid4()))
 
-    receipt = store.finalize(run, _result(other))
+    with pytest.raises(ValidationError):
+        store.finalize(run, _result(other))
 
-    assert isinstance(receipt, DegradedRecordReceipt)
     assert store.load(run.record_dir).state == RecordState.PREPARED
 
 

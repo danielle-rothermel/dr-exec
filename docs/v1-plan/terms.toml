@@ -34,7 +34,7 @@ definition = """
 The versioned, deliberately loose identity of the executor machinery that \
 produced a run, carried in every real run record for provenance. V1 identifies \
 the executor kind, installed package version, and source commit when available; \
-dirty or unknown source also receives a construction-session identity so \
+unknown source also receives a construction-session identity so \
 unverified states do not compare equal. Executor identity is distinct from \
 executor-config and runtime identity."""
 

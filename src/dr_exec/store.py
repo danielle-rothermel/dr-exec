@@ -145,10 +145,12 @@ def _retained_stream_record(
 ) -> RetainedPayloadStreamRecord:
     """Describe one retained stream from its finalized sidecar summary.
 
-    Segment lengths come from the summary, so the manifest can never
-    disagree with the bytes the primitive actually stored. Produced and
-    dropped counts are the executor's retention accounting, which the
-    writer never observes.
+    The writer stores exactly the bytes it was offered, so the summary's
+    segment lengths restate the caller's own head/tail split rather than
+    deriving it. The summary's digest is the primitive's independent
+    contribution: it is what pins the stored bytes. Produced and dropped
+    counts are the executor's retention accounting, which the writer
+    never observes.
     """
     return RetainedPayloadStreamRecord(
         head_bytes=summary.head_length,
@@ -223,10 +225,10 @@ def _write_sidecar(
     """Store one stream's already-retained bytes, head segment first.
 
     Retention against the declared budget already happened upstream, so
-    the writer never drops a byte here. The caps restate the boundary
-    that retention produced -- an unbounded head would stream the tail
-    into the head segment and collapse ``tail_length`` to zero -- so the
-    summary reports the two segments the reader must keep separate.
+    the caps are the lengths of the very bytes being written and the
+    writer never drops one. They exist to keep the two segments the
+    reader must separate from collapsing into one, not to bound
+    anything the caller has not already bounded.
     """
     writer = directory.open_sidecar(
         name,
@@ -320,15 +322,11 @@ class DirectoryRunStore:
         """
         try:
             self._publish_finalized(run, result)
-        except (
-            DocumentDirectoryError,
-            RecordLoadError,
-            ValidationError,
-        ) as error:
+        except (DocumentDirectoryError, RecordLoadError) as error:
             return DegradedRecordReceipt(
                 execution_id=run.execution_id,
                 record_dir=run.record_dir,
-                latest_state=_handle_state(run),
+                latest_state=_durable_state(run),
                 failures=(_recording_failure("finalize", error),),
             )
         return CompleteRecordReceipt(
@@ -428,13 +426,24 @@ def _executor_failure(operation: str, /) -> Iterator[None]:
         raise ExecutorFailure(f"could not {operation}") from error
 
 
-def _handle_state(run: FinalizableRun, /) -> RecordState:
-    """Name the lifecycle state a handle proves is durable on disk."""
-    return (
-        RecordState.PREPARED
-        if isinstance(run, PreparedRun)
-        else RecordState.RUNNING
-    )
+def _durable_state(run: FinalizableRun, /) -> RecordState:
+    """Name the latest lifecycle state still valid on disk.
+
+    A handle proves only a lower bound on what was published, so the
+    record itself is the authority: a degraded receipt must not
+    understate a finalized record that is durably present. When no valid
+    record can be read at all, the handle's own state is the closest
+    remaining claim, and this derivation never raises out of the
+    degradation path it describes.
+    """
+    try:
+        return _load_record(run.record_dir).state
+    except RecordLoadError:
+        return (
+            RecordState.PREPARED
+            if isinstance(run, PreparedRun)
+            else RecordState.RUNNING
+        )
 
 
 def _directory(record_dir: Path, /) -> DocumentDirectory:
@@ -444,11 +453,13 @@ def _directory(record_dir: Path, /) -> DocumentDirectory:
 def _load_record(record_dir: Path, /) -> RunRecord:
     """Read, then strictly validate, the manifest at ``record_dir``.
 
-    The primitive strictly decodes the stored bytes and rejects any drift
-    from their canonical rendering, so re-encoding the payload it returns
-    reproduces exactly the verified stored bytes. Those bytes -- never
-    the decoded ``Jsonable`` -- are what Pydantic validates, in strict
-    JSON mode; dr-exec then owns lifecycle meaning.
+    The primitive returns the decoded payload rather than the bytes it
+    verified, so the bytes handed to strict JSON-mode validation are a
+    canonical re-encoding of that payload. Their equality with the
+    stored bytes rests on the two pinned packages sharing one canonical
+    profile, which is a cross-package assumption pinned by test rather
+    than a property re-derived here. The decoded ``Jsonable`` itself
+    never reaches Pydantic; dr-exec then owns lifecycle meaning.
 
     This read is unbounded in v1: the primitive reads the manifest whole
     and applies no byte or depth limit, and ``DirectoryRunStore`` takes

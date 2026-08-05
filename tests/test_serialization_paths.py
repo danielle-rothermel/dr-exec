@@ -1,4 +1,10 @@
-"""Strict read and write behavior for the validated serialization paths."""
+"""Strict read and write behavior for the validated serialization paths.
+
+``require_canonical_json_bytes`` is the shared front half of every read
+boundary, so its bounds, its strict-decoder taxonomy, and its canonical
+equality check are exercised directly. The closed-model tail belongs to
+the real boundaries, so ``decode_frame`` stands in for it here.
+"""
 
 from __future__ import annotations
 
@@ -10,33 +16,40 @@ from dr_serialize import (
     JsonDepthLimitError,
     JsonSyntaxError,
     NonFiniteJsonNumberError,
+    Sha256Digest,
     StrictJsonDecodeError,
 )
 
-from dr_exec import ExecutionId, OutputArtifactRecord
+from dr_exec import ExecutionId
 from dr_exec._model import (
     NonCanonicalBytesError,
     canonical_model_bytes,
-    validate_canonical_model_bytes,
+    require_canonical_json_bytes,
 )
+from dr_exec._protocol import ProtocolViolation, decode_frame
+from dr_exec._wire import ProtocolPrelude
+from dr_exec.kinds import ProtocolFailureCode
 
 READ_MAX_BYTES = 4096
 READ_MAX_DEPTH = 32
+
+
+def _read(data: bytes) -> None:
+    require_canonical_json_bytes(
+        data,
+        max_bytes=READ_MAX_BYTES,
+        max_depth=READ_MAX_DEPTH,
+    )
 
 
 def test_canonical_write_then_read_round_trips(
     execution_id: ExecutionId,
 ) -> None:
     data = canonical_model_bytes(execution_id)
-    assert (
-        validate_canonical_model_bytes(
-            ExecutionId,
-            data,
-            max_bytes=READ_MAX_BYTES,
-            max_depth=READ_MAX_DEPTH,
-        )
-        == execution_id
-    )
+
+    _read(data)
+
+    assert ExecutionId.model_validate_json(data, strict=True) == execution_id
 
 
 def test_read_rejects_non_canonical_key_order(
@@ -48,12 +61,7 @@ def test_read_rejects_non_canonical_key_order(
     )
     assert reordered != canonical_model_bytes(execution_id)
     with pytest.raises(NonCanonicalBytesError):
-        validate_canonical_model_bytes(
-            ExecutionId,
-            reordered,
-            max_bytes=READ_MAX_BYTES,
-            max_depth=READ_MAX_DEPTH,
-        )
+        _read(reordered)
 
 
 def test_read_rejects_insignificant_whitespace(
@@ -61,12 +69,7 @@ def test_read_rejects_insignificant_whitespace(
 ) -> None:
     spaced = canonical_model_bytes(execution_id).replace(b",", b", ")
     with pytest.raises(NonCanonicalBytesError):
-        validate_canonical_model_bytes(
-            ExecutionId,
-            spaced,
-            max_bytes=READ_MAX_BYTES,
-            max_depth=READ_MAX_DEPTH,
-        )
+        _read(spaced)
 
 
 @pytest.mark.parametrize(
@@ -87,12 +90,7 @@ def test_read_surfaces_shared_decoder_taxonomy(
     expected_error: type[StrictJsonDecodeError],
 ) -> None:
     with pytest.raises(expected_error):
-        validate_canonical_model_bytes(
-            ExecutionId,
-            data,
-            max_bytes=READ_MAX_BYTES,
-            max_depth=READ_MAX_DEPTH,
-        )
+        _read(data)
 
 
 def test_read_enforces_the_declared_byte_bound(
@@ -100,8 +98,7 @@ def test_read_enforces_the_declared_byte_bound(
 ) -> None:
     data = canonical_model_bytes(execution_id)
     with pytest.raises(JsonByteLimitError):
-        validate_canonical_model_bytes(
-            ExecutionId,
+        require_canonical_json_bytes(
             data,
             max_bytes=len(data) - 1,
             max_depth=READ_MAX_DEPTH,
@@ -113,36 +110,40 @@ def test_read_enforces_the_declared_depth_bound(
 ) -> None:
     data = canonical_model_bytes(execution_id)
     with pytest.raises(JsonDepthLimitError):
-        validate_canonical_model_bytes(
-            ExecutionId,
+        require_canonical_json_bytes(
             data,
             max_bytes=READ_MAX_BYTES,
             max_depth=0,
         )
 
 
-def test_read_rejects_a_valid_document_of_the_wrong_model(
+def test_a_real_boundary_validates_the_same_canonical_bytes() -> None:
+    """The closed-model tail runs on the bytes the front half verified."""
+    prelude = ProtocolPrelude(request_id_sha256=Sha256Digest("a" * 64))
+    data = canonical_model_bytes(prelude)
+
+    assert decode_frame(data, max_depth=READ_MAX_DEPTH) == prelude
+
+
+def test_a_real_boundary_rejects_a_valid_document_of_the_wrong_model(
     execution_id: ExecutionId,
 ) -> None:
     data = canonical_model_bytes(execution_id)
-    with pytest.raises(ValueError, match="validation error"):
-        validate_canonical_model_bytes(
-            OutputArtifactRecord,
-            data,
-            max_bytes=READ_MAX_BYTES,
-            max_depth=READ_MAX_DEPTH,
-        )
+
+    with pytest.raises(ProtocolViolation) as raised:
+        decode_frame(data, max_depth=READ_MAX_DEPTH)
+
+    assert raised.value.code == ProtocolFailureCode.MALFORMED_FRAME
 
 
-def test_read_rejects_extra_fields(execution_id: ExecutionId) -> None:
+def test_a_real_boundary_rejects_extra_fields() -> None:
     """An extra key in canonical position still fails model validation."""
-    data = canonical_model_bytes(execution_id).replace(
-        b',"job_id"', b',"extra":1,"job_id"', 1
+    prelude = ProtocolPrelude(request_id_sha256=Sha256Digest("a" * 64))
+    data = canonical_model_bytes(prelude).replace(
+        b'{"kind"', b'{"extra":1,"kind"', 1
     )
-    with pytest.raises(ValueError, match="validation error"):
-        validate_canonical_model_bytes(
-            ExecutionId,
-            data,
-            max_bytes=READ_MAX_BYTES,
-            max_depth=READ_MAX_DEPTH,
-        )
+
+    with pytest.raises(ProtocolViolation) as raised:
+        decode_frame(data, max_depth=READ_MAX_DEPTH)
+
+    assert raised.value.code == ProtocolFailureCode.MALFORMED_FRAME

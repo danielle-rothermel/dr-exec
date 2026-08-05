@@ -38,12 +38,6 @@ CLEAN_SNAPSHOT = ExecutorSourceSnapshot(
     source_state="clean",
     session_id=None,
 )
-DIRTY_SNAPSHOT = ExecutorSourceSnapshot(
-    package_version="0.1.0",
-    source_commit="1" * 40,
-    source_state="dirty",
-    session_id="0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72",
-)
 UNKNOWN_SNAPSHOT = ExecutorSourceSnapshot(
     package_version="0.1.0",
     source_commit=None,
@@ -51,6 +45,7 @@ UNKNOWN_SNAPSHOT = ExecutorSourceSnapshot(
     session_id="0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f73",
 )
 RUNTIME_PAYLOAD = _IsolatedHostRuntimeIdentityPayload(
+    kind="isolated_host_python",
     resolved_executable="/opt/py/bin/python3.13",
     implementation="cpython",
     python_version="3.13.2",
@@ -69,20 +64,6 @@ def test_clean_executor_identity_is_pinned() -> None:
     )
     assert identity_document_hash(document) == (
         "4dc688091b7afc597f17e50c660f8ecf06c0331db9113cf35c2a058cd03231fb"
-    )
-
-
-def test_dirty_executor_identity_is_pinned() -> None:
-    document = _build_executor_identity(DIRTY_SNAPSHOT)
-    assert canonical_identity_json_bytes(document) == (
-        b'{"payload":{"kind":"process_executor","package_version":"0.1.0",'
-        b'"session_id":"0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72",'
-        b'"source_commit":"111111111111111111111111111111111111111'
-        b'1","source_state":"dirty"},"schema":"dr_exec.executor",'
-        b'"schema_version":1}'
-    )
-    assert identity_document_hash(document) == (
-        "7a1865e9e5395efa9ee476435b6be7a30c172efe79280ccfdc4598075fcbdd2f"
     )
 
 

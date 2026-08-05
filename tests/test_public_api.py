@@ -128,14 +128,48 @@ def test_environment_records_reject_exclusions_outside_overlay() -> None:
         )
 
 
-def test_identity_validators_reject_a_foreign_schema() -> None:
+def test_identity_validators_reject_an_incomplete_payload() -> None:
+    """The role's payload model is the sole key authority."""
     foreign = build_identity_document(
         schema="dr_exec.executor",
         schema_version=1,
         payload={"kind": "process_executor"},
     )
-    with pytest.raises(ValueError, match="wrong keys"):
+    with pytest.raises(ValidationError, match="Field required"):
         _validate_executor_identity(foreign)
+
+
+def test_identity_validators_reject_an_unknown_payload_key() -> None:
+    document = build_identity_document(
+        schema="dr_exec.executor",
+        schema_version=1,
+        payload={
+            "kind": "process_executor",
+            "package_version": "0.1.0",
+            "source_commit": "0" * 40,
+            "source_state": "clean",
+            "session_id": None,
+            "extra": 1,
+        },
+    )
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        _validate_executor_identity(document)
+
+
+def test_identity_validators_reject_a_payload_missing_its_kind() -> None:
+    """``kind`` is a persisted key, never supplied by a model default."""
+    document = build_identity_document(
+        schema="dr_exec.executor",
+        schema_version=1,
+        payload={
+            "package_version": "0.1.0",
+            "source_commit": "0" * 40,
+            "source_state": "clean",
+            "session_id": None,
+        },
+    )
+    with pytest.raises(ValidationError, match="Field required"):
+        _validate_executor_identity(document)
 
 
 def test_identity_validators_reject_a_foreign_schema_version() -> None:
