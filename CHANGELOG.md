@@ -14,11 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   root API and pinned persisted encodings.
 - Required explicit protocol-frame versions and strengthened declaration,
   record-loading, provenance, lifecycle, and scheduler validation.
-- Updated `dr-serialize` to 0.1.2 and raised the `dr-store` requirement to
-  0.1.2.
+- Pinned `dr-serialize` and `dr-store` at 0.1.2.
 - Replaced superseded planning documents with the forward-facing README,
   repository definitions, and focused future plans.
-- Switched `dr-serialize` development and release resolution to PyPI.
+- Switched `dr-serialize` and `dr-store` development and release resolution
+  to PyPI.
 - Added MIT package metadata and artifact checks that require the license in
   both distributions.
 

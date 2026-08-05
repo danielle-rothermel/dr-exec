@@ -53,7 +53,7 @@ trap on_exit EXIT
 
 cd -- "${repository_root}"
 
-uv sync --locked
+uv sync --locked --no-sources
 uv run ruff format --check .
 uv run ruff check .
 uv run ty check
@@ -81,6 +81,45 @@ if [[ "$(dirname -- "${temporary_root}")" != "${temporary_parent}" \
 fi
 
 artifact_directory="${temporary_root}/dist"
+requirements_file="${temporary_root}/requirements.txt"
+wheel_environment="${temporary_root}/wheel-environment"
 mkdir -- "${artifact_directory}"
 uv build --out-dir "${artifact_directory}"
 uv run python scripts/check_distribution.py "${artifact_directory}"
+
+uv export --quiet --locked --no-sources --no-dev --no-emit-project \
+    --output-file "${requirements_file}"
+
+project_python="$(uv run --no-sync python -I -c 'import sys; print(sys.executable)')"
+if [[ ! -x "${project_python}" ]]; then
+    printf 'Project interpreter is not executable: %s\n' \
+        "${project_python}" >&2
+    exit 1
+fi
+
+uv venv --python "${project_python}" "${wheel_environment}"
+wheel_python="${wheel_environment}/bin/python"
+if [[ ! -x "${wheel_python}" ]]; then
+    printf 'Wheel-test interpreter is not executable: %s\n' \
+        "${wheel_python}" >&2
+    exit 1
+fi
+
+shopt -s nullglob
+wheels=("${artifact_directory}"/*.whl)
+shopt -u nullglob
+if [[ "${#wheels[@]}" -ne 1 ]]; then
+    printf 'Expected one wheel; found %d.\n' "${#wheels[@]}" >&2
+    exit 1
+fi
+
+uv pip install --python "${wheel_python}" \
+    --requirement "${requirements_file}"
+uv pip install --python "${wheel_python}" --no-deps "${wheels[0]}"
+
+(
+    cd -- "${wheel_environment}"
+    "${wheel_python}" -I \
+        "${repository_root}/scripts/check_built_install.py" \
+        "${repository_root}"
+)
