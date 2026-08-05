@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from typing import IO, cast
 
 import pytest
 from dr_serialize import (
@@ -21,6 +22,7 @@ from dr_exec import (
     UnbudgetedLimit,
 )
 from dr_exec._protocol import (
+    STRUCTURAL_DEPTH_CEILING,
     ProtocolStreamResult,
     encode_frame,
     read_protocol_stream,
@@ -309,6 +311,21 @@ def test_a_frame_after_completion_is_unexpected() -> None:
     assert len(result.outputs) == 1
 
 
+def test_partial_bytes_after_completion_are_unexpected() -> None:
+    """Post-completion is the more specific of the two applicable rows.
+
+    Trailing bytes with no terminating LF satisfy both the missing-LF and
+    the bytes-after-completion prohibitions. Once a stream has completed,
+    nothing further is admissible at all, so whether the trailing bytes
+    happen to be LF-terminated must not change the classification.
+    """
+    digest = Sha256Digest("a" * 64)
+    result = _read(_stream(digest, 0) + b"x", request_id_sha256=digest)
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.UNEXPECTED_FRAME
+    assert result.failure.detail == "bytes arrived after the completion frame"
+
+
 def test_a_second_completion_is_unexpected() -> None:
     digest = Sha256Digest("a" * 64)
     stream = _stream(digest, 0) + encode_frame(
@@ -499,7 +516,7 @@ def test_frame_boundaries_do_not_depend_on_transport_chunking() -> None:
     digest = Sha256Digest("a" * 64)
     stream = _stream(digest, 2)
     result = read_protocol_stream(
-        _TrickleReader(stream),
+        cast("IO[bytes]", _TrickleReader(stream)),
         request_id_sha256=digest,
         self_budgets=ExecutorSelfBudgets.unbudgeted(),
     )
@@ -525,7 +542,7 @@ def test_the_frame_byte_edge_holds_under_byte_at_a_time_reads(
         len(frame) for frame in stream.split(FRAME_TERMINATOR) if frame
     )
     result = read_protocol_stream(
-        _TrickleReader(stream),
+        cast("IO[bytes]", _TrickleReader(stream)),
         request_id_sha256=digest,
         self_budgets=_frame_byte_budget(longest + offset),
     )
@@ -680,33 +697,69 @@ def test_an_unbudgeted_count_axis_accepts_many_outputs() -> None:
     assert len(result.outputs) == 2048
 
 
-def test_an_unbudgeted_depth_axis_accepts_deep_nesting() -> None:
-    """No hidden cap stands between an unbudgeted axis and the bytes.
+def _raw_nested_stream(digest: Sha256Digest, payload_depth: int, /) -> bytes:
+    """Assemble nested frame bytes without an ``IdentityDocument``.
 
-    The frame bytes are assembled directly rather than through an
-    ``IdentityDocument``, whose deep-copy snapshot recurses. This depth is
-    far past any plausible library default, so the test fails if a finite
-    cap is reintroduced on this unbudgeted axis; the remaining ceiling
-    belongs to the pinned parsers' own stack recursion, which is the
-    machine-resource exhaustion the design leaves possible rather than an
-    executor-installed limit.
+    Building the document through the library would recurse in its own
+    deep-copy snapshot, which is not what these cases are about.
     """
-    digest = Sha256Digest("a" * 64)
-    depth = 100
-    payload = b'{"n":' * depth + b"0" + b"}" * depth
+    payload = b'{"n":' * payload_depth + b"0" + b"}" * payload_depth
     output = (
         b'{"document":{"payload":' + payload + b","
         b'"schema":"' + OUTPUT_SCHEMA.encode() + b'","schema_version":1},'
         b'"kind":"output","sequence":0,"version":1}' + FRAME_TERMINATOR
     )
-    stream = (
+    return (
         encode_frame(ProtocolPrelude(request_id_sha256=digest))
         + output
         + encode_frame(ProtocolComplete(output_count=1))
     )
-    result = _read(stream, request_id_sha256=digest)
+
+
+# The frame object and the document object sit above the nested payload,
+# so the deepest payload the structural ceiling admits is two levels
+# shallower than the ceiling itself.
+_DEEPEST_ACCEPTED_PAYLOAD = STRUCTURAL_DEPTH_CEILING - 2
+
+
+def test_an_unbudgeted_depth_axis_reaches_the_structural_ceiling() -> None:
+    """No *budget* narrows an unbudgeted axis below the pinned ceiling."""
+    digest = Sha256Digest("a" * 64)
+    result = _read(
+        _raw_nested_stream(digest, _DEEPEST_ACCEPTED_PAYLOAD),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets.unbudgeted(),
+    )
     assert result.completed
     assert len(result.outputs) == 1
+
+
+@pytest.mark.parametrize(
+    "payload_depth",
+    [
+        pytest.param(_DEEPEST_ACCEPTED_PAYLOAD + 1, id="one-over"),
+        pytest.param(_DEEPEST_ACCEPTED_PAYLOAD + 200, id="far-over"),
+    ],
+)
+def test_depth_past_the_structural_ceiling_is_oversized_not_malformed(
+    payload_depth: int,
+) -> None:
+    """One classification for depth overflow, at every depth past it.
+
+    Without a dr-exec-owned ceiling the pinned Pydantic parser is what
+    rejects these bytes, and it reports a malformed frame -- so identical
+    over-deep input would be `OVERSIZED_FRAME` under a small finite budget
+    and `MALFORMED_FRAME` when unbudgeted. Protocol failure codes are
+    persisted, so that split is observable drift, not cosmetics.
+    """
+    digest = Sha256Digest("a" * 64)
+    result = _read(
+        _raw_nested_stream(digest, payload_depth),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets.unbudgeted(),
+    )
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.OVERSIZED_FRAME
 
 
 # --- Request transport ---------------------------------------------------

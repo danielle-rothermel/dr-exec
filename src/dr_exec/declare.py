@@ -15,7 +15,11 @@ from pydantic import (
     model_validator,
 )
 
-from dr_exec._model import ContractModel, IdentityDocumentField
+from dr_exec._model import (
+    Base64UrlBytes,
+    ContractModel,
+    IdentityDocumentField,
+)
 from dr_exec.kinds import (
     ContainmentProfile,
     EnvGrantKind,
@@ -270,7 +274,7 @@ class TrustedCommandTarget(ContractModel):
         ExecutionTargetKind.TRUSTED_COMMAND
     )
     argv: tuple[str, ...]
-    stdin: bytes = b""
+    stdin: Base64UrlBytes = b""
 
     _validated_argv = field_validator("argv")(_validate_argv)
 
@@ -280,7 +284,7 @@ class UntrustedCommandTarget(ContractModel):
         ExecutionTargetKind.UNTRUSTED_COMMAND
     )
     argv: tuple[str, ...]
-    stdin: bytes = b""
+    stdin: Base64UrlBytes = b""
     containment_profile: ContainmentProfile
 
     _validated_argv = field_validator("argv")(_validate_argv)

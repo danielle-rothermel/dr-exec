@@ -291,8 +291,8 @@ class DirectoryRunStore:
         receipt naming ``prepared`` as the latest valid state, which
         remains intact on disk because publication is atomic.
         """
-        prepared = self._load_prepared(prepared_run.record_dir)
         with _executor_failure("publish the running run record"):
+            prepared = self._load_prepared(prepared_run.record_dir)
             _directory(prepared_run.record_dir).publish(
                 _manifest_payload(
                     RunningRecord(
@@ -414,15 +414,16 @@ class DirectoryRunStore:
 
 @contextmanager
 def _executor_failure(operation: str, /) -> Iterator[None]:
-    """Translate the primitive's typed errors into dr-exec's taxonomy.
+    """Translate the primitive's and the read path's errors into one type.
 
-    dr-exec owns the error taxonomy at the ``RunStore`` boundary, so the
-    Document Directory's exception types never escape it. The original
-    error is preserved as ``__cause__``.
+    dr-exec owns the error taxonomy at the ``RunStore`` boundary, so
+    neither the Document Directory's exception types nor the read path's
+    ``RecordLoadError`` escape an operation documented to fail as
+    ``ExecutorFailure``. The original error is preserved as ``__cause__``.
     """
     try:
         yield
-    except DocumentDirectoryError as error:
+    except (DocumentDirectoryError, RecordLoadError) as error:
         raise ExecutorFailure(f"could not {operation}") from error
 
 

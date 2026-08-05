@@ -8,13 +8,15 @@ version with new vectors. Never regenerate expected bytes to match.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 import pytest
-from dr_serialize import IdentityDocument
+from dr_serialize import IdentityDocument, Sha256Digest
+from pydantic import ValidationError
 
 from dr_exec import (
     AttemptId,
@@ -38,9 +40,9 @@ from dr_exec import (
 from dr_exec._model import ContractModel, canonical_model_bytes
 from dr_exec._wire import ProtocolComplete, ProtocolOutput, ProtocolPrelude
 
-ALL_ZERO_DIGEST_WITH_TRAILING_F = "0" * 63 + "f"
-ALL_A_DIGEST = "a" * 64
-ALL_E_DIGEST = "e" * 64
+ALL_ZERO_DIGEST_WITH_TRAILING_F = Sha256Digest("0" * 63 + "f")
+ALL_A_DIGEST = Sha256Digest("a" * 64)
+ALL_E_DIGEST = Sha256Digest("e" * 64)
 
 
 def _uuid_scalar_model() -> ContractModel:
@@ -181,6 +183,81 @@ def test_scalar_wire_spelling_is_pinned(
     expected: bytes,
 ) -> None:
     assert canonical_model_bytes(build_model()) == expected
+
+
+@pytest.mark.parametrize(("build_model", "expected"), SCALAR_VECTORS)
+def test_the_pinned_scalar_spelling_reads_back(
+    build_model: Callable[[], ContractModel],
+    expected: bytes,
+) -> None:
+    """Each written vector is accepted by the read path that wrote it."""
+    model = build_model()
+    assert type(model).model_validate_json(expected, strict=True) == model
+
+
+# --- rejected alternate spellings ----------------------------------------
+#
+# The read path accepts exactly one spelling per scalar. These are the
+# forms the underlying parsers would otherwise accept and silently
+# normalize, which would let distinct durable documents read back as one
+# value -- or, for a seventh fractional digit, let a loaded value differ
+# from the bytes on disk without any error.
+
+GOOD_UUID = "0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"
+
+REJECTED_UUID_SPELLINGS = (
+    pytest.param(GOOD_UUID.upper(), id="uppercase"),
+    pytest.param(GOOD_UUID.replace("-", ""), id="unhyphenated"),
+    pytest.param(f"urn:uuid:{GOOD_UUID}", id="urn"),
+    pytest.param(f"{{{GOOD_UUID}}}", id="braced"),
+)
+
+REJECTED_TIMESTAMP_SPELLINGS = (
+    pytest.param("2026-08-05T12:34:56Z", id="no-fractional-digits"),
+    pytest.param("2026-08-05T12:34:56.1Z", id="one-fractional-digit"),
+    pytest.param("2026-08-05T12:34:56.000007+00:00", id="offset-not-z"),
+    pytest.param("2026-08-05T12:34:56.0000071Z", id="seven-digits"),
+    pytest.param("2026-08-05T12:34:56.000007", id="naive"),
+    pytest.param("2026-08-05T12:34:56.000007+02:00", id="non-utc-offset"),
+)
+
+REJECTED_BYTES_SPELLINGS = (
+    pytest.param("AAH+/w==", id="standard-alphabet-padded"),
+    pytest.param("AAH-_w", id="url-safe-unpadded"),
+    pytest.param("AAH+/w", id="standard-alphabet-unpadded"),
+)
+
+
+@pytest.mark.parametrize("spelling", REJECTED_UUID_SPELLINGS)
+def test_a_non_pinned_uuid_spelling_is_rejected(spelling: str) -> None:
+    document = json.dumps({"job_id": spelling, "attempt_id": GOOD_UUID})
+    with pytest.raises(ValidationError):
+        ExecutionId.model_validate_json(document, strict=True)
+
+
+@pytest.mark.parametrize("spelling", REJECTED_TIMESTAMP_SPELLINGS)
+def test_a_non_pinned_timestamp_spelling_is_rejected(spelling: str) -> None:
+    document = json.dumps(
+        {
+            "started_at": spelling,
+            "finished_at": "2026-08-05T12:34:57.890123Z",
+            "duration_ns": 1,
+            "teardown_duration_ns": 0,
+            "input_bytes": 0,
+            "protocol_bytes_received": 0,
+        }
+    )
+    with pytest.raises(ValidationError):
+        ExecutionMeasurements.model_validate_json(document, strict=True)
+
+
+@pytest.mark.parametrize("spelling", REJECTED_BYTES_SPELLINGS)
+def test_a_non_pinned_bytes_spelling_is_rejected(spelling: str) -> None:
+    document = json.dumps(
+        {"kind": "trusted_command", "argv": ["/bin/echo"], "stdin": spelling}
+    )
+    with pytest.raises(ValidationError):
+        TrustedCommandTarget.model_validate_json(document, strict=True)
 
 
 def test_untrusted_python_target_wire_spelling_is_pinned(

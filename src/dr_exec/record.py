@@ -17,6 +17,7 @@ from dr_exec._identity import (
     _validate_executor_identity,
 )
 from dr_exec._model import (
+    Base64UrlBytes,
     ContractModel,
     IdentityDocumentField,
     UtcDatetime,
@@ -128,8 +129,8 @@ class OutputArtifactRecords(ContractModel):
 
 
 class RetainedPayloadStream(ContractModel):
-    head: bytes
-    tail: bytes
+    head: Base64UrlBytes
+    tail: Base64UrlBytes
     produced_bytes: NonNegativeInt
     dropped_bytes: NonNegativeInt
 

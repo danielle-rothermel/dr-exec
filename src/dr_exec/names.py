@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from typing import NewType
-from uuid import UUID
 
-from dr_exec._model import ContractModel
+from dr_exec._model import CanonicalUuid, ContractModel
 
-JobId = NewType("JobId", UUID)
-AttemptId = NewType("AttemptId", UUID)
+JobId = NewType("JobId", CanonicalUuid)
+AttemptId = NewType("AttemptId", CanonicalUuid)
 
 
 class ExecutionId(ContractModel):

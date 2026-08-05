@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from dr_serialize import IdentityDocument
 
 from dr_exec import (
     ContainmentProfile,
@@ -114,7 +115,7 @@ def test_runtime_identity_binds_the_resolved_executable_path(
 
 def test_prepare_builds_the_fixed_isolated_command(
     host_runtime: IsolatedHostPythonRuntime,
-    request_document: object,
+    request_document: IdentityDocument,
 ) -> None:
     target = UntrustedPythonTarget(
         driver_source=DRIVER_SOURCE,
@@ -129,9 +130,38 @@ def test_prepare_builds_the_fixed_isolated_command(
     assert prepared.runtime_record == host_runtime.describe()
 
 
+def test_prepare_and_describe_spawn_no_subprocess(
+    host_runtime: IsolatedHostPythonRuntime,
+    request_document: IdentityDocument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime facts are probed once, at construction, and never again.
+
+    `prepare()` is on the per-job hot path, so a re-probe there would add
+    one interpreter spawn per job. Equality against `describe()` cannot
+    catch that, because a re-probe of the same interpreter produces an
+    equal record; only forbidding the spawn outright pins it.
+    """
+
+    def _forbidden(*arguments: object, **keywords: object) -> object:
+        raise AssertionError("prepare and describe must not spawn")
+
+    target = UntrustedPythonTarget(
+        driver_source=DRIVER_SOURCE,
+        request=request_document,
+        containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+    )
+    monkeypatch.setattr("subprocess.run", _forbidden)
+    monkeypatch.setattr("subprocess.Popen", _forbidden)
+
+    assert host_runtime.prepare(target).runtime_record == (
+        host_runtime.describe()
+    )
+
+
 def test_prepare_embeds_driver_source_as_inert_data(
     host_runtime: IsolatedHostPythonRuntime,
-    request_document: object,
+    request_document: IdentityDocument,
 ) -> None:
     """Quotes, backslashes, and newlines never become wrapper syntax.
 

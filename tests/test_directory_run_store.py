@@ -35,6 +35,7 @@ from dr_exec import (
     ExecutionAttribution,
     ExecutionId,
     ExecutionMeasurements,
+    ExecutionOutcome,
     ExecutionResult,
     ExecutorFailure,
     ExitedOutcome,
@@ -75,7 +76,9 @@ from dr_exec.store import (
 )
 
 if TYPE_CHECKING:
-    from dr_serialize import IdentityDocument
+    from collections.abc import Callable
+
+    from dr_serialize import IdentityDocument, Jsonable
 
 SECRET_ARGUMENT = "hunter2-argv-secret"
 SECRET_STDIN = b"hunter2-stdin-secret"
@@ -151,7 +154,7 @@ def _stream(
 def _result(
     execution_id: ExecutionId,
     *,
-    outcome: object = None,
+    outcome: ExecutionOutcome | None = None,
     attribution: ExecutionAttribution | None = None,
     stdout: RetainedPayloadStream | None = None,
     stderr: RetainedPayloadStream | None = None,
@@ -255,14 +258,40 @@ def test_mark_running_rejects_a_handle_whose_record_is_finalized(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
+    """Every ``mark_running`` failure leaves as the documented type.
+
+    The engine converts this post-start publication failure into a
+    degraded receipt, so the read half of the operation must not raise a
+    different class than the write half.
+    """
     prepared_run = store.prepare(_prepared_record(execution_id))
     store.finalize(prepared_run, _result(execution_id))
 
-    with pytest.raises(RecordLoadError, match="not in the prepared state"):
+    with pytest.raises(ExecutorFailure) as raised:
         store.mark_running(
             prepared_run,
             ProcessRecord(pid=4242, started_at=STARTED_AT),
         )
+
+    assert isinstance(raised.value.__cause__, RecordLoadError)
+    assert "not in the prepared state" in str(raised.value.__cause__)
+
+
+def test_mark_running_reports_an_unreadable_manifest_as_executor_failure(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    """A corrupt manifest is a read failure, not a different taxonomy."""
+    prepared_run = store.prepare(_prepared_record(execution_id))
+    (prepared_run.record_dir / MANIFEST_NAME).write_bytes(b"{")
+
+    with pytest.raises(ExecutorFailure) as raised:
+        store.mark_running(
+            prepared_run,
+            ProcessRecord(pid=4242, started_at=STARTED_AT),
+        )
+
+    assert isinstance(raised.value.__cause__, RecordLoadError)
 
 
 def test_finalizing_twice_degrades_rather_than_replacing_the_record(
@@ -760,7 +789,7 @@ def test_load_rejects_a_manifest_that_is_not_a_valid_record(
 def test_load_rejects_a_corrupted_embedded_identity_document(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
-    corrupt: object,
+    corrupt: Callable[[Jsonable], Jsonable],
 ) -> None:
     """A bad identity document is a load failure, not an escaping error.
 
@@ -771,7 +800,7 @@ def test_load_rejects_a_corrupted_embedded_identity_document(
     run = store.prepare(_prepared_record(execution_id))
     payload = json.loads(_manifest_bytes(run.record_dir))
     header = payload["header"]
-    header["executor_identity"] = corrupt(header["executor_identity"])  # type: ignore[operator]
+    header["executor_identity"] = corrupt(header["executor_identity"])
     (run.record_dir / MANIFEST_NAME).write_bytes(canonical_json_bytes(payload))
 
     with pytest.raises(RecordLoadError, match="not a valid") as raised:
@@ -895,7 +924,7 @@ def test_load_rejects_an_unsafe_artifact_path_in_the_manifest(
 def test_successful_and_failed_runs_both_produce_complete_records(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
-    outcome: object,
+    outcome: ExecutionOutcome,
     owner: FailureOwner,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))

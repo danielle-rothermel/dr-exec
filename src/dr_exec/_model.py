@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
+from base64 import urlsafe_b64decode
 from datetime import datetime, timedelta
 from typing import Annotated, Any
+from uuid import UUID
 
 from dr_serialize import (
     IdentityDocument,
@@ -92,10 +95,93 @@ def _serialize_utc(value: datetime) -> str:
     )
 
 
+# The one pinned timestamp spelling: UTC RFC 3339 with a trailing `Z` and
+# exactly six fractional digits, which is exactly what `_serialize_utc`
+# emits. Alternate RFC 3339 spellings the parser would otherwise accept
+# -- no fraction, a shorter fraction, a `+00:00` offset -- would read back
+# as bytes the write path never produced, and a seventh fractional digit
+# would be silently truncated, so a loaded value would differ from the
+# durable bytes it came from.
+_UTC_TIMESTAMP_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"
+)
+
+
+def _require_pinned_utc_spelling(value: Any) -> Any:
+    """Parse the pinned spelling, and only it, into a real ``datetime``.
+
+    A function validator makes the core schema behind it strict in the
+    Python sense, so the string is converted here rather than handed on:
+    that keeps this the only accepted textual spelling instead of leaving
+    the parser's permissive RFC 3339 handling in place behind it.
+    """
+    if not isinstance(value, str):
+        return value
+    if not _UTC_TIMESTAMP_PATTERN.fullmatch(value):
+        raise ValueError(
+            "timestamp must be spelled YYYY-MM-DDTHH:MM:SS.ffffffZ"
+        )
+    return datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+
+
 UtcDatetime = Annotated[
     AwareDatetime,
+    BeforeValidator(_require_pinned_utc_spelling),
     AfterValidator(require_utc),
     PlainSerializer(_serialize_utc, return_type=str, when_used="json"),
+]
+
+
+# The one pinned UUID spelling: 36 lowercase hexadecimal characters,
+# hyphenated 8-4-4-4-12. Python's `UUID` also accepts uppercase,
+# unhyphenated, URN, and braced forms and silently normalizes them, so
+# distinct durable documents would otherwise read back as one identity.
+_UUID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+
+def _require_pinned_uuid_spelling(value: Any) -> Any:
+    if isinstance(value, str) and not _UUID_PATTERN.fullmatch(value):
+        raise ValueError(
+            "UUID must be lowercase hyphenated 8-4-4-4-12 hexadecimal"
+        )
+    return value
+
+
+CanonicalUuid = Annotated[
+    UUID,
+    BeforeValidator(_require_pinned_uuid_spelling),
+]
+
+
+# The one pinned JSON-bytes spelling: padded RFC 4648 URL-safe base64,
+# which is what `ser_json_bytes="base64"` emits. Pydantic's validator also
+# accepts the standard alphabet and unpadded input, so up to four distinct
+# documents would otherwise decode to one value and re-digest differently
+# than the bytes they came from.
+_URL_SAFE_BASE64_PATTERN = re.compile(
+    r"(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}==|[A-Za-z0-9_-]{3}=)?"
+)
+
+
+def _require_pinned_base64_spelling(value: Any) -> Any:
+    """Decode the pinned spelling, and only it, into real ``bytes``.
+
+    As with the timestamp, the decode happens here so the permissive
+    standard-alphabet and unpadded forms the parser would otherwise accept
+    never reach a bytes field.
+    """
+    if not isinstance(value, str):
+        return value
+    if not _URL_SAFE_BASE64_PATTERN.fullmatch(value):
+        raise ValueError("bytes must be padded URL-safe base64")
+    return urlsafe_b64decode(value)
+
+
+Base64UrlBytes = Annotated[
+    bytes,
+    BeforeValidator(_require_pinned_base64_spelling),
 ]
 
 

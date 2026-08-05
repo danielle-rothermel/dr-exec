@@ -33,5 +33,5 @@ testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
 
 [tool.ty.src]
-include = ["scripts", "src"]
-exclude = ["nbs", "tests"]
+include = ["scripts", "src", "tests"]
+exclude = ["nbs"]

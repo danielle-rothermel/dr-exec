@@ -9,8 +9,11 @@ rather than discarding the stream.
 
 Finite executor self-budgets bound acquisition. An unbudgeted axis gets no
 executor-installed limit -- not a large one -- so an unbudgeted frame axis
-scans to EOF and an unbudgeted depth axis is bounded only by the frame's
-own byte length, which no JSON value can exceed in nesting.
+scans to EOF. Depth is the one axis with a floor beneath the budget: the
+pinned parsers stop recursing at ``STRUCTURAL_DEPTH_CEILING``, which is a
+property of the machinery rather than executor policy, so dr-exec states
+that number itself and enforces it uniformly instead of letting it leak
+out of a parser as an inconsistently classified failure.
 """
 
 from __future__ import annotations
@@ -56,6 +59,18 @@ _FRAME_ADAPTER: TypeAdapter[ProtocolFrame] = TypeAdapter(ProtocolFrame)
 # size is a transport detail, never a protocol limit: acquisition stops at
 # the terminator or at a declared finite budget, never at this value.
 _CHUNK_BYTES: Final = 65536
+
+# The pinned structural ceiling on frame nesting. This is not a budget: it
+# is the depth at which the pinned Pydantic JSON parser stops recursing,
+# restated here so dr-exec owns the number rather than inheriting it as an
+# invisible parser artifact. Bounding the shared decoder by it means depth
+# overflow is always detected on the dr-serialize path and always
+# classified `OVERSIZED_FRAME`, instead of surfacing from the parser
+# behind it as a malformed frame at one depth and an oversized frame at
+# another. An unbudgeted `json_depth` axis installs no *budget*; this
+# ceiling is the structural limit of the pinned parsers, which the design
+# leaves as machine-resource exhaustion rather than executor policy.
+STRUCTURAL_DEPTH_CEILING: Final = 200
 
 
 class ProtocolViolation(Exception):
@@ -142,10 +157,11 @@ def decode_frame(frame_bytes: bytes, /, *, max_depth: int) -> ProtocolFrame:
             max_depth=max_depth,
         )
     except JsonDepthLimitError as error:
-        # Depth is a configured finite protocol limit, so its overflow is
-        # an oversized frame rather than a malformed one. The unbudgeted
-        # path bounds depth by the frame's own byte length, which no JSON
-        # value can reach, so no unbudgeted axis lands here.
+        # Depth overflow is an oversized frame rather than a malformed
+        # one, whether the bound came from a finite budget or from the
+        # structural ceiling. Bounding here at or below what the parser
+        # behind this call can accept is what keeps that classification
+        # single-valued.
         raise ProtocolViolation(
             ProtocolFailureCode.OVERSIZED_FRAME,
             "frame exceeded its structural depth budget",
@@ -192,11 +208,15 @@ class _FrameAcquisition:
     _at_eof: bool = False
     bytes_received: int = 0
 
-    def next_frame(self) -> bytes | None:
+    def next_frame(self, *, after_completion: bool) -> bytes | None:
         """Return the next frame's bytes without its terminator, or None.
 
         ``None`` means a clean EOF on a frame boundary. Bytes present at
-        EOF without a terminator are an incomplete stream.
+        EOF without a terminator are an incomplete stream -- unless the
+        completion frame already arrived, in which case they are the more
+        specific post-completion prohibition: once a stream has completed,
+        every trailing byte is unexpected, whether or not it happens to
+        be LF-terminated.
         """
         while True:
             terminator = self._buffer.find(FRAME_TERMINATOR)
@@ -209,8 +229,12 @@ class _FrameAcquisition:
             if self._at_eof:
                 if self._buffer:
                     raise ProtocolViolation(
-                        ProtocolFailureCode.INCOMPLETE_STREAM,
-                        "stream ended without a terminating LF",
+                        ProtocolFailureCode.UNEXPECTED_FRAME
+                        if after_completion
+                        else ProtocolFailureCode.INCOMPLETE_STREAM,
+                        "bytes arrived after the completion frame"
+                        if after_completion
+                        else "stream ended without a terminating LF",
                     )
                 return None
             self._fill()
@@ -371,7 +395,9 @@ def read_protocol_stream(
     failure: ProtocolFailure | None = None
     try:
         while True:
-            frame_bytes = acquisition.next_frame()
+            frame_bytes = acquisition.next_frame(
+                after_completion=state.completed
+            )
             if frame_bytes is None:
                 state.finish()
                 break
@@ -380,14 +406,13 @@ def read_protocol_stream(
                     ProtocolFailureCode.UNEXPECTED_FRAME,
                     "bytes arrived after the completion frame",
                 )
-            # An unbudgeted depth axis is bounded by the frame's own byte
-            # length: every nesting level costs at least one byte, so this
-            # bound rejects nothing the frame could contain.
             state.accept(
                 decode_frame(
                     frame_bytes,
                     max_depth=(
-                        len(frame_bytes) if max_depth is None else max_depth
+                        STRUCTURAL_DEPTH_CEILING
+                        if max_depth is None
+                        else max_depth
                     ),
                 )
             )

@@ -59,7 +59,9 @@ def test_digest_boundaries_reject_non_canonical_spellings(
     digest: str,
 ) -> None:
     with pytest.raises(ValidationError):
-        ProtocolPrelude(request_id_sha256=digest)
+        # The bare `str` is the point: this pins that the model, not
+        # only the nominal constructor, rejects a non-canonical digest.
+        ProtocolPrelude(request_id_sha256=digest)  # ty: ignore[invalid-argument-type]
 
 
 def test_digest_boundaries_yield_nominal_digest_values() -> None:
