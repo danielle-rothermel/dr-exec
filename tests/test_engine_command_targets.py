@@ -31,6 +31,7 @@ from uuid import uuid4
 import pytest
 from dr_serialize import build_identity_document
 
+import dr_exec._spawn
 import dr_exec.engine
 from dr_exec import (
     BudgetAxis,
@@ -596,6 +597,52 @@ def test_an_absolute_executable_resolves_without_any_granted_path(
     completed = harness.run(python_command("pass"))
 
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
+
+
+@requires_macos
+def test_a_relative_granted_path_entry_is_refused_before_anything_durable(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative entry names nothing the child could reach.
+
+    The tool really exists at ``<cwd>/bin/<name>``, so the search would
+    succeed and hand back a relative hit; the child chdirs to its fresh
+    scratch directory before ``exec``, where that hit resolves to
+    nothing. Reading the entry against the parent's location instead
+    would be the ambient cwd the engine never consults, so the
+    declaration is refused rather than resolved.
+    """
+    tool_dir = tmp_path / "bin"
+    tool_dir.mkdir()
+    tool = tool_dir / "dr-exec-test-tool"
+    tool.write_text("#!/bin/sh\nprintf resolved\n")
+    tool.chmod(0o700)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(DeclarationError, match="absolute entries"):
+        harness.run(
+            ("dr-exec-test-tool",),
+            env=EnvGrant.fixed({"PATH": "bin"}),
+        )
+
+    assert list(harness.root.iterdir()) == []
+
+
+@requires_macos
+def test_an_empty_granted_path_entry_is_refused_before_anything_durable(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """An empty entry is the current directory, spelled shorter."""
+    tool_dir = tmp_path / "bin"
+    tool_dir.mkdir()
+
+    with pytest.raises(DeclarationError, match="absolute entries"):
+        harness.run(
+            ("dr-exec-test-tool",),
+            env=EnvGrant.fixed({"PATH": f"{tool_dir.as_posix()}:"}),
+        )
+
+    assert list(harness.root.iterdir()) == []
 
 
 @requires_macos
@@ -1884,6 +1931,70 @@ def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
     finally:
         for descriptor in stalls:
             os.close(descriptor)
+
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
+
+
+@requires_macos
+def test_a_helper_stopped_before_setsid_is_still_reaped(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teardown before the group exists still ends the call.
+
+    The gate holds the helper at its first statement, so the startup
+    budget expires while the child is still short of `setsid`: it remains
+    in the parent's own group, where its pid names no group and every
+    group-targeted signal fails with ESRCH. Signalling only the group
+    there would leave the unbounded reap that follows waiting forever, so
+    the case asserts the executor's own failure arrives and that the
+    direct child was collected.
+
+    The parent holds both ends of the gate FIFO open for the whole run,
+    so the child's own open returns at once and it blocks in `read`.
+    That is what makes the hold survivable from the parent's side: a
+    child that teardown kills while gated never opens the FIFO, and the
+    parent still has no peer to wait for when it lets go.
+    """
+    gate_path = tmp_path / "before-setsid"
+    os.mkfifo(gate_path)
+    gate_read = os.open(gate_path, os.O_RDONLY | os.O_NONBLOCK)
+    gate_write = os.open(gate_path, os.O_WRONLY)
+    original = dr_exec._spawn.spawn_bootstrap_source
+
+    def gated_source(
+        *,
+        executable: str,
+        argv: tuple[str, ...],
+        scratch_directory: str,
+        descriptor_map: tuple[tuple[int, int], ...],
+        status_descriptor: int,
+    ) -> str:
+        # A blocking read at the very top of the helper, ahead of every
+        # line the parent renders and of `setsid` itself.
+        prologue = f"open({gate_path.as_posix()!r}).read(1)\n"
+        return prologue + original(
+            executable=executable,
+            argv=argv,
+            scratch_directory=scratch_directory,
+            descriptor_map=descriptor_map,
+            status_descriptor=status_descriptor,
+        )
+
+    monkeypatch.setattr(dr_exec._spawn, "spawn_bootstrap_source", gated_source)
+
+    try:
+        with pytest.raises(ExecutorFailure, match="startup budget"):
+            harness.run(
+                python_command("import time; time.sleep(120)"),
+                self_budgets=ExecutorSelfBudgets(
+                    startup_time=FiniteDurationLimit(max_ns=200_000_000),
+                    termination_time=FiniteDurationLimit(max_ns=200_000_000),
+                ),
+            )
+    finally:
+        os.close(gate_write)
+        os.close(gate_read)
 
     with pytest.raises(ChildProcessError):
         os.waitpid(-1, os.WNOHANG)

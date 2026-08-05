@@ -211,9 +211,14 @@ def _resolve_executable(
     Absent a granted ``PATH``, only an absolute executable resolves; a
     relative executable with no granted ``PATH`` has no defensible
     meaning and is a pre-spawn declaration error rather than a spawn
-    attempt that would consult the parent's ambient search path. A name
-    that resolves nowhere is left to the spawn, which reports absence as
-    an outcome rather than raising.
+    attempt that would consult the parent's ambient search path. A
+    granted ``PATH`` resolves only through absolute entries, because the
+    child changes to its scratch directory before ``exec``: a relative
+    hit would name nothing the search found, and reading it against the
+    parent's location is the ambient cwd this engine never consults. An
+    empty entry is the same case spelled shorter, since it means the
+    current directory. A name that resolves nowhere is left to the spawn,
+    which reports absence as an outcome rather than raising.
     """
     name = argv[0]
     if Path(name).is_absolute():
@@ -223,6 +228,12 @@ def _resolve_executable(
         raise DeclarationError(
             "a relative executable requires a granted PATH: " + name
         )
+    for entry in granted_path.split(os.pathsep):
+        if not Path(entry).is_absolute():
+            raise DeclarationError(
+                "a granted PATH resolves only through absolute entries: "
+                + entry
+            )
     resolved = shutil.which(name, path=granted_path)
     return resolved if resolved is not None else name
 
@@ -564,6 +575,12 @@ class _AttemptObservation:
     a machinery failure part way through still has to know whether the
     helper leads a process group before it signals one.
 
+    ``leads_group`` selects group signalling; it is not a confirmation of
+    leadership. Leadership is known only once a status is parsed, so the
+    default stands for the unconfirmed state as well as the confirmed
+    one, and teardown reaches the direct child on that branch rather than
+    relying on a group that may not exist yet.
+
     ``state`` is what separates the two completions. It exists exactly
     when the payload was reached, so a ``None`` here means the attempt
     stopped at a setup failure that ``setup_failure`` names.
@@ -643,11 +660,22 @@ def _tear_down(
     session escapes, which the containment claim already says. The direct
     child is always reaped, so no attempt leaves a zombie behind.
 
+    The group path signals the direct child alongside the group, because
+    leadership is confirmed only once a status is parsed. A machinery
+    failure before that -- a startup budget that expires while the helper
+    is still short of ``setsid`` -- leaves the child in the parent's own
+    group, where its pid names no group at all and every group signal
+    fails with ESRCH. The group signal is what reaches ordinary
+    descendants; the direct-child signal is what keeps the reap bounded
+    when the group does not yet exist, and it is harmless once it does:
+    sending to the leader twice costs a signal the leader was already
+    receiving.
+
     ``leads_group`` is false on the one path where the helper is known not
     to lead a group of its own: its ``setsid`` failed, so it never left
     the parent's group and its pid is not a group id. Signalling by that
     number would target whatever unrelated group happens to hold it, so
-    this path reaps the direct child and signals nothing -- there is no
+    this path reaps the direct child and signals no group -- there is no
     original group to tear down, and the helper died before reaching the
     payload, so it has no descendants to contain.
 
@@ -684,8 +712,12 @@ def _tear_down(
         process.wait()
         return time.monotonic_ns() - started_ns
     signal_process_group(process.pid, TERMINATION_SIGNAL)
+    with suppress(OSError):
+        process.send_signal(TERMINATION_SIGNAL)
     if not _reaped_within(process, _finite_ns(self_budgets.termination_time)):
         signal_process_group(process.pid, ESCALATION_SIGNAL)
+        with suppress(OSError):
+            process.send_signal(ESCALATION_SIGNAL)
     # Reap before probing: an unreaped leader is still a group member, so
     # the probe would report the group alive on the strength of the
     # zombie the parent has simply not collected yet.
