@@ -1,148 +1,86 @@
 #!/usr/bin/env bash
 
-set -uo pipefail
+set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-CACHE_DIR="${REPO_ROOT}/.cache/pre-check"
+script_directory="$({
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+    pwd -P
+})"
+repository_root="$({
+    cd -- "${script_directory}/.."
+    pwd -P
+})"
 
-cd "${REPO_ROOT}"
+temporary_root=""
+temporary_parent=""
 
-mkdir -p "${CACHE_DIR}"
+cleanup() {
+    local cleanup_target="${temporary_root:-}"
 
-contains_path() {
-    local candidate="$1"
-    shift
-
-    local path
-    for path in "$@"; do
-        if [[ "${path}" == "${candidate}" ]]; then
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-fixer_paths=("")
-if ! git diff --cached --name-only --diff-filter=ACMR -z \
-    >"${CACHE_DIR}/staged-paths.bin"; then
-    printf 'Failed to inspect staged paths.\n'
-    exit 1
-fi
-while IFS= read -r -d '' path; do
-    case "${path}" in
-        src/*.py | src/*.pyi | scripts/*.py | scripts/*.pyi)
-            fixer_paths+=("${path}")
-            ;;
-    esac
-done <"${CACHE_DIR}/staged-paths.bin"
-
-unstaged_paths=("")
-if ! git diff --name-only -z >"${CACHE_DIR}/unstaged-paths.bin"; then
-    printf 'Failed to inspect unstaged paths.\n'
-    exit 1
-fi
-while IFS= read -r -d '' path; do
-    unstaged_paths+=("${path}")
-done <"${CACHE_DIR}/unstaged-paths.bin"
-
-for path in "${fixer_paths[@]:1}"; do
-    if contains_path "${path}" "${unstaged_paths[@]}"; then
-        printf 'Cannot safely autofix a partially staged file:\n'
-        printf '  %s\n' "${path}"
-        printf 'Stage or restore its remaining changes, then retry.\n'
-        exit 1
+    if [[ -z "${cleanup_target}" ]]; then
+        return 0
     fi
-done
-
-run_silent() {
-    local name="$1"
-    local output_file="$2"
-    shift 2
-
-    printf '  %s\n' "${name}"
-    "$@" >"${output_file}" 2>&1
-}
-
-run_report() {
-    local name="$1"
-    local output_file="$2"
-    shift 2
-
-    printf '\n==> %s\n' "${name}"
-    "$@" 2>&1 | tee "${output_file}"
-    return "${PIPESTATUS[0]}"
-}
-
-autofix_status=0
-
-run_autofix() {
-    local name="$1"
-    local output_file="$2"
-    shift 2
-
-    run_silent "${name}" "${output_file}" "$@"
-    local command_status=$?
-
-    if [[ "${command_status}" -gt 1 ]]; then
-        printf '\nAutofix command failed; see:\n'
-        printf '  %s\n' "${output_file}"
-        autofix_status=1
+    if [[ ! -d "${cleanup_target}" || -L "${cleanup_target}" ]]; then
+        printf 'Refusing to clean invalid temporary directory: %s\n' \
+            "${cleanup_target}" >&2
+        return 1
     fi
+    if [[ "$(dirname -- "${cleanup_target}")" != "${temporary_parent}" ]]; then
+        printf 'Refusing to clean temporary directory outside its parent: %s\n' \
+            "${cleanup_target}" >&2
+        return 1
+    fi
+    if [[ "$(basename -- "${cleanup_target}")" != dr-exec-pre-check.* ]]; then
+        printf 'Refusing to clean unexpected temporary directory: %s\n' \
+            "${cleanup_target}" >&2
+        return 1
+    fi
+
+    rm -rf -- "${cleanup_target:?}"
 }
 
-stage_autofixes() {
-    local path
-    local status=0
+on_exit() {
+    local exit_status=$?
 
-    for path in "${fixer_paths[@]:1}"; do
-        git add -- "${path}" || status=1
-    done
-
-    return "${status}"
+    trap - EXIT
+    if ! cleanup && [[ "${exit_status}" -eq 0 ]]; then
+        exit_status=1
+    fi
+    exit "${exit_status}"
 }
 
-printf 'Running quiet autofixes...\n'
+trap on_exit EXIT
 
-if [[ "${#fixer_paths[@]}" -gt 1 ]]; then
-    run_autofix "ruff check --fix" "${CACHE_DIR}/ruff-check-fix.txt" \
-        uv run ruff check --fix "${fixer_paths[@]:1}"
-    run_autofix "ty check --fix" "${CACHE_DIR}/ty-check-fix.txt" \
-        uv run ty check --fix "${fixer_paths[@]:1}"
-    run_autofix "ruff format" "${CACHE_DIR}/ruff-format.txt" \
-        uv run ruff format "${fixer_paths[@]:1}"
-else
-    printf '  no staged Python files\n'
-fi
+cd -- "${repository_root}"
 
-if ! stage_autofixes; then
-    printf '\nFailed to stage autofixes.\n'
+uv sync --locked
+uv run ruff format --check .
+uv run ruff check .
+uv run ty check
+uvx tombi@1.2.5 lint --offline .defs/terms.toml
+uv run python scripts/check_defs.py
+uv run pytest -q
+
+temporary_base="${TMPDIR:-/tmp}"
+temporary_base="$({
+    cd -- "${temporary_base}"
+    pwd -P
+})"
+temporary_parent="${temporary_base}"
+temporary_root="$(mktemp -d "${temporary_base}/dr-exec-pre-check.XXXXXXXX")"
+temporary_root="$({
+    cd -- "${temporary_root}"
+    pwd -P
+})"
+
+if [[ "$(dirname -- "${temporary_root}")" != "${temporary_parent}" \
+    || "$(basename -- "${temporary_root}")" != dr-exec-pre-check.* ]]; then
+    printf 'mktemp returned an unexpected directory: %s\n' \
+        "${temporary_root}" >&2
     exit 1
 fi
 
-printf '\nRunning final checks...\n'
-
-status="${autofix_status}"
-
-if [[ "${#fixer_paths[@]}" -gt 1 ]]; then
-    run_report "ruff check" "${CACHE_DIR}/ruff-check.txt" \
-        uv run ruff check "${fixer_paths[@]:1}" || status=1
-    run_report "ruff format --check" "${CACHE_DIR}/ruff-format-check.txt" \
-        uv run ruff format --check "${fixer_paths[@]:1}" || status=1
-    run_report "ty check" "${CACHE_DIR}/ty-check.txt" \
-        uv run ty check "${fixer_paths[@]:1}" || status=1
-
-    printf '\nCheck output files:\n'
-    printf '  %s\n' "${CACHE_DIR}/ruff-check.txt"
-    printf '  %s\n' "${CACHE_DIR}/ruff-format-check.txt"
-    printf '  %s\n' "${CACHE_DIR}/ty-check.txt"
-else
-    printf '  no staged Python files\n'
-fi
-
-if [[ "${status}" -ne 0 ]]; then
-    printf '\nFix all reported issues, then rerun:\n'
-    printf '  scripts/pre-check.sh\n'
-fi
-
-exit "${status}"
+artifact_directory="${temporary_root}/dist"
+mkdir -- "${artifact_directory}"
+uv build --out-dir "${artifact_directory}"
+uv run python scripts/check_distribution.py "${artifact_directory}"

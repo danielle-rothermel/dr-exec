@@ -3,12 +3,19 @@
 [![CI](https://github.com/danielle-rothermel/dr-exec/actions/workflows/ci.yaml/badge.svg)](https://github.com/danielle-rothermel/dr-exec/actions/workflows/ci.yaml)
 [![PyPI](https://img.shields.io/pypi/v/dr-exec.svg)](https://pypi.org/project/dr-exec/)
 
-| [Repo Definitions](https://danielle-rothermel.github.io/dr-exec/) | [dr-serialize v0.1.2](https://github.com/danielle-rothermel/dr-serialize) | [dr-store v0.1.2](https://github.com/danielle-rothermel/dr-store) |
+| [Repo Definitions](https://danielle-rothermel.github.io/dr-exec/) | [Terms TOML](https://github.com/danielle-rothermel/dr-exec/blob/main/.defs/terms.toml) | [Contracts TOML](https://github.com/danielle-rothermel/dr-exec/blob/main/.defs/contracts.toml) |
 | --- | --- | --- |
 
 **dr-exec runs local processes through explicit, typed contracts.**
 Production execution currently targets macOS and is organized into these
 functional areas:
+
+Here, “untrusted” describes who controls the payload; it does not mean
+sandboxed. V1's process-boundary-only profile creates a separate invocation,
+session, and process group, but leaves the invoking user's filesystem,
+network, credentials, and process-spawning authority unchanged. A descendant
+that creates another session can outlive teardown. Isolated host Python also
+does not verify interpreter, standard-library, or package bytes.
 
 - **[Declarations](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/declarations)**
   describe trusted commands, untrusted commands, and untrusted Python together
@@ -101,6 +108,10 @@ class ExecutionJob:
     env: EnvGrant
     budgets: Budgets = ...
 ```
+
+V1 accepts finite workload limits only for wall time, input bytes, and
+aggregate captured payload output. Memory, CPU time, process count, file size,
+open-file count, and disk limits must remain explicitly unbudgeted.
 
 ## Execution
 
@@ -279,3 +290,15 @@ class ExecutionPool:
 
     async def abort(self) -> None: ...
 ```
+
+## Development
+
+Install the locked dependencies and repository commit hook once per clone:
+
+```bash
+uv sync --locked
+uv run pre-commit install
+```
+
+The hook runs `scripts/pre-check.sh`, the same repository-wide formatting,
+linting, type, test, definitions, and package-build gate used by CI.

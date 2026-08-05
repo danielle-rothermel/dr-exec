@@ -1,3 +1,5 @@
+#:schema ./terms.schema.json
+
 [[terms]]
 name = "payload"
 definition = """
@@ -46,15 +48,14 @@ exported_symbols = [
 [[terms]]
 name = "scratch workspace"
 definition = """
-A fresh executor-owned working directory for one attempt. Cleanup is attempted \
-afterward but is best-effort and has no reporting surface in v1."""
+A fresh executor-owned working directory dedicated to one execution attempt. \
+It is separate from caller-owned paths and other attempts."""
 
 [[terms]]
 name = "workload budget"
 definition = """
-A caller declaration about payload work. A finite value is meaningful only on \
-an axis the production executor enforces; other axes remain explicitly \
-unbudgeted."""
+A caller-declared limit on payload work. It is distinct from limits on \
+executor-owned mechanics."""
 exported_symbols = [
   "dr_exec.Budgets",
 ]
@@ -62,9 +63,8 @@ exported_symbols = [
 [[terms]]
 name = "executor self-budget"
 definition = """
-A limit on executor-owned mechanics rather than payload work. V1 enforces only \
-its lifecycle and protected-protocol axes; other represented axes do not imply \
-an enforcement point."""
+A limit on executor-owned mechanics such as startup, teardown, joining, or \
+protected-protocol handling. It is distinct from a workload budget."""
 exported_symbols = [
   "dr_exec.ExecutorSelfBudgets",
 ]
@@ -79,9 +79,8 @@ guarantee."""
 [[terms]]
 name = "captured payload output"
 definition = """
-Raw stdout and stderr retained in memory until the attempt ends. A finite \
-budget preserves declared head and tail evidence plus exact production and \
-drop counts."""
+Raw stdout and stderr retained by the executor for an execution result and run \
+record rather than streamed or passed through directly."""
 
 [[terms]]
 name = "output overflow policy"
@@ -95,9 +94,8 @@ exported_symbols = [
 [[terms]]
 name = "execution protocol"
 definition = """
-The protected canonical-NDJSON exchange used by untrusted Python: one \
-request-bound prelude, consecutive complete outputs, and one matching terminal \
-completion."""
+The protected canonical-NDJSON channel used by untrusted Python for structured, \
+request-bound messages. It is separate from payload stdout and stderr."""
 
 [[terms]]
 name = "protocol output"
@@ -108,9 +106,8 @@ protocol. It is distinct from arbitrary stdout and stderr bytes."""
 [[terms]]
 name = "execution job"
 definition = """
-One caller-defined execution and scheduling unit. Each production attempt of a \
-job gets a fresh child; domain dimensions and internal work items remain opaque \
-to dr-exec."""
+One caller-defined unit containing an execution target, environment grant, and \
+workload budgets for execution and scheduling."""
 exported_symbols = [
   "dr_exec.ExecutionJob",
 ]
@@ -118,9 +115,8 @@ exported_symbols = [
 [[terms]]
 name = "execution pool"
 definition = """
-The host-local scheduler that bounds all admitted and undelivered work by one \
-resident capacity, applies intake backpressure, and returns completions in \
-completion order. It reuses capacity, not children."""
+The host-local scheduler that admits execution jobs under a shared resident \
+capacity and returns their completions."""
 exported_symbols = [
   "dr_exec.ExecutionPool",
 ]
@@ -137,12 +133,9 @@ exported_symbols = [
 [[terms]]
 name = "run record"
 definition = """
-Durable lifecycle evidence for a production attempt. Declaration and diagnostic \
-projections are secret-safe; protocol documents and retained stdout and stderr \
-are caller-visible content preserved verbatim and may contain secrets. Sidecars \
-are written during finalization and become record evidence only when the \
-finalized manifest publishes; orphan sidecars beside an earlier manifest are \
-ignored."""
+Durable lifecycle evidence for a production attempt, including its declaration, \
+process evidence, result, and output artifacts. It is distinct from the run \
+result, which describes execution rather than persistence."""
 exported_symbols = [
   "dr_exec.RunRecord",
 ]

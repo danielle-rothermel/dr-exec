@@ -1,8 +1,10 @@
 [project]
 name = "dr-exec"
-version = "0.1.1"
+version = "0.1.2"
 description = "Contract-driven local process execution"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Danielle Rothermel", email = "danielle.rothermel@gmail.com" }
 ]
@@ -19,13 +21,13 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.0",
     "pytest>=8.4.2",
     "ruff>=0.16.1",
     "ty>=0.0.65",
 ]
 
 [tool.uv.sources]
-dr-serialize = { path = "../dr-serialize", editable = true }
 dr-store = { path = "../dr-store", editable = true }
 
 [tool.ruff]
