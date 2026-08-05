@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Annotated, Literal, Self
 
-from dr_serialize import IdentityDocument
 from pydantic import (
     Field,
     NonNegativeInt,
@@ -15,7 +14,11 @@ from pydantic import (
     model_validator,
 )
 
-from dr_exec._model import ContractModel, _validate_sha256_digest
+from dr_exec._model import (
+    ContractModel,
+    IdentityDocumentField,
+    _validate_sha256_digest,
+)
 from dr_exec.kinds import (
     ContainmentProfile,
     EnvGrantKind,
@@ -295,7 +298,7 @@ class UntrustedPythonTarget(ContractModel):
             "library-owned bootstrap opens fd 3 before loading it"
         )
     )
-    request: IdentityDocument
+    request: IdentityDocumentField
     containment_profile: ContainmentProfile
 
     @field_validator("driver_source")

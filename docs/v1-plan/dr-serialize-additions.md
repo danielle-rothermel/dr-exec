@@ -2,10 +2,10 @@
 
 ## Objective and ownership
 
-This document defines the small general-purpose dr-serialize additions that
-support dr-exec v1 without creating a second canonicalization or strict-JSON
-system in dr-exec. Dr-exec pins their released form before repository
-qualification; no additional dr-serialize scope is planned for v1. It does not broaden
+This document defines the small general-purpose dr-serialize capabilities
+that support dr-exec v1 without creating a second canonicalization or
+strict-JSON system in dr-exec. The released `dr-serialize==0.1.1` pin
+delivers all of them; no additional dr-serialize scope is planned for v1. It does not broaden
 dr-serialize into an execution protocol, Pydantic model codec, persistence
 library, schema registry, or domain-format owner.
 

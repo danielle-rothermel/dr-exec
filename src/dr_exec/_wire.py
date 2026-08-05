@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from dr_serialize import IdentityDocument
 from pydantic import Field, NonNegativeInt, field_validator
 
-from dr_exec._model import ContractModel, _validate_sha256_digest
+from dr_exec._model import (
+    ContractModel,
+    IdentityDocumentField,
+    _validate_sha256_digest,
+)
 from dr_exec.kinds import ProtocolFrameKind
 
 
@@ -23,7 +26,7 @@ class ProtocolOutput(ContractModel):
     version: Literal[1] = 1
     kind: Literal[ProtocolFrameKind.OUTPUT] = ProtocolFrameKind.OUTPUT
     sequence: NonNegativeInt
-    document: IdentityDocument
+    document: IdentityDocumentField
 
 
 class ProtocolComplete(ContractModel):

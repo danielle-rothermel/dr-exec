@@ -12,7 +12,7 @@ from dr_exec._identity import (
     _isolated_host_runtime_identity_payload,
     _validate_isolated_host_runtime_identity,
 )
-from dr_exec._model import ContractModel
+from dr_exec._model import ContractModel, IdentityDocumentField
 from dr_exec.declare import UntrustedPythonTarget
 from dr_exec.kinds import RuntimeKind
 
@@ -20,7 +20,7 @@ from dr_exec.kinds import RuntimeKind
 class RuntimeRecord(ContractModel):
     kind: RuntimeKind
     resolved_executable: Path
-    id_doc: IdentityDocument
+    id_doc: IdentityDocumentField
 
     _validated_identity = field_validator("id_doc")(
         _validate_isolated_host_runtime_identity

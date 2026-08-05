@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "dr-serialize==0.1.0",
+    "dr-serialize==0.1.1",
     "pydantic==2.13.4",
 ]
 

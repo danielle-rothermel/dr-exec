@@ -8,9 +8,9 @@ one thing: the decomposition of the remaining behavioral work into PRs. Every
 public stub stays unchanged until its complete v1 behavior replaces it in one
 PR.
 
-Prerequisite dr-serialize capabilities are specified in
-[dr-serialize additions](dr-serialize-additions.md); their released pin
-replaces the local source dependency before repository qualification.
+The shared serialization capabilities specified in
+[dr-serialize additions](dr-serialize-additions.md) are delivered by the
+released `dr-serialize==0.1.1` pin.
 Durable-directory mechanics come from the released `dr-store` pin
 (`>=0.1.1`): its Document Directory component owns collision-free
 allocation, atomic durable Manifest publish, streamed truncating

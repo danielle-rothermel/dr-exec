@@ -15,5 +15,5 @@ behavior remain intentionally unimplemented.
   [`docs/v1-plan/contracts.toml`](docs/v1-plan/contracts.toml)
 - Design and qualification mechanics:
   [`docs/v1-plan/v1-design.md`](docs/v1-plan/v1-design.md)
-- Required shared serialization work:
+- Shared serialization capabilities delivered by the dr-serialize pin:
   [`docs/v1-plan/dr-serialize-additions.md`](docs/v1-plan/dr-serialize-additions.md)

@@ -78,8 +78,10 @@ public claim. The implementation path to a verified runtime remains
 
 ## Serialization dependencies
 
-- Pin released `dr-serialize`; do not copy or fork its canonicalization or
-  identity behavior.
+- Pin released `dr-serialize` (`==0.1.1`); do not copy or fork its
+  canonicalization or identity behavior. Any logically-unordered
+  collection field serializes through its `canonical_sorted_values`,
+  never local sorting.
 - Pin Pydantic; its JSON-mode conversion contributes to bytes later validated
   and canonicalized by dr-exec.
 - Pin released `dr-store` (`>=0.1.1`) for the Document Directory; do not

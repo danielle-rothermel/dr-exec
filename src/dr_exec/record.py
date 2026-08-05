@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
-from dr_serialize import IdentityDocument
 from pydantic import (
     Field,
     NonNegativeInt,
@@ -18,6 +17,7 @@ from dr_exec._identity import (
 )
 from dr_exec._model import (
     ContractModel,
+    IdentityDocumentField,
     UtcDatetime,
     _validate_sha256_digest,
 )
@@ -38,8 +38,8 @@ from dr_exec.runtime import RuntimeRecord
 
 class RunRecordHeader(ContractModel):
     schema_version: Literal[1] = 1
-    executor_identity: IdentityDocument
-    executor_config_identity: IdentityDocument
+    executor_identity: IdentityDocumentField
+    executor_config_identity: IdentityDocumentField
     prepared_at: UtcDatetime
 
     _validated_executor_identity = field_validator("executor_identity")(
@@ -312,7 +312,7 @@ class ExecutionResult(ContractModel):
     execution_id: ExecutionId
     outcome: ExecutionOutcome
     attribution: ExecutionAttribution
-    protocol_outputs: tuple[IdentityDocument, ...]
+    protocol_outputs: tuple[IdentityDocumentField, ...]
     payload_outputs: PayloadOutputs
     measurements: ExecutionMeasurements
 
@@ -331,7 +331,7 @@ class ExecutionResultRecord(ContractModel):
     execution_id: ExecutionId
     outcome: ExecutionOutcomeRecord
     attribution: ExecutionAttributionRecord
-    protocol_outputs: tuple[IdentityDocument, ...]
+    protocol_outputs: tuple[IdentityDocumentField, ...]
     payload_outputs: PayloadOutputRecords
     measurements: ExecutionMeasurements
 

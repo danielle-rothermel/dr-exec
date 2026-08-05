@@ -28,7 +28,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dr-serialize", specifier = "==0.1.0" },
+    { name = "dr-serialize", specifier = "==0.1.1" },
     { name = "pydantic", specifier = "==2.13.4" },
 ]
 
@@ -40,14 +40,14 @@ dev = [
 
 [[package]]
 name = "dr-serialize"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/25/8d4cdf3d0cd3dc4f8540bef72ab853ef12d4e34536f3c6dbb5381d95fb54/dr_serialize-0.1.0.tar.gz", hash = "sha256:47863d076bc6a123dad5ff9f5e4005b5b69e2ddcc1824390bd71160d51d07bf5", size = 14532, upload-time = "2026-07-24T08:06:33.677Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/83/ef/973bda063b26269fcac29906a83ae02808bcc4a01ad5eb3a970b8ba2adf4/dr_serialize-0.1.1.tar.gz", hash = "sha256:4c718347a948023ceba5c1928db868616bd36254ae5d53d587eeb43304960cbd", size = 22095, upload-time = "2026-08-05T05:58:29.888Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/37/1d/a6faf68c5a93a332279cce55db5ce2f0aa992f7a4727541ef7f6204eaf9e/dr_serialize-0.1.0-py3-none-any.whl", hash = "sha256:b0e1110d5cf4fae346c04ad79b568c43c950e35cba71afb5af5f99f6262babc8", size = 18585, upload-time = "2026-07-24T08:06:32.512Z" },
+    { url = "https://files.pythonhosted.org/packages/13/3d/e4e82f30daec9f137fbe9349f66d271e6a919f07613b2e9dcd162f6d7e38/dr_serialize-0.1.1-py3-none-any.whl", hash = "sha256:3b9569cb6a304cde65b0a6c511a388229366b226b4110886c9fcef07993185ff", size = 27075, upload-time = "2026-08-05T05:58:28.558Z" },
 ]
 
 [[package]]
