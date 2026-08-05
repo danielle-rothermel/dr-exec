@@ -15,21 +15,25 @@ own byte length, which no JSON value can exceed in nesting.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from typing import IO, Final
 
 from dr_serialize import (
     IdentityDocument,
     Jsonable,
+    JsonDepthLimitError,
     Sha256Digest,
     StrictJsonDecodeError,
     canonical_identity_json_bytes,
     canonical_json_bytes,
-    decode_strict_json_bytes,
+    identity_document_hash,
 )
 from pydantic import TypeAdapter, ValidationError
 
+from dr_exec._model import (
+    NonCanonicalBytesError,
+    require_canonical_json_bytes,
+)
 from dr_exec._wire import (
     FRAME_TERMINATOR,
     ProtocolComplete,
@@ -108,9 +112,7 @@ def request_identity_digest(request: IdentityDocument, /) -> Sha256Digest:
     bytes the child received, so a prelude can only match a request the
     child actually read.
     """
-    return Sha256Digest(
-        hashlib.sha256(request_transport_bytes(request)).hexdigest()
-    )
+    return identity_document_hash(request)
 
 
 def encode_frame(frame: ProtocolFrame, /) -> bytes:
@@ -126,27 +128,38 @@ def encode_frame(frame: ProtocolFrame, /) -> bytes:
 def decode_frame(frame_bytes: bytes, /, *, max_depth: int) -> ProtocolFrame:
     """Validate one frame's bytes into its closed model.
 
-    The decoder is bounded by the frame's own actual length and by
-    ``max_depth``; the canonical re-encode must reproduce the input
-    exactly; and Pydantic validates those same original bytes in strict
-    JSON mode rather than the decoded value.
+    The shared read path bounds the decoder by the frame's own actual
+    length and by ``max_depth`` and requires the canonical re-encode to
+    reproduce the input exactly; Pydantic then validates those same
+    original bytes in strict JSON mode rather than the decoded value.
+    Only the mapping of its failures onto ``ProtocolFailureCode`` is
+    owned here.
     """
     try:
-        decoded = decode_strict_json_bytes(
+        require_canonical_json_bytes(
             frame_bytes,
             max_bytes=len(frame_bytes),
             max_depth=max_depth,
         )
+    except JsonDepthLimitError as error:
+        # Depth is a configured finite protocol limit, so its overflow is
+        # an oversized frame rather than a malformed one. The unbudgeted
+        # path bounds depth by the frame's own byte length, which no JSON
+        # value can reach, so no unbudgeted axis lands here.
+        raise ProtocolViolation(
+            ProtocolFailureCode.OVERSIZED_FRAME,
+            "frame exceeded its structural depth budget",
+        ) from error
+    except NonCanonicalBytesError as error:
+        raise ProtocolViolation(
+            ProtocolFailureCode.MALFORMED_FRAME,
+            "frame bytes are not canonical JSON bytes",
+        ) from error
     except StrictJsonDecodeError as error:
         raise ProtocolViolation(
             ProtocolFailureCode.MALFORMED_FRAME,
             f"frame is not strict JSON: {type(error).__name__}",
         ) from error
-    if canonical_json_bytes(decoded) != frame_bytes:
-        raise ProtocolViolation(
-            ProtocolFailureCode.MALFORMED_FRAME,
-            "frame bytes are not canonical JSON bytes",
-        )
     try:
         return _FRAME_ADAPTER.validate_json(frame_bytes, strict=True)
     except ValidationError as error:

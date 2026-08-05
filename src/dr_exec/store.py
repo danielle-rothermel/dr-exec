@@ -11,6 +11,8 @@ are never recomputed here.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -21,7 +23,7 @@ from dr_store.errors import DocumentDirectoryError, ManifestReadError
 from pydantic import TypeAdapter, ValidationError
 
 from dr_exec._model import ContractModel
-from dr_exec.errors import RecordLoadError
+from dr_exec.errors import ExecutorFailure, RecordLoadError
 from dr_exec.kinds import RecordState
 from dr_exec.names import ExecutionId
 from dr_exec.record import (
@@ -257,13 +259,16 @@ class DirectoryRunStore:
 
         Prepare failure prevents the spawn, so it raises rather than
         degrading: no attempt has started that a receipt could describe.
+        The primitive's typed errors are translated here, so the store
+        boundary raises only dr-exec's own error taxonomy.
         """
-        directory = DocumentDirectory.allocate(
-            self.root,
-            prefix=RECORD_DIRECTORY_PREFIX,
-            manifest_name=MANIFEST_NAME,
-        )
-        directory.publish(_manifest_payload(record))
+        with _executor_failure("prepare the run record"):
+            directory = DocumentDirectory.allocate(
+                self.root,
+                prefix=RECORD_DIRECTORY_PREFIX,
+                manifest_name=MANIFEST_NAME,
+            )
+            directory.publish(_manifest_payload(record))
         return PreparedRun(
             execution_id=record.declaration.execution_id,
             record_dir=directory.path,
@@ -275,17 +280,26 @@ class DirectoryRunStore:
         process: ProcessRecord,
         /,
     ) -> RunningRun:
-        """Publish the process-bearing ``running`` manifest after a spawn."""
+        """Publish the process-bearing ``running`` manifest after a spawn.
+
+        This is a post-start publication, so its failure must not replace
+        the execution outcome. The ``RunStore`` contract returns a
+        lifecycle handle here rather than a receipt, so failure surfaces
+        as ``ExecutorFailure``; the engine converts it into a degraded
+        receipt naming ``prepared`` as the latest valid state, which
+        remains intact on disk because publication is atomic.
+        """
         prepared = self._load_prepared(prepared_run.record_dir)
-        _directory(prepared_run.record_dir).publish(
-            _manifest_payload(
-                RunningRecord(
-                    header=prepared.header,
-                    declaration=prepared.declaration,
-                    process=process,
+        with _executor_failure("publish the running run record"):
+            _directory(prepared_run.record_dir).publish(
+                _manifest_payload(
+                    RunningRecord(
+                        header=prepared.header,
+                        declaration=prepared.declaration,
+                        process=process,
+                    )
                 )
             )
-        )
         return RunningRun(
             execution_id=prepared_run.execution_id,
             record_dir=prepared_run.record_dir,
@@ -400,6 +414,20 @@ class DirectoryRunStore:
         return record
 
 
+@contextmanager
+def _executor_failure(operation: str, /) -> Iterator[None]:
+    """Translate the primitive's typed errors into dr-exec's taxonomy.
+
+    dr-exec owns the error taxonomy at the ``RunStore`` boundary, so the
+    Document Directory's exception types never escape it. The original
+    error is preserved as ``__cause__``.
+    """
+    try:
+        yield
+    except DocumentDirectoryError as error:
+        raise ExecutorFailure(f"could not {operation}") from error
+
+
 def _handle_state(run: FinalizableRun, /) -> RecordState:
     """Name the lifecycle state a handle proves is durable on disk."""
     return (
@@ -416,11 +444,15 @@ def _directory(record_dir: Path, /) -> DocumentDirectory:
 def _load_record(record_dir: Path, /) -> RunRecord:
     """Read, then strictly validate, the manifest at ``record_dir``.
 
-    The primitive bounds and strictly decodes the stored bytes and
-    rejects any drift from their canonical rendering, so re-encoding the
-    payload it returns reproduces exactly the verified stored bytes.
-    Those bytes -- never the decoded ``Jsonable`` -- are what Pydantic
-    validates, in strict JSON mode; dr-exec then owns lifecycle meaning.
+    The primitive strictly decodes the stored bytes and rejects any drift
+    from their canonical rendering, so re-encoding the payload it returns
+    reproduces exactly the verified stored bytes. Those bytes -- never
+    the decoded ``Jsonable`` -- are what Pydantic validates, in strict
+    JSON mode; dr-exec then owns lifecycle meaning.
+
+    This read is unbounded in v1: the primitive reads the manifest whole
+    and applies no byte or depth limit, and ``DirectoryRunStore`` takes
+    no self-budgets, so the ``manifest_bytes`` axis is not enforced here.
     """
     try:
         payload = DocumentDirectory.read_manifest(
@@ -444,8 +476,10 @@ def _load_record(record_dir: Path, /) -> RunRecord:
 def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:
     """Check every referenced sidecar against the manifest's evidence.
 
-    The primitive compares the stored bytes; the expected digest and
-    segment lengths come from this record. ``relative_path`` is already
+    The digest pins the stored bytes exactly. A stored sidecar carries no
+    segment boundary, so the two declared segment lengths are verifiable
+    only as their sum: the head/tail split is a manifest assertion, not a
+    property the stored bytes can confirm. ``relative_path`` is already
     validated normalized and relative, so it can only name a child of
     the run directory.
     """

@@ -26,8 +26,6 @@ PROBE_ARGUMENTS = ("-I", "-c", PROBE_SOURCE)
 PROBE_FACT_KEYS = frozenset(
     {"implementation", "python_version", "cache_tag", "platform"}
 )
-PROBE_TIMEOUT_SECONDS = 30.0
-PROBE_MAX_BYTES = 4096
 
 
 class InterpreterProbeError(RuntimeError):
@@ -37,8 +35,9 @@ class InterpreterProbeError(RuntimeError):
 def probe_interpreter(executable: Path, /) -> dict[str, str]:
     """Run the fixed `-I` probe once and return its reported facts.
 
-    The probe inherits no caller environment beyond the parent's, uses no
-    shell, and is bounded by an explicit watchdog timeout.
+    The probe inherits no caller environment beyond the parent's and uses
+    no shell. It installs no time or byte limit of its own: those axes are
+    unbudgeted, and the executor manufactures no hidden finite limit.
     """
     argv = (str(executable), *PROBE_ARGUMENTS)
     try:
@@ -46,7 +45,6 @@ def probe_interpreter(executable: Path, /) -> dict[str, str]:
             argv,
             capture_output=True,
             check=False,
-            timeout=PROBE_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise InterpreterProbeError(
@@ -65,10 +63,6 @@ def _parse_probe_output(
     *,
     executable: Path,
 ) -> dict[str, str]:
-    if len(stdout) > PROBE_MAX_BYTES:
-        raise InterpreterProbeError(
-            f"interpreter probe wrote too many bytes: {executable}"
-        )
     try:
         facts = json.loads(stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

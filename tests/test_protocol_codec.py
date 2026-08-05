@@ -29,7 +29,6 @@ from dr_exec._protocol import (
 )
 from dr_exec._wire import (
     FRAME_TERMINATOR,
-    PROTOCOL_VERSION,
     ProtocolComplete,
     ProtocolOutput,
     ProtocolPrelude,
@@ -98,7 +97,6 @@ def test_the_completion_frame_has_exactly_its_pinned_bytes() -> None:
 
 
 def test_the_pinned_frame_version_is_one() -> None:
-    assert PROTOCOL_VERSION == 1
     assert ProtocolPrelude(request_id_sha256=OTHER_DIGEST).version == 1
 
 
@@ -580,7 +578,13 @@ def test_a_frame_exactly_at_the_depth_budget_is_accepted() -> None:
     assert result.completed
 
 
-def test_a_frame_one_level_over_the_depth_budget_is_malformed() -> None:
+def test_a_frame_one_level_over_the_depth_budget_is_oversized() -> None:
+    """Depth is a configured finite limit, so overflow is oversized.
+
+    A frame that overflows a declared depth budget is well-formed JSON;
+    only the caller's limit rejects it, which is the ``OVERSIZED_FRAME``
+    row of the taxonomy rather than the malformed-payload row.
+    """
     digest = Sha256Digest("a" * 64)
     result = _read(
         _nested_stream(digest, _NESTED_PAYLOAD_DEPTH),
@@ -590,7 +594,7 @@ def test_a_frame_one_level_over_the_depth_budget_is_malformed() -> None:
         ),
     )
     assert result.failure is not None
-    assert result.failure.code == ProtocolFailureCode.MALFORMED_FRAME
+    assert result.failure.code == ProtocolFailureCode.OVERSIZED_FRAME
 
 
 # --- Unbudgeted axes carry no hidden finite limit ------------------------

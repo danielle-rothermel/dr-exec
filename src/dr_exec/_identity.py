@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import hashlib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import PurePosixPath
 from typing import Annotated, Literal, cast
 from uuid import UUID
@@ -11,11 +10,12 @@ from dr_serialize import (
     Jsonable,
     Sha256Digest,
     build_identity_document,
-    canonical_json_bytes,
+    canonical_sorted_values,
+    json_hash,
 )
 from pydantic import StringConstraints, field_validator, model_validator
 
-from dr_exec._model import ContractModel, canonical_model_bytes
+from dr_exec._model import ContractModel
 from dr_exec._provenance import ExecutorSourceSnapshot
 from dr_exec.declare import (
     ByteBudget,
@@ -278,9 +278,7 @@ def _canonical_declaration_digest(target: ExecutionTarget, /) -> Sha256Digest:
     The declaration itself carries argv, source, stdin, and the request
     payload, so only this digest reaches durable evidence.
     """
-    return Sha256Digest(
-        hashlib.sha256(canonical_model_bytes(target)).hexdigest()
-    )
+    return json_hash(_identity_payload(target))
 
 
 def _canonical_env_values_digest(grant: EnvGrant, /) -> Sha256Digest:
@@ -291,16 +289,26 @@ def _canonical_env_values_digest(grant: EnvGrant, /) -> Sha256Digest:
     payload: Jsonable = {
         variable.name: variable.value for variable in grant.variables
     }
-    return Sha256Digest(
-        hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
-    )
+    return json_hash(payload)
+
+
+def _canonical_sorted_names(names: Iterable[str], /) -> tuple[str, ...]:
+    """Order variable names by canonical JSON text, never locally.
+
+    ``canonical_sorted_values`` is policy-free and returns its inputs
+    untouched, so ``str`` members stay ``str``; only its ``Jsonable``
+    signature is widened, and the cast narrows it back.
+    """
+    return tuple(cast("list[str]", canonical_sorted_values(names)))
 
 
 def _build_env_grant_record(grant: EnvGrant, /) -> EnvGrantRecord:
     """Project a live environment grant into secret-free durable evidence."""
     return EnvGrantRecord(
         kind=grant.kind,
-        var_names=tuple(sorted(variable.name for variable in grant.variables)),
-        excluded_var_names=tuple(sorted(grant.excluded_var_names)),
+        var_names=_canonical_sorted_names(
+            variable.name for variable in grant.variables
+        ),
+        excluded_var_names=_canonical_sorted_names(grant.excluded_var_names),
         canonical_values_sha256=_canonical_env_values_digest(grant),
     )

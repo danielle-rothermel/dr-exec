@@ -2,72 +2,104 @@
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
 import pytest
 
+from dr_exec import _provenance
 from dr_exec._identity import (
     _build_executor_identity,
     _validate_executor_identity,
 )
 from dr_exec._provenance import (
     ExecutorSourceSnapshot,
+    _embedded_source_commit,
     _executor_source_snapshot,
     _snapshot_source,
 )
 
 
-def _git(*arguments: str, work_dir: Path) -> None:
-    subprocess.run(
-        ["git", "-C", str(work_dir), *arguments],
-        capture_output=True,
-        check=True,
-        timeout=30,
+class _Metadata:
+    """The subset of distribution metadata provenance reads."""
+
+    def __init__(self, source_commit: str | None) -> None:
+        self._source_commit = source_commit
+
+    def get(self, key: str, /) -> str | None:
+        return self._source_commit if key == "Source-Commit" else None
+
+
+def _embed(monkeypatch: pytest.MonkeyPatch, value: str | None, /) -> None:
+    """Install the build-time metadata provenance is allowed to read."""
+    monkeypatch.setattr(
+        _provenance,
+        "metadata",
+        lambda _name: _Metadata(value),
     )
 
 
-@pytest.fixture
-def git_work_dir(tmp_path: Path) -> Path:
-    _git("init", "--quiet", work_dir=tmp_path)
-    _git("config", "user.email", "test@example.invalid", work_dir=tmp_path)
-    _git("config", "user.name", "Test", work_dir=tmp_path)
-    (tmp_path / "tracked.txt").write_text("one\n", encoding="utf-8")
-    _git("add", "tracked.txt", work_dir=tmp_path)
-    _git("commit", "--quiet", "-m", "initial", work_dir=tmp_path)
-    return tmp_path
-
-
-def test_clean_worktree_yields_clean_provenance(git_work_dir: Path) -> None:
-    snapshot = _snapshot_source(git_work_dir)
+def test_an_embedded_commit_yields_clean_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _embed(monkeypatch, "a" * 40)
+    snapshot = _snapshot_source()
     assert snapshot.source_state == "clean"
-    assert snapshot.source_commit is not None
+    assert snapshot.source_commit == "a" * 40
     assert snapshot.session_id is None
 
 
-def test_dirty_worktree_yields_a_session_identity(git_work_dir: Path) -> None:
-    (git_work_dir / "tracked.txt").write_text("two\n", encoding="utf-8")
-    snapshot = _snapshot_source(git_work_dir)
-    assert snapshot.source_state == "dirty"
-    assert snapshot.source_commit is not None
-    assert snapshot.session_id is not None
-
-
-def test_untracked_directory_yields_unknown_provenance(
-    tmp_path: Path,
+def test_an_embedded_sha256_commit_yields_clean_provenance(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot = _snapshot_source(tmp_path / "not-a-repository")
+    _embed(monkeypatch, "b" * 64)
+    assert _snapshot_source().source_commit == "b" * 64
+
+
+def test_an_absent_commit_yields_unknown_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _embed(monkeypatch, None)
+    snapshot = _snapshot_source()
     assert snapshot.source_state == "unknown"
     assert snapshot.source_commit is None
     assert snapshot.session_id is not None
 
 
-def test_dirty_snapshots_never_compare_equal(git_work_dir: Path) -> None:
-    (git_work_dir / "tracked.txt").write_text("two\n", encoding="utf-8")
-    first = _snapshot_source(git_work_dir)
-    second = _snapshot_source(git_work_dir)
-    assert first.source_commit == second.source_commit
-    assert first != second
+@pytest.mark.parametrize(
+    "embedded",
+    ["abc", "A" * 40, "g" * 40, "", "0" * 41],
+    ids=["abbreviated", "uppercase", "non-hex", "empty", "wrong-length"],
+)
+def test_a_malformed_embedded_commit_is_treated_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    embedded: str,
+) -> None:
+    _embed(monkeypatch, embedded)
+    assert _embedded_source_commit() is None
+    assert _snapshot_source().source_state == "unknown"
+
+
+def test_unknown_snapshots_never_compare_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _embed(monkeypatch, None)
+    assert _snapshot_source() != _snapshot_source()
+
+
+def test_provenance_spawns_no_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provenance reads embedded metadata and never probes a repository.
+
+    An enclosing checkout is not evidence about dr-exec's own source, so
+    resolving provenance must not shell out at all.
+    """
+
+    def _forbidden(*arguments: object, **keywords: object) -> object:
+        raise AssertionError("provenance must not spawn a subprocess")
+
+    monkeypatch.setattr("subprocess.run", _forbidden)
+    monkeypatch.setattr("subprocess.Popen", _forbidden)
+    _embed(monkeypatch, "c" * 40)
+    assert _snapshot_source().source_commit == "c" * 40
 
 
 def test_the_process_snapshot_is_resolved_once() -> None:

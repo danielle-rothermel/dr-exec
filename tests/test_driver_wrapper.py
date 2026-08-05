@@ -144,10 +144,74 @@ def test_the_wrapper_rejects_nul_bearing_consumer_source() -> None:
         driver_wrapper_source("x = 1\0")
 
 
-def test_the_wrapper_body_pins_the_protected_descriptor_number() -> None:
+def test_the_child_observable_literals_are_exactly_pinned() -> None:
+    """These are what the child sees; changing one is a contract revision.
+
+    Every other case reads them symbolically and so would follow a
+    rename; only spelling the values out catches silent drift.
+    """
+    assert PROTOCOL_DESCRIPTOR == 3
+    assert DRIVER_ENTRYPOINT_NAME == "dr_exec_main"
+    assert DRIVER_SOURCE_BINDING == "DR_EXEC_DRIVER_SOURCE"
+    assert ISOLATED_INVOCATION_ARGUMENTS == ("-I", "-c")
+
+
+def test_the_wrapper_renders_the_pinned_literals_once_each() -> None:
     wrapper = driver_wrapper_source("")
-    assert f"_DR_EXEC_PROTOCOL_DESCRIPTOR = {PROTOCOL_DESCRIPTOR}" in wrapper
-    assert f'_DR_EXEC_ENTRYPOINT_NAME = "{DRIVER_ENTRYPOINT_NAME}"' in wrapper
+
+    assert "_DR_EXEC_PROTOCOL_DESCRIPTOR = 3\n" in wrapper
+    assert "_DR_EXEC_ENTRYPOINT_NAME = 'dr_exec_main'\n" in wrapper
+    assert wrapper.count("_DR_EXEC_PROTOCOL_DESCRIPTOR = ") == 1
+    assert wrapper.count("_DR_EXEC_ENTRYPOINT_NAME = ") == 1
+
+
+def test_a_child_spelling_both_literals_bare_runs_and_completes(
+    tmp_path: Path,
+) -> None:
+    """One real child that hardcodes `dr_exec_main` and fd 3.
+
+    The symbolic cases follow a rename of either literal; this one
+    cannot, so it fails if the child-observable contract changes.
+    """
+    literal_driver = """
+def dr_exec_main(request, emit):
+    emit({
+        "schema": "dr_exec.test_output",
+        "schema_version": 1,
+        "payload": {"echo": request["payload"]["echo"]},
+    })
+"""
+    request = _request(echo="bare")
+    wrapper = driver_wrapper_source(literal_driver)
+    protocol_read, protocol_write = os.pipe()
+    stdin_read, stdin_write = os.pipe()
+    try:
+        pid = os.posix_spawn(
+            sys.executable,
+            [sys.executable, "-I", "-c", wrapper],
+            {},
+            file_actions=[
+                (os.POSIX_SPAWN_DUP2, stdin_read, 0),
+                (os.POSIX_SPAWN_DUP2, protocol_write, 3),
+            ],
+        )
+    finally:
+        os.close(stdin_read)
+        os.close(protocol_write)
+    with os.fdopen(stdin_write, "wb") as stdin:
+        stdin.write(request_transport_bytes(request))
+    with os.fdopen(protocol_read, "rb") as protocol:
+        stream = read_protocol_stream(
+            protocol,
+            request_id_sha256=request_identity_digest(request),
+            self_budgets=ExecutorSelfBudgets.unbudgeted(),
+        )
+    _, exit_status = os.waitpid(pid, 0)
+
+    assert os.waitstatus_to_exitcode(exit_status) == 0
+    assert stream.completed
+    assert len(stream.outputs) == 1
+    assert stream.outputs[0].payload == {"echo": "bare"}
 
 
 # --- Complete streams ----------------------------------------------------

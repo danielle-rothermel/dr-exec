@@ -67,7 +67,11 @@ class IsolatedHostPythonRuntime:
     """
 
     executable: Path
-    _runtime_record: RuntimeRecord = field(init=False, repr=False)
+    # Fully derived from the resolved executable, so it carries no
+    # comparison information and stays out of equality and hashing.
+    _runtime_record: RuntimeRecord = field(
+        init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         try:

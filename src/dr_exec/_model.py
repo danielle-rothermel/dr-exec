@@ -48,19 +48,23 @@ def canonical_model_bytes(model: ContractModel, /) -> bytes:
     return canonical_json_bytes(projection)
 
 
-def validate_canonical_model_bytes[ContractModelT: ContractModel](
-    model_type: type[ContractModelT],
+def require_canonical_json_bytes(
     data: bytes,
     /,
     *,
     max_bytes: int,
     max_depth: int,
-) -> ContractModelT:
-    """Validate bounded canonical bytes into a boundary model.
+) -> None:
+    """Bound, strictly decode, and require canonical input bytes.
 
-    Bounded strict decode, canonical re-encode with a byte-for-byte
-    equality check, then strict Pydantic JSON-mode validation of those
-    same original bytes. The decoded ``Jsonable`` never reaches Pydantic.
+    This is the shared front half of the validated read path: bounded
+    strict decode followed by a canonical re-encode and a byte-for-byte
+    equality check. Callers then validate the same original bytes with
+    Pydantic; the decoded ``Jsonable`` never reaches it.
+
+    Every read boundary routes through here so one pinned pipeline
+    cannot drift into per-caller reimplementations. Callers own only the
+    translation of the raised errors into their own taxonomy.
     """
     decoded = decode_strict_json_bytes(
         data,
@@ -71,6 +75,25 @@ def validate_canonical_model_bytes[ContractModelT: ContractModel](
         raise NonCanonicalBytesError(
             "input bytes are not canonical JSON bytes"
         )
+
+
+def validate_canonical_model_bytes[ContractModelT: ContractModel](
+    model_type: type[ContractModelT],
+    data: bytes,
+    /,
+    *,
+    max_bytes: int,
+    max_depth: int,
+) -> ContractModelT:
+    """Validate bounded canonical bytes into one boundary model.
+
+    The closed-model tail of the shared read path, for callers whose
+    target is a single ``ContractModel`` rather than a discriminated
+    union.
+    """
+    require_canonical_json_bytes(
+        data, max_bytes=max_bytes, max_depth=max_depth
+    )
     return model_type.model_validate_json(data, strict=True)
 
 

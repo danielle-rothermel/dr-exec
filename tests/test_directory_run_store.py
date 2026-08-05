@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import pytest
+from dr_store.errors import DocumentDirectoryError
 
 from dr_exec import (
     AttemptId,
@@ -31,10 +33,12 @@ from dr_exec import (
     ExecutionId,
     ExecutionMeasurements,
     ExecutionResult,
+    ExecutorFailure,
     ExitedOutcome,
     FailureOwner,
     FinalizedRecord,
     JobId,
+    OutcomeKind,
     PayloadOutputs,
     PreparedRecord,
     PreparedRun,
@@ -42,10 +46,12 @@ from dr_exec import (
     ProtocolFailedOutcome,
     ProtocolFailureCode,
     RecordLoadError,
+    RecordReceiptKind,
     RecordState,
     RetainedPayloadStream,
     RunDeclaration,
     RunningRecord,
+    RunningRun,
     RunRecordHeader,
     SpawnAbsentOutcome,
     TrustedCommandTargetRecord,
@@ -533,6 +539,35 @@ def test_an_unwritable_run_directory_degrades_the_receipt(
     assert receipt.failures[0].operation == "finalize"
 
 
+def test_an_unwritable_directory_fails_mark_running_without_losing_prepared(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    """Post-start publication failure raises dr-exec's typed error.
+
+    ``mark_running`` returns a lifecycle handle, not a receipt, so the
+    engine is what converts this into a degraded receipt. The
+    ``prepared`` manifest stays intact and loadable on disk, so
+    ``prepared`` remains the latest valid state.
+    """
+    prepared_run = store.prepare(_prepared_record(execution_id))
+    committed = _manifest_bytes(prepared_run.record_dir)
+    prepared_run.record_dir.chmod(0o500)
+
+    try:
+        with pytest.raises(ExecutorFailure) as raised:
+            store.mark_running(
+                prepared_run,
+                ProcessRecord(pid=4242, started_at=STARTED_AT),
+            )
+    finally:
+        prepared_run.record_dir.chmod(0o700)
+
+    assert isinstance(raised.value.__cause__, DocumentDirectoryError)
+    assert _manifest_bytes(prepared_run.record_dir) == committed
+    assert store.load(prepared_run.record_dir).state == RecordState.PREPARED
+
+
 def test_degradation_preserves_the_last_valid_on_disk_state(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
@@ -624,11 +659,16 @@ def test_prepare_failure_raises_so_no_child_is_spawned(
     tmp_path: Path,
     execution_id: ExecutionId,
 ) -> None:
-    """Prepare has no degraded receipt: it precedes the attempt."""
+    """Prepare has no degraded receipt: it precedes the attempt.
+
+    The primitive's allocation error is translated into dr-exec's own
+    taxonomy and preserved as ``__cause__``.
+    """
     store = DirectoryRunStore(root=tmp_path / "never-created")
 
-    with pytest.raises(Exception, match="could not allocate"):
+    with pytest.raises(ExecutorFailure) as raised:
         store.prepare(_prepared_record(execution_id))
+    assert isinstance(raised.value.__cause__, DocumentDirectoryError)
 
 
 # --- concurrent collision-free writers --------------------------------
@@ -800,3 +840,134 @@ def test_the_finalized_record_binds_the_declaration_to_its_result(
 
     assert isinstance(receipt, DegradedRecordReceipt)
     assert store.load(run.record_dir).state == RecordState.PREPARED
+
+
+# --- pinned persisted literals ----------------------------------------
+
+
+def test_the_on_disk_layout_literals_are_exactly_pinned() -> None:
+    """The four layout names are the on-disk contract, spelled out.
+
+    Reading these symbolically everywhere else means only this test
+    stands between a rename and silent drift of the stored layout.
+    """
+    assert RECORD_DIRECTORY_PREFIX == "run"
+    assert MANIFEST_NAME == "record.json"
+    assert STDOUT_SIDECAR_NAME == "stdout.bin"
+    assert STDERR_SIDECAR_NAME == "stderr.bin"
+
+
+def test_an_allocated_run_directory_is_named_by_the_pinned_pattern(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+
+    assert re.fullmatch(
+        r"run-\d{8}T\d{12}Z-"
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        r"[0-9a-f]{4}-[0-9a-f]{12}",
+        run.record_dir.name,
+    )
+
+
+def test_a_finalized_run_directory_contains_exactly_the_pinned_files(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+
+    store.finalize(run, _result(execution_id))
+
+    assert {entry.name for entry in run.record_dir.iterdir()} == {
+        "record.json",
+        "stdout.bin",
+        "stderr.bin",
+    }
+
+
+def test_the_lifecycle_state_literals_are_exactly_pinned() -> None:
+    """Lifecycle states are persisted identity in every manifest."""
+    assert RecordState.PREPARED == "prepared"
+    assert RecordState.RUNNING == "running"
+    assert RecordState.FINALIZED == "finalized"
+    assert [state.value for state in RecordState] == [
+        "prepared",
+        "running",
+        "finalized",
+    ]
+
+
+def test_the_outcome_kind_literals_are_exactly_pinned() -> None:
+    assert [kind.value for kind in OutcomeKind] == [
+        "exited",
+        "signaled",
+        "spawn_absent",
+        "spawn_failed",
+        "budget_exceeded",
+        "protocol_failed",
+        "cancelled",
+    ]
+
+
+def test_the_failure_owner_literals_are_exactly_pinned() -> None:
+    assert [owner.value for owner in FailureOwner] == [
+        "none",
+        "payload",
+        "executor",
+        "machine",
+    ]
+
+
+def test_the_receipt_kind_literals_are_exactly_pinned() -> None:
+    assert [kind.value for kind in RecordReceiptKind] == [
+        "complete",
+        "degraded",
+        "not_applicable",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        pytest.param(RecordState.PREPARED, "prepared", id="prepared"),
+        pytest.param(RecordState.RUNNING, "running", id="running"),
+        pytest.param(RecordState.FINALIZED, "finalized", id="finalized"),
+    ],
+)
+def test_each_lifecycle_state_lands_in_the_manifest_verbatim(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    state: RecordState,
+    expected: str,
+) -> None:
+    """The stored bytes, not the enum, are what a reader must see."""
+    run: PreparedRun | RunningRun = store.prepare(
+        _prepared_record(execution_id)
+    )
+    if state is not RecordState.PREPARED:
+        run = store.mark_running(
+            run,
+            ProcessRecord(pid=4242, started_at=STARTED_AT),
+        )
+    if state is RecordState.FINALIZED:
+        store.finalize(run, _result(execution_id))
+
+    stored = json.loads(_manifest_bytes(run.record_dir))
+    assert stored["state"] == expected
+
+
+def test_a_finalized_manifest_spells_its_outcome_discriminant_verbatim(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+
+    store.finalize(
+        run,
+        _result(execution_id, outcome=SpawnAbsentOutcome(executable="x")),
+    )
+
+    stored = json.loads(_manifest_bytes(run.record_dir))
+    assert stored["state"] == "finalized"
+    assert stored["result"]["outcome"]["kind"] == "spawn_absent"

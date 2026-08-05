@@ -100,6 +100,22 @@ def _env_grant_record_model() -> ContractModel:
     )
 
 
+def _non_ascii_env_grant_record_model() -> ContractModel:
+    """Names whose canonical order differs from Python's `sorted()`.
+
+    `canonical_sorted_values` orders by canonical JSON text, in which a
+    non-ASCII character is its `\\uXXXX` escape, so `é` sorts before `a`
+    where `sorted()` puts it after. An all-ASCII vector cannot tell the
+    two rules apart, so only this one pins the persisted ordering.
+    """
+    return EnvGrantRecord(
+        kind=EnvGrantKind.OVERLAY,
+        var_names=("Z", "é", "a"),
+        excluded_var_names=("Q", "ü"),
+        canonical_values_sha256=ALL_A_DIGEST,
+    )
+
+
 SCALAR_VECTORS = (
     pytest.param(
         _uuid_scalar_model,
@@ -147,6 +163,14 @@ SCALAR_VECTORS = (
         b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaa","excluded_var_names":["C"],'
         b'"kind":"overlay","var_names":["A","B"]}',
         id="env-grant-record",
+    ),
+    pytest.param(
+        _non_ascii_env_grant_record_model,
+        b'{"canonical_values_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+        b'"excluded_var_names":["Q","\\u00fc"],'
+        b'"kind":"overlay","var_names":["Z","\\u00e9","a"]}',
+        id="env-grant-record-non-ascii",
     ),
 )
 

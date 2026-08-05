@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Annotated, Literal, Self
 
-from dr_serialize import Sha256Digest
+from dr_serialize import Sha256Digest, canonical_sorted_values
 from pydantic import (
     Field,
     NonNegativeInt,
@@ -241,10 +241,15 @@ class EnvGrantRecord(ContractModel):
             )
         for name in (*self.var_names, *self.excluded_var_names):
             _validate_env_var_name(name)
-        if self.var_names != tuple(sorted(set(self.var_names))):
+        # Canonical JSON text order, not code-point order: these names are
+        # persisted evidence, so they carry dr-serialize's ordering for
+        # logically-unordered collections rather than a local one.
+        if self.var_names != tuple(
+            canonical_sorted_values(set(self.var_names))
+        ):
             raise ValueError("var_names must be sorted and unique")
         if self.excluded_var_names != tuple(
-            sorted(set(self.excluded_var_names))
+            canonical_sorted_values(set(self.excluded_var_names))
         ):
             raise ValueError("excluded_var_names must be sorted and unique")
         if set(self.var_names) & set(self.excluded_var_names):

@@ -3,25 +3,29 @@
 Provenance is deliberately loose. It distinguishes builds during
 experimentation; it never claims content verification of the installed
 package or its dependency closure.
+
+Provenance is read from embedded distribution metadata only. The executor
+never inspects a repository at run time: a working tree that happens to
+enclose the installed package is not evidence about dr-exec's own source,
+and its unrelated modifications are not dr-exec's source state.
 """
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from functools import cache
-from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
+from importlib.metadata import PackageNotFoundError, metadata, version
 from typing import Literal
 from uuid import uuid4
 
-import dr_exec
-
 _PACKAGE_NAME = "dr-exec"
-_GIT_PROBE_TIMEOUT_SECONDS = 10.0
+# The embedded source-commit metadata key, written at build time. Absent
+# metadata means unknown provenance, never a probed substitute.
+_SOURCE_COMMIT_METADATA_KEY = "Source-Commit"
 _CLEAN = "clean"
-_DIRTY = "dirty"
 _UNKNOWN = "unknown"
+_LOWERCASE_HEXADECIMAL = frozenset("0123456789abcdef")
+_GIT_OBJECT_ID_LENGTHS = frozenset({40, 64})
 
 type SourceState = Literal["clean", "dirty", "unknown"]
 
@@ -42,47 +46,43 @@ class ExecutorSourceSnapshot:
     session_id: str | None
 
 
-def _git_output(argument: str, /, *, work_dir: Path) -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(work_dir), *argument.split(" ")],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=_GIT_PROBE_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    return completed.stdout
-
-
 def _resolve_package_version() -> str:
     try:
         return version(_PACKAGE_NAME)
     except PackageNotFoundError:
-        return "unknown"
+        return _UNKNOWN
 
 
-def _resolve_source_provenance(
-    work_dir: Path,
-    /,
-) -> tuple[str | None, SourceState]:
-    head = _git_output("rev-parse HEAD", work_dir=work_dir)
-    if head is None:
-        return None, _UNKNOWN
-    commit = head.strip()
-    status = _git_output("status --porcelain", work_dir=work_dir)
-    if status is None:
-        return commit, _UNKNOWN
-    if status.strip():
-        return commit, _DIRTY
-    return commit, _CLEAN
+def _embedded_source_commit() -> str | None:
+    """Return the build-time source commit, if the build embedded one.
+
+    Anything other than a complete lowercase Git object ID is treated as
+    absent, so malformed metadata degrades to unknown provenance rather
+    than minting a false provenance claim.
+    """
+    try:
+        embedded = metadata(_PACKAGE_NAME).get(_SOURCE_COMMIT_METADATA_KEY)
+    except PackageNotFoundError:
+        return None
+    if embedded is None:
+        return None
+    commit = embedded.strip()
+    if len(commit) not in _GIT_OBJECT_ID_LENGTHS or any(
+        character not in _LOWERCASE_HEXADECIMAL for character in commit
+    ):
+        return None
+    return commit
 
 
-def _snapshot_source(work_dir: Path, /) -> ExecutorSourceSnapshot:
-    commit, state = _resolve_source_provenance(work_dir)
+def _snapshot_source() -> ExecutorSourceSnapshot:
+    """Resolve provenance from embedded metadata alone.
+
+    An embedded commit is a clean build claim. Without one the state is
+    unknown and a construction-session identity keeps otherwise
+    indistinguishable builds from comparing equal.
+    """
+    commit = _embedded_source_commit()
+    state: SourceState = _CLEAN if commit is not None else _UNKNOWN
     return ExecutorSourceSnapshot(
         package_version=_resolve_package_version(),
         source_commit=commit,
@@ -96,9 +96,9 @@ def _executor_source_snapshot() -> ExecutorSourceSnapshot:
     """Return this process's one executor source snapshot.
 
     Resolved once per process so every run in a session shares one
-    session identity and pays the Git probe once.
+    session identity.
     """
-    return _snapshot_source(Path(dr_exec.__file__).parent)
+    return _snapshot_source()
 
 
 __all__ = ["ExecutorSourceSnapshot", "SourceState"]

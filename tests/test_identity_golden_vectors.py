@@ -186,3 +186,23 @@ def test_env_grant_record_is_secret_free() -> None:
     projected = record.model_dump_json()
     assert "super-secret-value" not in projected
     assert "C.UTF-8" not in projected
+
+
+def test_env_grant_names_use_canonical_not_local_ordering() -> None:
+    """Persisted names order by canonical JSON text, not code point.
+
+    These two orderings coincide for ASCII and diverge otherwise, so a
+    non-ASCII name is the only thing that distinguishes them.
+    """
+    names = ("Z", "é", "a")
+    grant = EnvGrant(
+        kind=EnvGrantKind.OVERLAY,
+        variables=tuple(EnvVar(name, "value") for name in names),
+        excluded_var_names=("Q", "ü"),
+    )
+
+    record = _build_env_grant_record(grant)
+
+    assert record.var_names == ("Z", "é", "a")
+    assert record.var_names != tuple(sorted(names))
+    assert record.excluded_var_names == ("Q", "ü")

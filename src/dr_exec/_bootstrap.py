@@ -31,8 +31,8 @@ PROTOCOL_DESCRIPTOR = 3
 
 # The wrapper body, stdlib-only and self-contained. It reads its own
 # module globals and never inspects argv or the environment. The pinned
-# literals above appear here verbatim; the module-level consistency test
-# is what keeps the two spellings from drifting apart.
+# child-observable literals are not spelled here: they are rendered from
+# the module constants above, which are their single source.
 _WRAPPER_BODY = '''
 import hashlib as _dr_exec_hashlib
 import json as _dr_exec_json
@@ -40,8 +40,6 @@ import os as _dr_exec_os
 import sys as _dr_exec_sys
 
 _DR_EXEC_IDENTITY_FIELDS = {"schema", "schema_version", "payload"}
-_DR_EXEC_PROTOCOL_DESCRIPTOR = 3
-_DR_EXEC_ENTRYPOINT_NAME = "dr_exec_main"
 
 
 def _dr_exec_canonical(value):
@@ -184,10 +182,19 @@ def driver_wrapper_source(driver_source: str, /) -> str:
     ``driver_source`` is embedded through ``repr``, so arbitrary consumer
     text -- quotes, backslashes, and newlines included -- stays one inert
     string literal in the wrapper rather than executable wrapper syntax.
+    The pinned child-observable literals are rendered from the module
+    constants, so the child can only ever observe their one spelling.
     """
     if "\0" in driver_source:
         raise ValueError("driver_source must not contain NUL")
-    return f"{DRIVER_SOURCE_BINDING} = {driver_source!r}\n{_WRAPPER_BODY}"
+    return "\n".join(
+        (
+            f"{DRIVER_SOURCE_BINDING} = {driver_source!r}",
+            f"_DR_EXEC_PROTOCOL_DESCRIPTOR = {PROTOCOL_DESCRIPTOR}",
+            f"_DR_EXEC_ENTRYPOINT_NAME = {DRIVER_ENTRYPOINT_NAME!r}",
+            _WRAPPER_BODY,
+        )
+    )
 
 
 __all__ = [
