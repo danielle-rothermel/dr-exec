@@ -24,6 +24,10 @@ dev = [
     "ty>=0.0.65",
 ]
 
+[tool.uv.sources]
+dr-serialize = { path = "../dr-serialize", editable = true }
+dr-store = { path = "../dr-store", editable = true }
+
 [tool.ruff]
 include = ["scripts/**/*.py", "src/**/*.py", "tests/**/*.py"]
 line-length = 79

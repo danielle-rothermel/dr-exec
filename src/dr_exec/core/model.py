@@ -7,6 +7,7 @@ from typing import Annotated, Any, Final
 from uuid import UUID
 
 from dr_serialize import (
+    CANONICAL_JSON_MAX_CONTAINER_DEPTH,
     IdentityDocument,
     Jsonable,
     SerializationError,
@@ -42,20 +43,13 @@ class NonCanonicalBytesError(ValueError):
 
 
 # The pinned structural ceiling on JSON nesting. This is not a budget and
-# not a free choice: pydantic-core enforces a hard recursion guard of 254
-# levels during validation, and the protocol frame and identity-document
-# models wrap a payload in enough additional nesting that the deepest
-# payload the real frame path validates is 198 levels (measured by binary
-# search against the frame reader). 200 is therefore the feasible maximum;
-# a larger ceiling would let the shared decoder accept frames that then
-# fail Pydantic validation and misclassify depth overflow as
-# malformed_frame instead of oversized_frame, splitting a persisted
-# failure code. Raising this ceiling requires replacing Pydantic payload
-# validation on the frame path, not editing this number. Bounding the
-# shared decoder by it keeps depth overflow detected on the dr-serialize
-# path and reported one way at every depth. Every read boundary with no
-# tighter declared depth budget bounds itself here.
-STRUCTURAL_DEPTH_CEILING: Final = 200
+# not a dr-exec policy choice: every value that dr-exec persists or frames
+# must fit dr-serialize's frozen Canonical JSON Text profile. Bounding the
+# shared decoder at the same exported limit ensures over-deep input fails
+# on the dr-serialize path and is classified consistently before Pydantic
+# validation. Every read boundary with no tighter declared depth budget
+# bounds itself here.
+STRUCTURAL_DEPTH_CEILING: Final = CANONICAL_JSON_MAX_CONTAINER_DEPTH
 
 
 def canonical_model_bytes(model: ContractModel, /) -> bytes:
