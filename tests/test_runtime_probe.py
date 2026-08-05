@@ -133,7 +133,13 @@ def test_prepare_embeds_driver_source_as_inert_data(
     host_runtime: IsolatedHostPythonRuntime,
     request_document: object,
 ) -> None:
-    """Quotes, backslashes, and newlines never become wrapper syntax."""
+    """Quotes, backslashes, and newlines never become wrapper syntax.
+
+    Only the binding line is evaluated here: the rest of the wrapper opens
+    the protected descriptor and reads the request, so it belongs in a
+    real child. What this asserts is that the hostile text survives as one
+    inert string literal instead of executing as wrapper syntax.
+    """
     hostile = "'\"\\\n" + "import os\nos._exit(3)\n"
     target = UntrustedPythonTarget(
         driver_source=hostile,
@@ -141,9 +147,11 @@ def test_prepare_embeds_driver_source_as_inert_data(
         containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
     )
     wrapper = host_runtime.prepare(target).argv[3]
+    binding, _, body = wrapper.partition("\n")
     namespace: dict[str, object] = {}
-    exec(wrapper, namespace)  # noqa: S102 - the wrapper is library-owned
+    exec(binding, namespace)  # noqa: S102 - the binding is under test
     assert namespace[DRIVER_SOURCE_BINDING] == hostile
+    assert "os._exit(3)" not in body
 
 
 def test_driver_wrapper_rejects_nul_bearing_source() -> None:

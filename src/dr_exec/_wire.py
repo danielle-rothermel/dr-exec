@@ -8,6 +8,11 @@ from pydantic import Field, NonNegativeInt
 from dr_exec._model import ContractModel, IdentityDocumentField
 from dr_exec.kinds import ProtocolFrameKind
 
+# Child-observable wire literals. The terminator is the frame boundary and
+# the version is the pinned frame vocabulary; both are golden-tested.
+FRAME_TERMINATOR = b"\n"
+PROTOCOL_VERSION = 1
+
 
 class ProtocolPrelude(ContractModel):
     version: Literal[1] = 1
@@ -31,4 +36,14 @@ class ProtocolComplete(ContractModel):
 type ProtocolFrame = Annotated[
     ProtocolPrelude | ProtocolOutput | ProtocolComplete,
     Field(discriminator="kind"),
+]
+
+
+__all__ = [
+    "FRAME_TERMINATOR",
+    "PROTOCOL_VERSION",
+    "ProtocolComplete",
+    "ProtocolFrame",
+    "ProtocolOutput",
+    "ProtocolPrelude",
 ]
