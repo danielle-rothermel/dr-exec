@@ -173,10 +173,6 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
     # --- Admission -------------------------------------------------------
 
-    @property
-    def capacity(self) -> int:
-        return self._capacity
-
     def can_admit(self) -> bool:
         """Whether one more submission fits the shared resident bound now.
 

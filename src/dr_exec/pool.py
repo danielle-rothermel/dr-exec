@@ -136,29 +136,42 @@ class ExecutionPool:
     capacity bound two disjoint lifetimes, and the durable records of the
     second would be indistinguishable from the first's.
 
-    One open pool serves one stream at a time. The scheduler's ready queue
-    is a single completion-ordered queue with no per-stream identity, so
-    two concurrent streams would each deliver whatever finished first --
-    including each other's completions, carrying each other's caller
-    contexts. A second concurrent stream is refused rather than served
-    wrongly. A consumer with several sources merges them into the one
-    stream this pool serves, which is the ordinary shape: many source
-    loops, one host bound.
+    Several source loops may feed one open pool, which is the host shape:
+    many sources, one host bound. The scheduler's ready queue is a single
+    completion-ordered queue with no per-stream identity, so completions
+    are shared out among live streams in completion order rather than
+    partitioned by which stream admitted them. Each completion still
+    carries exactly its own submission's context; what concurrent streams
+    give up is which stream receives it, not whether the pairing holds.
+
+    That is why the caller context of one pool is one type. Every stream
+    delivers whatever finished first, so a pool fed two context types
+    would hand each stream the other's objects -- correctly paired, and
+    still not what that stream declared. A consumer needing two context
+    types wraps them in one union or tags them itself.
 
     A second pool is not the remedy for that -- it is a separate
     host-capacity decision. Capacity here is host-level, so two pools
     must be given explicit non-overlapping fixed capacity; two automatic
     pools would each resolve to the full usable CPU count and together
     claim the host twice.
+
+    Those several sources are several loops *on one event loop*: the pool
+    is owned by the loop that entered it, and lifecycle operations from
+    any other loop are rejected. The scheduler core is properly locked,
+    but the pool's own lifecycle attributes are plain attributes, correct
+    only because one loop touches them. Rejecting is what makes that
+    true rather than assumed -- a `drain` racing a live `run_stream` from
+    another loop would tear down state that stream is mid-read of.
     """
 
     _executor: Executor
     _config: ExecutionPoolConfig
     _effective_capacity: EffectivePoolCapacity | None
     _state: ExecutionPoolState
-    _streaming: bool
     _closed: bool
     _scheduler: _ExecutionScheduler[object] | None
+    _owning_loop: asyncio.AbstractEventLoop | None
 
     def __init__(
         self,
@@ -170,9 +183,9 @@ class ExecutionPool:
         self._config = config
         self._effective_capacity = None
         self._state = ExecutionPoolState.CREATED
-        self._streaming = False
         self._closed = False
         self._scheduler = None
+        self._owning_loop = None
 
     @property
     def effective_capacity(self) -> EffectivePoolCapacity:
@@ -199,6 +212,7 @@ class ExecutionPool:
             executor=self._executor,
             capacity=capacity.max_active_jobs,
         )
+        self._owning_loop = asyncio.get_running_loop()
         self._state = ExecutionPoolState.RUNNING
         return self
 
@@ -216,6 +230,7 @@ class ExecutionPool:
         those calls and still awaits their teardown, which is the part
         that is never optional.
         """
+        self._require_owning_loop()
         if self._closed:
             return
         if self._state is ExecutionPoolState.CREATED:
@@ -245,24 +260,23 @@ class ExecutionPool:
         pool.
 
         The context cast is the one place a type is restored rather than
-        checked, and two facts together are what license it. The scheduler
-        stores contexts opaquely because a pool may serve streams of
-        different context types over its life, and its pairing invariant
-        holds that a completion carries the very object its own submission
-        carried, moved through in memory and never serialized. That alone
-        would not be enough: it says the completion is paired correctly,
-        not that it is delivered to the stream that submitted it. The
-        second fact supplies that -- an open pool serves one stream at a
-        time, so every completion this loop takes belongs to a submission
-        this loop admitted, and the object leaving is necessarily the one
-        that entered.
+        checked. The scheduler stores contexts opaquely -- `ContextT` is
+        this method's parameter, not the pool's, so one pool's scheduler
+        is typed at `object` -- and its pairing invariant is what the cast
+        rests on: a completion carries the very object its own submission
+        carried, moved through in memory and never serialized. Nothing
+        else can appear in a completion's context slot.
+
+        The invariant pairs a completion with its submission; it does not
+        say which of a pool's live streams receives it. Sharing one ready
+        queue is what makes several source loops one host bound, and the
+        price is that a pool's caller context is one type -- feed a pool
+        two, and a stream is handed the other's objects: correctly paired,
+        wrongly typed, and the cast would not catch it. That is the
+        caller's shape to choose, not a refusal this pool enforces.
         """
+        self._require_owning_loop()
         scheduler = self._running_scheduler()
-        if self._streaming:
-            raise ExecutorFailure(
-                "an execution pool streams one source at a time"
-            )
-        self._streaming = True
         source = aiter(submissions)
         exhausted = False
         try:
@@ -301,12 +315,6 @@ class ExecutionPool:
             if self._state is ExecutionPoolState.RUNNING:
                 self._state = ExecutionPoolState.BROKEN
             raise
-        finally:
-            # The exclusivity flag belongs to this stream's lifetime, not
-            # the pool's: a stream that ended -- exhausted, abandoned,
-            # cancelled, or broken -- releases the pool for the next one,
-            # and the state machine is what refuses a closed pool.
-            self._streaming = False
 
     async def drain(self) -> None:
         """Stop intake and let admitted work finish, then close.
@@ -315,6 +323,7 @@ class ExecutionPool:
         the stream. What drain guarantees is that every admitted call ran
         to completion, including its teardown, before the pool closed.
         """
+        self._require_owning_loop()
         scheduler = self._closing_scheduler()
         if scheduler is None:
             return
@@ -335,6 +344,7 @@ class ExecutionPool:
         pool that returned first would leave the containment claim
         unenforced at the one moment it matters most.
         """
+        self._require_owning_loop()
         scheduler = self._closing_scheduler()
         if scheduler is None:
             return
@@ -346,6 +356,27 @@ class ExecutionPool:
         await asyncio.to_thread(scheduler.shutdown)
         self._closed = True
         self._state = _closed_state(broke)
+
+    def _require_owning_loop(self) -> None:
+        """Reject a lifecycle operation from outside the owning loop.
+
+        The loop that entered the pool owns it. A pool that never opened
+        has no owner yet, so there is nothing to violate and nothing to
+        check -- the state machine answers those calls.
+
+        This guards the pool's own attributes rather than the scheduler's
+        state: `_state`, `_closed`, and `_effective_capacity` are read and
+        written without a lock, which is sound exactly while one loop
+        does it. It is a provenance check, not a state check, so it is the
+        one thing the `ExecutionPoolState` guards cannot express.
+        """
+        if self._owning_loop is None:
+            return
+        if asyncio.get_running_loop() is not self._owning_loop:
+            raise ExecutorFailure(
+                "an execution pool is driven only by the event loop that "
+                "opened it"
+            )
 
     def _running_scheduler(self) -> _ExecutionScheduler[object]:
         if self._state is not ExecutionPoolState.RUNNING:

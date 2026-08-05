@@ -688,6 +688,55 @@ def test_a_closed_pool_cannot_reopen_or_stream() -> None:
     assert pool._state is ExecutionPoolState.CLOSED
 
 
+def test_a_pool_rejects_lifecycle_calls_from_another_loop() -> None:
+    """The loop that opened the pool is the only loop that may drive it.
+
+    The scheduler core is condition-guarded, but the pool's own lifecycle
+    attributes are not: a `drain` on a second loop would race the state a
+    live stream is reading and could tear down completions it was about
+    to deliver. Provenance is therefore checked, not assumed.
+    """
+    pool = fixed_pool(immediate_executor(), 1)
+    opened = threading.Event()
+    intruded = threading.Event()
+    rejections: list[str] = []
+
+    def intrude() -> None:
+        """Drive each lifecycle entry point from a distinct second loop."""
+        wait_for(opened, what="the pool to open on its owning loop")
+        try:
+
+            async def from_another_loop() -> None:
+                for call in (
+                    pool.drain(),
+                    pool.abort(),
+                    pool.__aexit__(None, None, None),
+                    consume(pool.run_stream(submissions_of(jobs(1)))),
+                ):
+                    with pytest.raises(ExecutorFailure) as rejected:
+                        await call
+                    rejections.append(str(rejected.value))
+
+            asyncio.run(from_another_loop())
+        finally:
+            intruded.set()
+
+    async def own_the_pool() -> None:
+        async with pool:
+            intruder = in_thread(intrude)
+            opened.set()
+            await asyncio.to_thread(wait_for, intruded, what="the intruder")
+            join(intruder)
+
+    asyncio.run(own_the_pool())
+
+    assert len(rejections) == 4
+    assert all("opened it" in rejection for rejection in rejections)
+    # The owning loop's own close still runs: rejection refused the
+    # foreign calls without leaving the pool wedged.
+    assert pool._state is ExecutionPoolState.CLOSED
+
+
 # --- Scheduler-wide failure ----------------------------------------------
 
 
@@ -908,50 +957,41 @@ async def _collect_contexts(
         into.append(completion.context)
 
 
-# --- One stream per pool -------------------------------------------------
+# --- Several sources, one pool -------------------------------------------
 
 
-def test_one_open_pool_serves_one_stream_at_a_time() -> None:
-    """A second concurrent stream is refused rather than served wrongly.
+def test_several_source_loops_feed_one_pool_under_its_one_bound() -> None:
+    """The host shape: many sources, one bound, one scheduler.
 
-    The scheduler's ready queue has no per-stream identity, so two live
-    streams would each take whatever finished first -- including the
-    other's completions, carrying the other's caller contexts, which the
-    context cast would silently present as this stream's declared type.
-    Refusing is what makes that cast true.
+    Two streams run concurrently on one open pool. Both are served, and
+    the bound that admits is the pool's own rather than one per stream:
+    capacity two against two sources of two means exactly two calls are in
+    flight, and the rest start only as delivery frees resident slots.
     """
     executor, responder = gated_executor()
-    batch = jobs(1)
+    both = (jobs(2), jobs(2))
     pool = fixed_pool(executor, 2)
+    delivered: list[int] = []
 
     async def two_streams() -> None:
         async with pool:
-            first = pool.run_stream(submissions_of(batch))
-            consumer = asyncio.create_task(consume(first))
-            await asyncio.to_thread(responder.await_arrival, batch[0].job_id)
-            with pytest.raises(ExecutorFailure, match="one source at a time"):
-                await consume(pool.run_stream(submissions_of(jobs(1))))
-            await asyncio.to_thread(responder.release, batch[0].job_id)
-            await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
+            streams = [
+                asyncio.create_task(
+                    _collect_contexts(
+                        pool.run_stream(submissions_of(batch)), delivered
+                    )
+                )
+                for batch in both
+            ]
+            # Two arrivals is the whole bound; a third would mean a
+            # per-stream bound, so the count is the assertion.
+            await asyncio.to_thread(responder.await_arrival_count, 2)
+            assert len(responder.started) == 2
+            for batch in both:
+                await asyncio.to_thread(responder.release_all, batch)
+            await asyncio.wait_for(asyncio.gather(*streams), WATCHDOG_SECONDS)
 
     asyncio.run(two_streams())
-
-
-def test_a_finished_stream_releases_the_pool_for_the_next_one() -> None:
-    """Exclusivity is the live stream's, not the pool's whole lifetime."""
-    pool = fixed_pool(immediate_executor(), 2)
-    delivered: list[int] = []
-
-    async def sequential_streams() -> None:
-        async with pool:
-            await _collect_contexts(
-                pool.run_stream(submissions_of(jobs(2))), delivered
-            )
-            await _collect_contexts(
-                pool.run_stream(submissions_of(jobs(2))), delivered
-            )
-
-    asyncio.run(sequential_streams())
 
     assert sorted(delivered) == [0, 0, 1, 1]
 
