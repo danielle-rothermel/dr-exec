@@ -267,7 +267,14 @@ class ExecutionPool:
 
         Per-job failures arrive as completion data and the stream
         continues; only a scheduler-wide failure ends it, by breaking the
-        pool.
+        pool. A break ends the stream with the tail before the raise:
+        completions already buffered when it landed are yielded first, and
+        the failure is raised once there is nothing left to hand over. So
+        a consumer sees every result the pool actually produced and then
+        learns the pool stopped being able to produce more. What a break
+        loses is the undelivered work admitted before it -- queued
+        submissions dropped unstarted, and calls still in flight whose
+        results arrive after the buffer emptied.
 
         The context cast is the one place a type is restored rather than
         checked. The scheduler stores contexts opaquely -- `ContextT` is

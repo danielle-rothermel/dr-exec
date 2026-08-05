@@ -947,6 +947,187 @@ def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
     assert queued_token.cancelled
 
 
+class _BreakAfterBuffering:
+    """Complete every job but one, and fail that one on release.
+
+    This is the substrate for the drain-before-raise cases. Two jobs are
+    ordinary gated calls whose completions the scheduler buffers; the
+    third raises, which breaks the scheduler with results already sitting
+    in the ready queue -- the exact state the behavior is about.
+    """
+
+    def __init__(self, failing: JobId, /) -> None:
+        self._failing = failing
+        self._arrived: dict[JobId, threading.Event] = {}
+        self._release: dict[JobId, threading.Event] = {}
+        self._finished: dict[JobId, threading.Event] = {}
+        self._lock = threading.Lock()
+
+    def __call__(
+        self, job: ExecutionJob, _token: CancelToken | None, /
+    ) -> CompletedExecution:
+        self.arrived(job.job_id).set()
+        wait_for(self.gate(job.job_id), what=f"job {job.job_id} to release")
+        try:
+            if job.job_id == self._failing:
+                raise ExecutorFailure("machinery failed")
+            return completion_for(job.job_id)
+        finally:
+            self.finished(job.job_id).set()
+
+    def arrived(self, job_id: JobId, /) -> threading.Event:
+        with self._lock:
+            return self._arrived.setdefault(job_id, threading.Event())
+
+    def gate(self, job_id: JobId, /) -> threading.Event:
+        with self._lock:
+            return self._release.setdefault(job_id, threading.Event())
+
+    def finished(self, job_id: JobId, /) -> threading.Event:
+        with self._lock:
+            return self._finished.setdefault(job_id, threading.Event())
+
+    def await_arrivals(self, *job_ids: JobId) -> None:
+        for job_id in job_ids:
+            wait_for(self.arrived(job_id), what=f"job {job_id} to start")
+
+    def buffer(self, *job_ids: JobId) -> None:
+        """Let the named calls return, and wait until they have.
+
+        Waiting for the *finished* gate is what makes these completions
+        buffered rather than merely released: each call has returned, so
+        any result it will ever produce is already on its way to the ready
+        queue, and the consumer is parked in its source pull, so none of
+        them has been delivered.
+        """
+        for job_id in job_ids:
+            self.gate(job_id).set()
+        for job_id in job_ids:
+            wait_for(self.finished(job_id), what=f"job {job_id} to finish")
+
+    def break_the_pool(self) -> None:
+        """Release the failing call and wait until it has raised."""
+        self.await_arrivals(self._failing)
+        self.gate(self._failing).set()
+        wait_for(self.finished(self._failing), what="the failing call to end")
+
+
+def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
+    """A break ends delivery after the buffer, not instead of it.
+
+    A completion sitting in the ready queue is a call that genuinely ran
+    and recorded its own result. A machinery failure on some *other* job
+    says nothing about it, so it is delivered rather than discarded, and
+    the break is raised only once nothing is left to hand over.
+
+    Capacity is above one because that is the only place the behavior
+    exists: with one slot there is never a buffered completion for a
+    break to reach past. Four slots take all three jobs at once, two of
+    which finish and buffer while the third fails, and the two must still
+    arrive -- each carrying exactly its own submission's context -- before
+    the failure surfaces.
+
+    The ordering is constructed, not raced. The source parks after its
+    last job, so the consumer is held inside a pull rather than inside a
+    delivery for the whole setup: the two ordinary calls are released and
+    *observed to have returned*, then the failing one is released and
+    observed to have raised. At the moment the break lands, both
+    completions are provably buffered and provably undelivered, which is
+    the state the behavior is about. Only then is the pull let go, and
+    the source ends there, so nothing admitted after the break can blur
+    what the drain hands over.
+    """
+    first, second, failing = jobs(3)
+    responder = _BreakAfterBuffering(failing.job_id)
+    pool = fixed_pool(FakeExecutor(responder=responder), 4)
+    parked = threading.Event()
+    may_proceed = threading.Event()
+    delivered: list[int] = []
+
+    async def parking_source() -> AsyncIterator[ExecutionSubmission[int]]:
+        for index, job in enumerate((first, second, failing)):
+            yield ExecutionSubmission(job=job, context=index)
+        parked.set()
+        await asyncio.to_thread(
+            wait_for, may_proceed, what="the parked pull to be released"
+        )
+
+    async def stream() -> None:
+        async with pool:
+            consumer = asyncio.create_task(
+                _collect_contexts(pool.run_stream(parking_source()), delivered)
+            )
+            await asyncio.to_thread(
+                wait_for, parked, what="the source to park past its last job"
+            )
+            await asyncio.to_thread(
+                responder.buffer, first.job_id, second.job_id
+            )
+            await asyncio.to_thread(responder.break_the_pool)
+            may_proceed.set()
+            await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
+
+    with pytest.raises(ExecutorFailure, match="the execution pool broke") as e:
+        asyncio.run(stream())
+
+    # Both buffered completions were handed over, each with its own
+    # submission's context, and only then did the break surface. Which of
+    # the two came first is completion order, pinned elsewhere; what is
+    # pinned here is that neither was dropped and the raise came last.
+    assert sorted(delivered) == [0, 1]
+    assert isinstance(e.value.__cause__, ExecutorFailure)
+    assert pool._state is ExecutionPoolState.BROKEN
+
+
+def test_a_batch_break_delivers_the_buffered_tail_before_it_raises() -> None:
+    """The same drain-before-raise through the synchronous surface.
+
+    One scheduler core reached two ways must end a break the same way, so
+    the batch driver is held to the identical rule: every buffered
+    completion first, the failure last. The construction is the batch
+    equivalent of the stream case, gate for gate -- the source parks after
+    its last job, so the driver is held inside its pull while the two
+    completions buffer and the break lands, and nothing has been
+    delivered at that point.
+    """
+    first, second, failing = jobs(3)
+    responder = _BreakAfterBuffering(failing.job_id)
+    parked = threading.Event()
+    may_proceed = threading.Event()
+
+    def parking_source() -> Iterator[ExecutionJob]:
+        yield from (first, second, failing)
+        parked.set()
+        wait_for(may_proceed, what="the parked pull to be released")
+
+    driver = batch_of(
+        FakeExecutor(responder=responder), parking_source(), slots=4
+    )
+    delivered: list[JobId] = []
+    failure: BaseException | None = None
+
+    def consume_the_batch() -> None:
+        nonlocal failure
+        try:
+            for completed in driver:
+                delivered.append(completed.result.execution_id.job_id)
+        except BaseException as raised:  # noqa: BLE001
+            failure = raised
+        finally:
+            driver.close()
+
+    consumer = in_thread(consume_the_batch)
+    wait_for(parked, what="the source to park past its last job")
+    responder.buffer(first.job_id, second.job_id)
+    responder.break_the_pool()
+    may_proceed.set()
+    join(consumer)
+
+    assert sorted(delivered) == sorted([first.job_id, second.job_id])
+    assert isinstance(failure, SchedulerBroken)
+    assert isinstance(failure.__cause__, ExecutorFailure)
+
+
 @pytest.mark.parametrize("surface", ["batch", "stream"])
 def test_a_worker_that_cannot_start_breaks_the_pool_rather_than_hanging(
     surface: str,

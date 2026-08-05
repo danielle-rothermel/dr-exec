@@ -142,6 +142,13 @@ class SchedulerBroken(ExecutorFailure):
     the other case: machinery that prevents the scheduler itself from
     producing trustworthy completions, which breaks the pool rather than
     being reported as one job's outcome.
+
+    A break ends intake and delivery, in that order. Completions already
+    buffered when it lands are calls that genuinely finished and recorded,
+    so they are delivered first and this is raised once the buffer is
+    empty. What a break loses is undelivered work admitted before it --
+    submissions dropped from the queue unstarted, and calls still in
+    flight whose results arrive after delivery has ended.
     """
 
 
@@ -214,9 +221,12 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         between reading it and admitting, so `admit` re-checks the bound
         itself. Pulling on a stale True costs one retained submission,
         never an over-admission.
+
+        A break answers False rather than raising, because a break ends
+        intake before it ends delivery: raising here would abandon the
+        completions the surface is about to drain.
         """
         with self._condition:
-            self._raise_if_broken()
             return self._residents < self._capacity and not self._intake_closed
 
     def admit(
@@ -233,15 +243,21 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         feeder cannot slip past.
 
         The two refusals are distinct answers and a caller must not
-        conflate them. `INTAKE_CLOSED` is an ordinary requested end of
-        intake -- a surface that pulled a submission before a concurrent
-        `drain` or `abort` landed -- and the stream ends. `NO_ROOM` says
-        only "not now": the submission is still good and the caller must
-        retain it across a delivery rather than dropping it, because
-        delivery is what frees the slot it needs. Only `_broken` raises.
+        conflate them. `INTAKE_CLOSED` is the end of intake -- a surface
+        that pulled a submission before a concurrent `drain`, `abort`, or
+        break landed -- and the stream stops pulling. `NO_ROOM` says only
+        "not now": the submission is still good and the caller must retain
+        it across a delivery rather than dropping it, because delivery is
+        what frees the slot it needs.
+
+        A break is `INTAKE_CLOSED` here rather than a raise. It has closed
+        intake, so this is the truthful answer, and it leaves the surface
+        free to reach delivery -- where the buffered completions drain and
+        the break is raised once they are gone. Reporting it here would
+        end the stream on the break before those completions were handed
+        over.
         """
         with self._condition:
-            self._raise_if_broken()
             if self._intake_closed:
                 return _AdmissionResult.INTAKE_CLOSED
             if self._residents >= self._capacity:
@@ -257,8 +273,11 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             # A worker that could not start breaks the scheduler and
             # drops the queue this submission was just placed in, so
             # reporting it admitted would promise a run nothing will
-            # perform. The break is the honest answer to this caller.
-            self._raise_if_broken()
+            # perform. Intake is over, which is what the surface needs to
+            # stop pulling; the break itself is raised at delivery, after
+            # whatever is already buffered has been handed over.
+            if self._broken is not None:
+                return _AdmissionResult.INTAKE_CLOSED
             return _AdmissionResult.ADMITTED
 
     def close_intake(self) -> None:
@@ -270,19 +289,25 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
     # --- Delivery --------------------------------------------------------
 
     def has_residents(self) -> bool:
-        """Whether any admitted submission is still undelivered."""
+        """Whether any admitted submission is still undelivered.
+
+        A break does not raise here either. Residents outlive a break --
+        buffered completions and calls still in flight both hold slots --
+        and this is the predicate a surface uses to decide whether to
+        deliver at all, so answering with the raise would skip the drain
+        the break is supposed to precede.
+        """
         with self._condition:
-            self._raise_if_broken()
             return self._residents > 0
 
     def is_broken(self) -> bool:
         """Whether a scheduler-wide failure has landed, without raising.
 
-        Every other reader of the break raises, which is right for a
-        surface that was going to deliver. A close is the one caller that
-        must still shut down and join its workers and *then* report the
-        break as the state it landed in, so it asks rather than being
-        raised at.
+        `take_completion` reports the break by raising, which is right for
+        a consumer that was mid-stream. A close is not mid-stream: it must
+        still shut down and join its workers and *then* report the break
+        as the state it landed in, including a break that landed after the
+        last delivery, so it asks rather than being raised at.
         """
         with self._condition:
             return self._broken is not None
@@ -304,6 +329,14 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         Returns None only when the scheduler holds nothing at all -- no
         ready completion, no running call, no admitted work -- which a
         surface reaches only after its source is exhausted.
+
+        This is the one place a break is raised, and it is raised last.
+        A buffered completion is a call that genuinely ran and recorded
+        its own result, and a machinery failure on some *other* job says
+        nothing about it, so the buffer drains first and the break is
+        raised only once nothing is left to hand over. Delivery therefore
+        ends with the tail the pool actually produced, and then with the
+        failure that stopped it -- never with the failure alone.
         """
         with self._condition:
             self._condition.wait_for(
@@ -313,8 +346,8 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
                     or (not self._running and not self._pending)
                 )
             )
-            self._raise_if_broken()
             if not self._ready:
+                self._raise_if_broken()
                 return None
             completion = self._ready.popleft()
             self._tokens.pop(completion.ticket, None)
@@ -339,7 +372,8 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         call, so submissions cancelled there are never dispatched at all,
         and `shutdown` drops whatever the consumer stopped reading. Both
         record what actually ran; neither guarantees the consumer sees
-        it, which is why a consumer that needs every result drains.
+        it, which is why a consumer that needs every result consumes
+        until its stream ends.
 
         Only current residents are held, so this walks the bound rather
         than the scheduler's history: an abort after a hundred thousand
@@ -374,13 +408,14 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
         Completions still buffered at this point are dropped, and that is
         a real limit worth stating rather than a detail. Closing means the
-        surface has stopped delivering: a drained stream has already
-        delivered everything, but an aborted one may have finished calls
-        whose results no consumer will ever read. Those runs are not
+        surface has stopped delivering: a stream consumed to its end has
+        already taken everything, including the buffered tail a break
+        hands over before it raises, but an aborted one may have finished
+        calls whose results no consumer will ever read. Those runs are not
         lost -- each finished its own record before its worker returned --
         but their in-memory completions do not survive the close, so a
-        consumer that needs every result closes by draining, not by
-        aborting.
+        consumer that needs every result consumes its stream to the end
+        rather than closing over it.
         """
         with self._condition:
             self._intake_closed = True
@@ -495,30 +530,34 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         """Retire one call, publishing its completion or breaking the pool.
 
         A break drops this submission's token here rather than at
-        delivery, because a broken scheduler delivers nothing: the ticket
-        would otherwise stay resident for the pool's remaining life.
+        delivery, because a failed call produced no completion to deliver:
+        the ticket would otherwise stay resident for the pool's remaining
+        life. Its resident slot is deliberately not released -- the
+        scheduler must stay non-empty so every surface reaches delivery
+        once more and is told the pool broke.
 
         Breaking also stops further dispatch: every submission still
         queued here is cancelled and dropped with the queue rather than
-        started. A broken scheduler delivers nothing -- `take_completion`
-        raises before it inspects the ready queue -- so starting that
-        queue would spawn children, write durable records, and consume
-        the very capacity the scheduler exists to bound, all for results
-        no consumer can ever receive. Those submissions were never
-        started, so nothing is dropped mid-flight and no teardown is
-        skipped.
+        started. A broken scheduler delivers only what it has already
+        buffered, so starting that queue would spawn children, write
+        durable records, and consume the very capacity the scheduler
+        exists to bound, all for results no consumer can ever receive.
+        Those submissions were never started, so nothing is dropped
+        mid-flight and no teardown is skipped.
 
         What breaking does *not* do is stop a call another worker already
         entered. With capacity above one, a second worker can take a
         submission out of the queue and be inside `Executor.run` before
         the failing call reaches this point. That call is left alone: it
         runs to its own end, so its teardown completes and its record is
-        written, and only its in-memory result is discarded, because
-        delivery raises. Cancelling it instead would trade a wasted
-        result for a torn-down child on a path that is already failing,
-        which is the worse teardown story. The guarantee is that a break
-        dispatches nothing more, not that nothing is in flight when it
-        lands.
+        written. Whether its in-memory result is delivered depends on
+        where the consumer is: delivery drains the buffer before raising,
+        so a result that lands there in time is handed over, and one that
+        arrives after the buffer emptied is discarded. Cancelling the
+        call instead would trade a possibly-useful result for a torn-down
+        child on a path that is already failing, which is the worse
+        teardown story. The guarantee is that a break dispatches nothing
+        more, not that nothing is in flight when it lands.
         """
         with self._condition:
             self._running -= 1
@@ -553,7 +592,11 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         self._pending.clear()
 
     def _raise_if_broken(self) -> None:
-        """Re-raise the scheduler-wide failure to every waiting surface.
+        """Report the scheduler-wide failure at the one place delivery ends.
+
+        Only `take_completion` calls this, and only with nothing left to
+        hand over: intake answers a break by closing rather than raising,
+        so the raise happens once and marks the end of the stream.
 
         The caller holds the condition. The original failure stays as the
         cause, so the machinery error that broke the pool is never lost
