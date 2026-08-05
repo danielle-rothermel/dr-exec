@@ -36,6 +36,7 @@ from pool_support import WATCHDOG_SECONDS, GatedResponder, wait_for
 from dr_exec import (
     AutoPoolCapacity,
     CancelledOutcome,
+    CancelToken,
     CompletedExecution,
     ExecutionCompletion,
     ExecutionJob,
@@ -50,6 +51,8 @@ from dr_exec import (
 )
 from dr_exec._scheduler import (
     SchedulerBroken,
+    _AdmissionResult,
+    _Admitted,
     _ExecutionScheduler,
     usable_cpu_count,
 )
@@ -57,8 +60,13 @@ from dr_exec.executor import _run_batch
 from dr_exec.kinds import CapacitySource
 
 if TYPE_CHECKING:
-    from dr_exec.cancel import CancelToken
     from dr_exec.protocols import Executor
+
+
+# The ticket the break case loads its queue under. Any value distinct
+# from the scheduler's own counter works; naming it keeps the constructed
+# state readable where it is asserted on.
+_QUEUED_TICKET = 9_000
 
 
 # --- Building blocks -----------------------------------------------------
@@ -249,8 +257,8 @@ def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
         executor=executor, capacity=2
     )
     try:
-        assert scheduler.admit(first, None)
-        assert scheduler.admit(second, None)
+        assert scheduler.admit(first, None) is _AdmissionResult.ADMITTED
+        assert scheduler.admit(second, None) is _AdmissionResult.ADMITTED
         responder.await_arrival_count(2)
         assert set(responder.started) == {first.job_id, second.job_id}
         assert not scheduler.can_admit()
@@ -267,7 +275,7 @@ def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
         )
         assert scheduler.can_admit()
 
-        assert scheduler.admit(third, None)
+        assert scheduler.admit(third, None) is _AdmissionResult.ADMITTED
         responder.await_arrival(third.job_id)
     finally:
         responder.release_all(batch)
@@ -795,64 +803,216 @@ def test_a_break_survives_the_close_that_follows_it() -> None:
     assert pool._state is ExecutionPoolState.BROKEN
 
 
+@pytest.mark.parametrize("close", ["drain", "abort"])
+def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
+    close: str,
+) -> None:
+    """A close waits for running calls, so a break can land inside it.
+
+    Closing is not instantaneous: it stops intake and then *waits* for
+    every call still running to finish its teardown. Any of those calls
+    may be the one whose machinery fails, so the break can land after
+    the close began and before it returned. A close that decided its
+    terminal state from a snapshot taken before that wait would report
+    an ordinary CLOSED for a pool whose scheduler is broken -- exactly
+    the distinction a consumer reads the state to make.
+
+    The window is held open rather than raced for: the failing call is
+    parked at a gate, the close is started and waited on until it has
+    provably closed intake, and only then is the call released to raise.
+    Driving the scheduler directly is deliberate -- with no live stream
+    there is nothing that could observe the break first and set BROKEN
+    by the other path, so the state under test is the close's own.
+
+    Both close paths are covered, because both take the same snapshot.
+    """
+    arrived = threading.Event()
+    release = threading.Event()
+
+    def explode_when_released(
+        _job: ExecutionJob, _token: CancelToken | None, /
+    ) -> CompletedExecution:
+        arrived.set()
+        wait_for(release, what="the failing call to be released")
+        raise ExecutorFailure("machinery failed")
+
+    pool = fixed_pool(FakeExecutor(responder=explode_when_released), 1)
+
+    async def close_over_a_breaking_call() -> None:
+        async with pool:
+            scheduler = pool._scheduler
+            assert scheduler is not None
+            assert (
+                scheduler.admit(jobs(1)[0], None) is _AdmissionResult.ADMITTED
+            )
+            await asyncio.to_thread(
+                wait_for, arrived, what="the failing call to start"
+            )
+            closing = asyncio.create_task(
+                pool.drain() if close == "drain" else pool.abort()
+            )
+            # Intake closing is the state that says the close is past
+            # its snapshot and into its wait, which is the window the
+            # break must still be reported from.
+            await asyncio.to_thread(_await_closed_intake, scheduler)
+            release.set()
+            await asyncio.wait_for(closing, WATCHDOG_SECONDS)
+
+    asyncio.run(close_over_a_breaking_call())
+
+    assert pool._state is ExecutionPoolState.BROKEN
+
+
+def _await_closed_intake(scheduler: _ExecutionScheduler[object], /) -> None:
+    """Block until the scheduler's intake is closed, under the watchdog.
+
+    This is a state gate, not a delay: it waits on the scheduler's own
+    condition for the flag a close sets, so a case can act at a point the
+    close has provably reached rather than one it probably has.
+    """
+    with scheduler._condition:
+        if not scheduler._condition.wait_for(
+            lambda: scheduler._intake_closed, WATCHDOG_SECONDS
+        ):
+            raise AssertionError("watchdog fired waiting for closed intake")
+
+
 def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
     """A broken scheduler stops dispatching, it does not drain the queue.
 
     What a break bounds is dispatch, not flight. A call another worker
     already entered runs to its own end -- it is cancelled, but its
     teardown completes and its result is discarded. So the behavior under
-    test is only observable on a submission that is *genuinely queued*,
-    and this case constructs that rather than hoping for it: one slot
-    means the scheduler caps itself at one worker, so the second
-    submission provably sits in the queue while the only worker is inside
-    the failing call. There is no second worker that could race it into
-    flight.
+    test is only observable on a submission that is *genuinely queued*
+    when the break lands.
 
-    Reaching the scheduler directly is what allows the second admission
-    at all -- a surface's intake is gated on `can_admit`, which a full
-    bound refuses -- and that is the point: the queue is loaded before
-    the break lands, which is the state a break must not drain. The
-    queued submission's completion could never reach a consumer, because
-    delivery raises before it inspects the ready queue, so starting it
-    would spawn a child and write a record for a result guaranteed to be
-    discarded.
+    That state is not reachable by admitting, and the case is explicit
+    about constructing it directly rather than pretending otherwise.
+    Admission enforces the resident bound, and the worker cap is the same
+    number, so every submission the bound accepts has a worker free to
+    take it: a queue that outlives its dispatch exists only in the window
+    between a worker returning from one call and re-entering the wait for
+    the next. The queue is therefore loaded through the scheduler's own
+    state, with the only worker provably inside the failing call.
+
+    What is pinned is `_finish`'s guarantee about that queue: a break
+    drops it rather than starting it. The queued submission's completion
+    could never reach a consumer, because delivery raises before it
+    inspects the ready queue, so starting it would spawn a child and
+    write a record for a result guaranteed to be discarded. Its token is
+    cancelled and dropped rather than left resident for the pool's life.
 
     The evidence is a state, not a delay: the scheduler is driven to its
     terminal break and fully shut down, which joins every worker, before
     the arrival record is read. Any dispatch that was going to happen has
     necessarily already happened by then.
     """
+    failing, queued = jobs(2)
     started: list[JobId] = []
-    first_arrived = threading.Event()
-    release_first = threading.Event()
+    failing_arrived = threading.Event()
+    release_failing = threading.Event()
 
-    def explode_on_first(
+    def explode_on_the_failing_call(
         job: ExecutionJob, _token: CancelToken | None, /
     ) -> CompletedExecution:
         started.append(job.job_id)
-        if job.job_id == first.job_id:
-            first_arrived.set()
-            wait_for(release_first, what="the failing call to be released")
-            raise ExecutorFailure("machinery failed")
-        return completion_for(job.job_id)
+        failing_arrived.set()
+        wait_for(release_failing, what="the failing call to be released")
+        raise ExecutorFailure("machinery failed")
 
-    first, queued = jobs(2)
     scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
-        executor=FakeExecutor(responder=explode_on_first), capacity=1
+        executor=FakeExecutor(responder=explode_on_the_failing_call),
+        capacity=1,
     )
+    queued_token = CancelToken()
     try:
-        assert scheduler.admit(first, None)
-        wait_for(first_arrived, what="the failing call to start")
-        assert scheduler.admit(queued, None)
+        assert scheduler.admit(failing, None) is _AdmissionResult.ADMITTED
+        wait_for(failing_arrived, what="the failing call to start")
+        # The bound is full and the one worker is inside the failing
+        # call, so this is the window a break must not dispatch out of.
+        with scheduler._condition:
+            scheduler._tokens[_QUEUED_TICKET] = queued_token
+            scheduler._pending.append(
+                _Admitted(_QUEUED_TICKET, queued, None, queued_token)
+            )
 
-        release_first.set()
+        release_failing.set()
         with pytest.raises(SchedulerBroken):
             scheduler.take_completion()
     finally:
-        release_first.set()
+        release_failing.set()
         scheduler.shutdown()
 
-    assert started == [first.job_id]
+    assert started == [failing.job_id]
+    assert queued_token.cancelled
+
+
+@pytest.mark.parametrize("surface", ["batch", "stream"])
+def test_a_worker_that_cannot_start_breaks_the_pool_rather_than_hanging(
+    surface: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resource failure the caller could handle must not become a wait.
+
+    Thread creation fails on a loaded host, and the submission that
+    triggered it is already queued for the worker that does not exist.
+    Nothing can ever run it, so every wait for quiescence -- which is
+    what both surfaces close through -- would block forever on work with
+    no runner. An unbounded hang is the one outcome a caller cannot
+    handle; a break is one they can, so the failure surfaces as
+    `SchedulerBroken` carrying the resource error as its cause.
+
+    Both surfaces are covered because both close through that same wait,
+    and the assertion is that each *finishes*: the watchdog on the
+    driving thread is what distinguishes a reported break from the hang
+    this pins, since a wedged close fails the case rather than passing
+    it slowly.
+    """
+
+    class _UnstartableThread(threading.Thread):
+        """A worker thread the host refuses to start."""
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    # Patched at the scheduler's own module reference rather than on
+    # `threading.Thread`: `asyncio.to_thread` builds threads too, and
+    # breaking those would wedge the pool for an unrelated reason and
+    # invalidate the case.
+    monkeypatch.setattr("dr_exec._scheduler.Thread", _UnstartableThread)
+
+    batch = jobs(2)
+    failure: BaseException | None = None
+
+    def drive_the_batch() -> None:
+        nonlocal failure
+        generator = batch_of(immediate_executor(), batch, slots=2)
+        try:
+            list(generator)
+        except BaseException as raised:  # noqa: BLE001
+            failure = raised
+        finally:
+            generator.close()
+
+    def drive_the_stream() -> None:
+        nonlocal failure
+
+        async def stream() -> None:
+            pool = fixed_pool(immediate_executor(), 2)
+            async with pool:
+                await consume(pool.run_stream(submissions_of(batch)))
+
+        try:
+            asyncio.run(stream())
+        except BaseException as raised:  # noqa: BLE001
+            failure = raised
+
+    join(
+        in_thread(drive_the_batch if surface == "batch" else drive_the_stream)
+    )
+
+    assert isinstance(failure, SchedulerBroken)
+    assert isinstance(failure.__cause__, RuntimeError)
 
 
 # --- Requested close during intake ---------------------------------------
@@ -994,6 +1154,101 @@ def test_several_source_loops_feed_one_pool_under_its_one_bound() -> None:
     asyncio.run(two_streams())
 
     assert sorted(delivered) == [0, 0, 1, 1]
+
+
+def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
+    None
+):
+    """The admission check is a hint; the bound holds under a real race.
+
+    Every stream checks for room and then *awaits* its source before
+    admitting, and that await releases the scheduler's lock. So several
+    streams on one pool can each observe the same last free slot and all
+    arrive at admission believing it is theirs. The check cannot be what
+    enforces the bound, because it is stale by the time it is acted on.
+
+    The race is constructed rather than hoped for: every feeder parks
+    inside its pull on a gate the test opens only once *all* of them are
+    parked, so each one provably observed room before any of them
+    admitted. Releasing them together is the exact interleaving that
+    over-admits if admission trusts the check.
+
+    Two things are asserted, because a bound held by dropping work is not
+    held. Occupancy never exceeds capacity, and every submission is still
+    delivered exactly once: the stream that loses the race carries its
+    already-pulled submission and retries it rather than discarding it.
+
+    The occupancy evidence is recorded at the moment of each admission,
+    not sampled from outside. A poll between admissions can miss the
+    breach entirely -- it is repaired by the very next delivery -- so the
+    peak is taken under the scheduler's own lock on the admitting path,
+    where an over-admission is unmissable by construction.
+
+    Residents are the right observable here, not arrivals. Worker threads
+    are capped separately, so the in-flight count stays correct even when
+    the shared bound is breached -- an arrival-count assertion would pass
+    against the very defect this pins.
+    """
+    feeders = 4
+    capacity = 1
+    all_parked = asyncio.Event()
+    may_admit = asyncio.Event()
+    parked = 0
+
+    class _PeakRecordingScheduler(_ExecutionScheduler[object]):
+        """Records the bound's occupancy as each admission takes it."""
+
+        peak_residents = 0
+
+        def admit(
+            self, job: ExecutionJob, context: object, /
+        ) -> _AdmissionResult:
+            result = super().admit(job, context)
+            with self._condition:
+                type(self).peak_residents = max(
+                    type(self).peak_residents, self._residents
+                )
+            return result
+
+    async def racing_source(
+        which: int, /
+    ) -> AsyncIterator[ExecutionSubmission[int]]:
+        """Park inside the pull until every feeder is parked too."""
+        nonlocal parked
+        parked += 1
+        if parked == feeders:
+            all_parked.set()
+        await may_admit.wait()
+        yield ExecutionSubmission(job=jobs(1)[0], context=which)
+
+    pool = fixed_pool(immediate_executor(), capacity)
+    delivered: list[int] = []
+
+    async def race_for_the_last_slot() -> None:
+        async with pool:
+            pool._scheduler = _PeakRecordingScheduler(
+                executor=immediate_executor(), capacity=capacity
+            )
+            streams = [
+                asyncio.create_task(
+                    _collect_contexts(
+                        pool.run_stream(racing_source(which)), delivered
+                    )
+                )
+                for which in range(feeders)
+            ]
+            await asyncio.wait_for(all_parked.wait(), WATCHDOG_SECONDS)
+            # Every feeder has now observed room and is one resumption
+            # away from admitting. Releasing them together is the exact
+            # interleaving that over-admits if admission trusts that
+            # stale observation.
+            may_admit.set()
+            await asyncio.wait_for(asyncio.gather(*streams), WATCHDOG_SECONDS)
+
+    asyncio.run(race_for_the_last_slot())
+
+    assert _PeakRecordingScheduler.peak_residents <= capacity
+    assert sorted(delivered) == list(range(feeders))
 
 
 # --- Bounded retention ---------------------------------------------------

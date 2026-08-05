@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Generator, Iterable, Iterator
 from dataclasses import dataclass, field
 
-from dr_exec._scheduler import _ExecutionScheduler
+from dr_exec._scheduler import _AdmissionResult, _ExecutionScheduler
 from dr_exec.cancel import CancelToken
 from dr_exec.declare import ExecutionJob, ExecutorSelfBudgets
 from dr_exec.engine import run_execution
@@ -118,6 +118,14 @@ def _run_batch(
     admission, ordering, and backpressure are the scheduler's, so the two
     surfaces cannot drift apart.
 
+    That includes the carry slot for a refused admission, which one
+    synchronous driver can never actually need: nothing runs between this
+    loop's admission check and its admission, so the bound cannot fill
+    behind it. It is here because the shared shape is the guarantee. A
+    surface that dropped a pulled job on a refusal would silently lose a
+    run, and the two loops staying one shape is what keeps that from
+    being true on one surface and not the other.
+
     Being a generator is part of the contract, not an implementation
     detail: the `finally` is where a caller who stops consuming still gets
     a drain. Closing the generator -- explicitly or by dropping it -- runs
@@ -130,17 +138,29 @@ def _run_batch(
     )
     source = iter(jobs)
     exhausted = False
+    carried: ExecutionJob | None = None
     try:
         while True:
             while not exhausted and scheduler.can_admit():
-                job = next(source, None)
+                job = carried if carried is not None else next(source, None)
+                carried = None
                 if job is None:
                     exhausted = True
                     break
-                if not scheduler.admit(job, None):
-                    exhausted = True
-                    break
-            if exhausted and not scheduler.has_residents():
+                match scheduler.admit(job, None):
+                    case _AdmissionResult.ADMITTED:
+                        pass
+                    case _AdmissionResult.INTAKE_CLOSED:
+                        exhausted = True
+                        break
+                    case _AdmissionResult.NO_ROOM:
+                        # One driver pulls this loop, so the bound cannot
+                        # close behind it -- but the carry path is what
+                        # keeps this surface the same loop the pool runs,
+                        # and a dropped job here would be a lost run.
+                        carried = job
+                        break
+            if exhausted and carried is None and not scheduler.has_residents():
                 return
             completion = scheduler.take_completion()
             if completion is None:

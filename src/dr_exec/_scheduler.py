@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 from collections import deque
 from dataclasses import dataclass
+from enum import UNIQUE, Enum, auto, verify
 from threading import Condition, Thread
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -72,6 +73,32 @@ def usable_cpu_count() -> int:
     """
     reported = getattr(os, "process_cpu_count", os.cpu_count)()
     return max(1, reported or 1)
+
+
+@verify(UNIQUE)
+class _AdmissionResult(Enum):
+    """What `admit` did with a submission a surface had already pulled.
+
+    The two refusals are separate members because a caller must act on
+    them differently, and collapsing them into one falsy answer is a
+    silent truncation bug: a surface that reads a full bound as a
+    requested close ends its stream while still holding a good
+    submission it pulled and never delivered.
+
+    This is in-memory control flow between the scheduler and the
+    surfaces driving it. It is never serialized, never recorded, and
+    never reaches a caller, so it carries no wire values.
+    """
+
+    ADMITTED = auto()
+    """The submission took a resident slot and is queued for a worker."""
+
+    INTAKE_CLOSED = auto()
+    """A requested close landed; intake is over and the stream ends."""
+
+    NO_ROOM = auto()
+    """The bound is full. The submission is still good -- retain it and
+    retry after a delivery, which is what frees a slot."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,35 +203,49 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
     def can_admit(self) -> bool:
         """Whether one more submission fits the shared resident bound now.
 
-        This is the backpressure predicate, and the only gate a surface
-        consults before pulling from its source: False means the source
-        must not advance, because admitted-and-undelivered work already
-        fills capacity. It never blocks -- a surface that finds no room
+        This is the backpressure predicate a surface consults before
+        pulling from its source: False means the source must not
+        advance, because admitted-and-undelivered work already fills
+        capacity. It never blocks -- a surface that finds no room
         delivers a completion, which is the one thing that makes room.
+
+        It is a hint, not the enforcement point. The answer is only true
+        of the instant it was read, and every surface awaits its source
+        between reading it and admitting, so `admit` re-checks the bound
+        itself. Pulling on a stale True costs one retained submission,
+        never an over-admission.
         """
         with self._condition:
             self._raise_if_broken()
             return self._residents < self._capacity and not self._intake_closed
 
-    def admit(self, job: ExecutionJob, context: ContextT, /) -> bool:
+    def admit(
+        self, job: ExecutionJob, context: ContextT, /
+    ) -> _AdmissionResult:
         """Take one resident slot and queue the submission for a worker.
 
-        Callers reach here only after `can_admit` returned True, so the
-        shared bound is never exceeded: every surface's intake loop is
-        gated on that predicate, which is the one place the bound is
-        enforced.
+        This is where the shared bound is enforced, not `can_admit`. A
+        surface checks `can_admit` and then *awaits* its source before
+        admitting, and that await releases the condition: several source
+        loops feeding one pool can all observe room and all arrive here.
+        So the bound is re-checked under the lock actually held at the
+        moment the slot is taken, which is the only check a concurrent
+        feeder cannot slip past.
 
-        Returns whether the submission was taken. A closed intake answers
-        False rather than raising: closing is a requested lifecycle
-        operation, and a surface that pulled a submission before a
-        concurrent `drain` or `abort` landed is looking at an ordinary
-        end of intake, not at a scheduler that cannot be trusted. Only
-        `_broken` raises.
+        The two refusals are distinct answers and a caller must not
+        conflate them. `INTAKE_CLOSED` is an ordinary requested end of
+        intake -- a surface that pulled a submission before a concurrent
+        `drain` or `abort` landed -- and the stream ends. `NO_ROOM` says
+        only "not now": the submission is still good and the caller must
+        retain it across a delivery rather than dropping it, because
+        delivery is what frees the slot it needs. Only `_broken` raises.
         """
         with self._condition:
             self._raise_if_broken()
             if self._intake_closed:
-                return False
+                return _AdmissionResult.INTAKE_CLOSED
+            if self._residents >= self._capacity:
+                return _AdmissionResult.NO_ROOM
             ticket = self._next_ticket
             self._next_ticket += 1
             token = CancelToken()
@@ -213,7 +254,12 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             self._residents += 1
             self._ensure_worker()
             self._condition.notify_all()
-            return True
+            # A worker that could not start breaks the scheduler and
+            # drops the queue this submission was just placed in, so
+            # reporting it admitted would promise a run nothing will
+            # perform. The break is the honest answer to this caller.
+            self._raise_if_broken()
+            return _AdmissionResult.ADMITTED
 
     def close_intake(self) -> None:
         """Stop admitting. Admitted work is untouched and still runs."""
@@ -228,6 +274,18 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         with self._condition:
             self._raise_if_broken()
             return self._residents > 0
+
+    def is_broken(self) -> bool:
+        """Whether a scheduler-wide failure has landed, without raising.
+
+        Every other reader of the break raises, which is right for a
+        surface that was going to deliver. A close is the one caller that
+        must still shut down and join its workers and *then* report the
+        break as the state it landed in, so it asks rather than being
+        raised at.
+        """
+        with self._condition:
+            return self._broken is not None
 
     def take_completion(self) -> _Completion[ContextT] | None:
         """Block until the next completion in completion order, if any.
@@ -345,6 +403,18 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         Workers are capped at capacity and started lazily: the pool starts
         as many threads as it has concurrently admitted work, never one
         per job. The caller holds the condition.
+
+        A thread that cannot start is a scheduler-wide failure, not a
+        recoverable admission: the submission is queued for a worker that
+        will never exist, so every wait for quiescence would block on
+        work nothing can run. The break path is what that is for, so this
+        takes it -- the caller sees `SchedulerBroken` with the resource
+        error as its cause instead of an unbounded wait.
+
+        The worker is counted only once it is running. Recording it first
+        would leave a never-started thread in the roster for `shutdown`
+        to join, which raises rather than closing the pool -- a second
+        failure on top of the one being reported.
         """
         idle = len(self._workers) - self._running
         if idle >= len(self._pending) or len(self._workers) >= self._capacity:
@@ -354,8 +424,13 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             name=f"{_WORKER_THREAD_PREFIX}-{len(self._workers)}",
             daemon=False,
         )
+        try:
+            worker.start()
+        except BaseException as failure:  # noqa: BLE001
+            self._break(failure)
+            self._condition.notify_all()
+            return
         self._workers.append(worker)
-        worker.start()
 
     def _work(self) -> None:
         while True:
@@ -451,26 +526,46 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
                 self._ready.append(completion)
             else:
                 self._tokens.pop(ticket, None)
-            if broken is not None and self._broken is None:
-                self._broken = broken
-                self._intake_closed = True
-                for queued in self._pending:
-                    queued.cancellation.cancel()
-                    self._tokens.pop(queued.ticket, None)
-                self._pending.clear()
+            if broken is not None:
+                self._break(broken)
             self._condition.notify_all()
+
+    def _break(self, failure: BaseException, /) -> None:
+        """Record a scheduler-wide failure and stop dispatching anything.
+
+        The first failure is the one kept: a break already in progress
+        has closed intake and dropped the queue, and a later failure --
+        typically a consequence of the first -- must not displace the
+        cause a consumer will be shown.
+
+        Every submission still queued is cancelled and dropped rather
+        than started, and quiescence is reachable afterwards precisely
+        because the queue is emptied here. The caller holds the
+        condition; it notifies.
+        """
+        if self._broken is not None:
+            return
+        self._broken = failure
+        self._intake_closed = True
+        for queued in self._pending:
+            queued.cancellation.cancel()
+            self._tokens.pop(queued.ticket, None)
+        self._pending.clear()
 
     def _raise_if_broken(self) -> None:
         """Re-raise the scheduler-wide failure to every waiting surface.
 
         The caller holds the condition. The original failure stays as the
         cause, so the machinery error that broke the pool is never lost
-        behind the scheduler's own message.
+        behind the scheduler's own message -- which is why the message
+        names the class of failure rather than one of its causes. A
+        failed executor call and a worker thread that could not start
+        both break the scheduler, and the cause is where they differ.
         """
         if self._broken is None:
             return
         raise SchedulerBroken(
-            "the execution pool broke: an executor call failed"
+            "the execution pool broke: its scheduling machinery failed"
         ) from self._broken
 
 

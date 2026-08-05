@@ -38,6 +38,7 @@ from pydantic import PositiveInt
 from dr_exec._model import ContractModel
 from dr_exec._scheduler import (
     SchedulerBroken,
+    _AdmissionResult,
     _ExecutionScheduler,
     usable_cpu_count,
 )
@@ -255,6 +256,15 @@ class ExecutionPool:
         consumer that stops consuming stops pulling -- backpressure is
         structural here rather than a buffer size chosen somewhere else.
 
+        The room this loop checks is shared, so it may be gone by the
+        time the awaited pull returns: several streams on one pool can
+        each see the last slot and race for it, and only one wins. The
+        loser holds its already-pulled submission in a carry slot and
+        retries it after the next delivery rather than dropping it. That
+        is what makes the shared bound safe to check optimistically --
+        the check is a hint, `admit` is the enforcement, and a lost race
+        costs a retry rather than a lost run.
+
         Per-job failures arrive as completion data and the stream
         continues; only a scheduler-wide failure ends it, by breaking the
         pool.
@@ -279,29 +289,60 @@ class ExecutionPool:
         scheduler = self._running_scheduler()
         source = aiter(submissions)
         exhausted = False
+        carried: ExecutionSubmission[ContextT] | None = None
         try:
             while True:
                 while not exhausted and scheduler.can_admit():
-                    submission = await _next_submission(source)
+                    submission = (
+                        carried
+                        if carried is not None
+                        else await _next_submission(source)
+                    )
+                    carried = None
                     if submission is None:
                         exhausted = True
                         break
-                    if not scheduler.admit(submission.job, submission.context):
-                        # A concurrent `drain` or `abort` closed intake
-                        # while this pull was awaiting. That is a
-                        # requested close, not a failure, so intake ends
-                        # here exactly as an exhausted source would end
-                        # it and the stream still delivers what was
-                        # already admitted.
-                        exhausted = True
-                        break
-                if exhausted and not await asyncio.to_thread(
-                    scheduler.has_residents
+                    match scheduler.admit(submission.job, submission.context):
+                        case _AdmissionResult.ADMITTED:
+                            pass
+                        case _AdmissionResult.INTAKE_CLOSED:
+                            # A concurrent `drain` or `abort` closed
+                            # intake while this pull was awaiting. That
+                            # is a requested close, not a failure, so
+                            # intake ends here exactly as an exhausted
+                            # source would end it and the stream still
+                            # delivers what was already admitted.
+                            exhausted = True
+                            break
+                        case _AdmissionResult.NO_ROOM:
+                            # Another stream on this pool filled the
+                            # shared bound while this pull was awaiting.
+                            # The submission is good and this stream
+                            # still owns it, so it is held rather than
+                            # dropped and retried after the delivery
+                            # below frees a slot -- the bound is the
+                            # pool's, so any stream's delivery makes the
+                            # room this one is waiting for.
+                            carried = submission
+                            break
+                if (
+                    exhausted
+                    and carried is None
+                    and not await asyncio.to_thread(scheduler.has_residents)
                 ):
                     return
                 completion = await asyncio.to_thread(scheduler.take_completion)
                 if completion is None:
-                    return
+                    # Nothing ready, nothing running, nothing admitted.
+                    # A carry held here is not stranded, it is the
+                    # opposite: an empty scheduler is an empty bound, so
+                    # the retry above is now certain to fit. Returning
+                    # here instead would drop a pulled submission that
+                    # was never delivered, which is the one thing the
+                    # carry exists to prevent.
+                    if carried is None:
+                        return
+                    continue
                 yield ExecutionCompletion(
                     completed_execution=completion.completed_execution,
                     context=cast("ContextT", completion.context),
@@ -333,7 +374,7 @@ class ExecutionPool:
         await asyncio.to_thread(scheduler.wait_for_quiescence)
         await asyncio.to_thread(scheduler.shutdown)
         self._closed = True
-        self._state = _closed_state(broke)
+        self._state = _closed_state(broke or scheduler.is_broken())
 
     async def abort(self) -> None:
         """Stop intake, cancel every active call, and await their teardown.
@@ -355,7 +396,7 @@ class ExecutionPool:
         await asyncio.to_thread(scheduler.wait_for_quiescence)
         await asyncio.to_thread(scheduler.shutdown)
         self._closed = True
-        self._state = _closed_state(broke)
+        self._state = _closed_state(broke or scheduler.is_broken())
 
     def _require_owning_loop(self) -> None:
         """Reject a lifecycle operation from outside the owning loop.
@@ -407,7 +448,7 @@ class ExecutionPool:
 
 
 def _closed_state(broke: bool, /) -> ExecutionPoolState:
-    """The terminal state a close lands in, preserving a prior break.
+    """The terminal state a close lands in, preserving any break.
 
     A broken pool is closed too -- its scheduler was shut down and its
     workers joined -- but "closed" and "broke" are different answers to
@@ -415,6 +456,12 @@ def _closed_state(broke: bool, /) -> ExecutionPoolState:
     received are all the results there were. Forcing CLOSED over a break
     would erase that distinction at exactly the moment it matters, so the
     break is the state that survives.
+
+    That covers a break that lands *during* the close as well as one
+    observed before it. Closing waits for calls that are still running,
+    and any of them may be the one that breaks the scheduler, so the
+    caller asks the scheduler after quiescence rather than trusting a
+    snapshot taken before the wait began.
     """
     return ExecutionPoolState.BROKEN if broke else ExecutionPoolState.CLOSED
 
