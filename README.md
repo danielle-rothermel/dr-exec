@@ -2,45 +2,32 @@
 
 Contract-driven local process execution.
 
-## Status
+## At a Glance
 
-The complete v1 surface is implemented:
+- [Terms and contracts reference](https://danielle-rothermel.github.io/dr-exec/)
+- First-party dependencies:
+  - [dr-serialize](https://github.com/danielle-rothermel/dr-serialize) —
+    `0.1.1`, for canonical serialization, hashing, and identity documents
+  - [dr-store](https://github.com/danielle-rothermel/dr-store) — `0.1.1`,
+    for durable manifests and binary sidecars
 
-- identity and serialization — canonical secret-safe projections, the strict
-  bounded read path, and role-specific versioned identities;
-- the isolated-host Python runtime with its fixed `-I` probe and the
-  library-owned child wrapper;
-- the protected protocol — request transport, frame codec, the
-  prelude/output/completion state machine, and finite executor self-budgets;
-- durable recording — `DirectoryRunStore` over the pinned Document
-  Directory, with typed lifecycle handles, receipts, and strict load
-  validation;
-- the single-run engine behind `ProcessExecutor.run` — spawn through
-  teardown for trusted-command, untrusted-command, and untrusted-Python
-  targets, with budget enforcement, best-effort attribution, and the
-  mandatory record lifecycle;
-- `FakeExecutor`, which enforces the same declaration rules and carries an
-  explicit fake receipt, plus the shared behavioral conformance suite both
-  executors pass;
-- the bounded execution pool — one scheduler core behind
-  `ProcessExecutor.run_many`, `ProcessExecutor.open_pool`, and
-  `ExecutionPool.run_stream`, with one shared resident bound over running
-  and completed-but-undelivered submissions, completion-order delivery,
-  backpressure on intake, cancellation, drain, and abort.
+## High-Level Design
 
-Execution runs on macOS; the engine refuses other platforms at the
-declaration boundary, and the tests that need real process semantics are
-marked accordingly.
+dr-exec provides one contract-driven boundary for running local processes.
+Production execution currently targets macOS and is organized into these
+functional areas:
 
-- Terms and contracts sheet:
-  [danielle-rothermel.github.io/dr-exec](https://danielle-rothermel.github.io/dr-exec/)
-  (source: [`.defs/`](.defs/))
-- Exact public API: [`src/dr_exec/__init__.py`](src/dr_exec/__init__.py)
-- Stable capability boundaries:
-  [`src/dr_exec/protocols.py`](src/dr_exec/protocols.py)
-- Planned behavioral contracts:
-  [`docs/v1-plan/contracts.toml`](docs/v1-plan/contracts.toml)
-- Design and qualification mechanics:
-  [`docs/v1-plan/v1-design.md`](docs/v1-plan/v1-design.md)
-- Shared serialization capabilities delivered by the dr-serialize pin:
-  [`docs/v1-plan/dr-serialize-additions.md`](docs/v1-plan/dr-serialize-additions.md)
+- **Declarations** describe trusted commands, untrusted commands, and
+  untrusted Python together with their environment grants and resource
+  budgets.
+- **Execution** owns process startup, input and output transport, budget
+  enforcement, cancellation, teardown, and outcome attribution.
+- **Python runtime support** prepares isolated interpreter invocations and
+  protects structured protocol messages from payload output.
+- **Results and recording** represent outcomes as typed data and preserve
+  declarations, process evidence, retained output, measurements, and recording
+  health in durable run records.
+- **Scheduling** runs finite batches and asynchronous streams through a shared
+  capacity bound with completion-order delivery and intake backpressure.
+- **Capability boundaries and fakes** let consumers substitute runtimes,
+  stores, and executors while preserving the same behavioral contracts.
