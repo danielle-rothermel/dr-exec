@@ -6,7 +6,7 @@
 - **Primary workload:** high-volume HumanEval-style local evaluation.
 - **API authority:** pinned releases of the
   [public package surface](../../src/dr_exec/__init__.py) and
-  [stable capability boundaries](../../src/dr_exec/protocols.py).
+  [stable capability boundaries](../../src/dr_exec/capabilities/protocols.py).
 - **Planned behavioral authority:** [v1 contracts](contracts.toml), activated
   only after the complete implementation passes repository qualification at the
   pre-release tip.

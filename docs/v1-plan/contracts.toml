@@ -28,7 +28,7 @@ enforcement_modes = ["validation_rejection", "constructed_invariant", "governanc
 enforcement = """
 Targets reject empty or NUL-bearing argv, every supported production \
 implementation constructs a direct local process invocation, production public \
-entry points delegate to `dr_exec.engine`, and review rejects consumer imports \
+entry points delegate to `dr_exec.execution.engine`, and review rejects consumer imports \
 of the private engine or additional spawn and lifecycle implementations.
 """
 

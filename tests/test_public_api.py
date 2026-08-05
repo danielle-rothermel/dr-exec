@@ -23,13 +23,14 @@ from dr_exec import (
     RuntimeRecord,
     UnbudgetedLimit,
 )
-from dr_exec._identity import (
+from dr_exec.capabilities import protocols
+from dr_exec.recording.identity import (
     _build_executor_config_identity,
     _validate_executor_config_identity,
     _validate_executor_identity,
-    _validate_isolated_host_runtime_identity,
 )
-from dr_exec._wire import ProtocolPrelude
+from dr_exec.runtime.identity import _validate_isolated_host_runtime_identity
+from dr_exec.runtime.wire import ProtocolPrelude
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,7 +48,7 @@ def test_the_export_list_is_sorted_and_unique() -> None:
 
 
 def test_only_the_three_named_protocols_are_capability_boundaries() -> None:
-    assert set(dr_exec.protocols.__all__) == {
+    assert set(protocols.__all__) == {
         "Executor",
         "RunStore",
         "Runtime",
