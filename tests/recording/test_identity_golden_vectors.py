@@ -9,17 +9,26 @@ regenerating the expected values.
 
 from __future__ import annotations
 
+import pytest
 from dr_serialize import (
+    build_identity_document,
     canonical_identity_json_bytes,
     identity_document_hash,
 )
+from pydantic import ValidationError
 
 from dr_exec import (
+    ContainmentProfile,
     EnvGrant,
     EnvGrantKind,
     EnvVar,
     ExecutorSelfBudgets,
+    FiniteByteLimit,
+    FiniteCountLimit,
+    FiniteDurationLimit,
     TrustedCommandTarget,
+    UntrustedCommandTarget,
+    UntrustedPythonTarget,
 )
 from dr_exec.recording.identity import (
     _build_env_grant_record,
@@ -27,6 +36,8 @@ from dr_exec.recording.identity import (
     _build_executor_identity,
     _canonical_declaration_digest,
     _canonical_env_values_digest,
+    _validate_executor_config_identity,
+    _validate_executor_identity,
 )
 from dr_exec.recording.provenance import ExecutorSourceSnapshot
 from dr_exec.runtime.identity import (
@@ -102,6 +113,31 @@ def test_unbudgeted_executor_config_identity_is_pinned() -> None:
     )
 
 
+def test_representative_finite_executor_config_identity_is_pinned() -> None:
+    document = _build_executor_config_identity(
+        ExecutorSelfBudgets(
+            protocol_frame_bytes=FiniteByteLimit(max_bytes=1024),
+            protocol_output_count=FiniteCountLimit(max_count=3),
+            startup_time=FiniteDurationLimit(max_ns=5_000_000_000),
+        )
+    )
+    assert canonical_identity_json_bytes(document) == (
+        b'{"payload":{"failure_detail_bytes":{"kind":"unbudgeted"},'
+        b'"join_time":{"kind":"unbudgeted"},"json_depth":{"kind":'
+        b'"unbudgeted"},"manifest_bytes":{"kind":"unbudgeted"},'
+        b'"narration_bytes":{"kind":"unbudgeted"},"protocol_frame_bytes":'
+        b'{"kind":"finite","max_bytes":1024},"protocol_output_count":'
+        b'{"kind":"finite","max_count":3},"protocol_total_bytes":{"kind":'
+        b'"unbudgeted"},"recording_failure_count":{"kind":"unbudgeted"},'
+        b'"startup_time":{"kind":"finite","max_ns":5000000000},'
+        b'"termination_time":{"kind":"unbudgeted"}},"schema":'
+        b'"dr_exec.executor_config","schema_version":1}'
+    )
+    assert identity_document_hash(document) == (
+        "e089d4dd127ea059d1a7275b7486d2952a477858ee131403f492b86f62a68e8c"
+    )
+
+
 def test_isolated_host_runtime_identity_is_pinned() -> None:
     document = _build_isolated_host_runtime_identity(RUNTIME_PAYLOAD)
     assert canonical_identity_json_bytes(document) == (
@@ -132,11 +168,90 @@ def test_empty_environment_value_digest_is_pinned() -> None:
     )
 
 
-def test_canonical_declaration_digest_is_pinned() -> None:
+def test_trusted_command_declaration_digest_is_pinned() -> None:
     target = TrustedCommandTarget(argv=("/bin/echo", "hi"))
     assert _canonical_declaration_digest(target) == (
         "f84544a13ed0a6209f3dfcc7a95e2afaa38d876fe50dec59943711a9c97985e5"
     )
+
+
+def test_untrusted_command_declaration_digest_is_pinned() -> None:
+    target = UntrustedCommandTarget(
+        argv=("/usr/bin/env", "printf", "hi"),
+        stdin=b"input",
+        containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+    )
+    assert _canonical_declaration_digest(target) == (
+        "cf06ac433f9a8bd85e6894738540bec9573ed0991139fb09767dc82b32ee3265"
+    )
+
+
+def test_untrusted_python_declaration_digest_is_pinned() -> None:
+    request = build_identity_document(
+        schema="dr_exec.test_request",
+        schema_version=1,
+        payload={"count": 2, "label": "x"},
+    )
+    target = UntrustedPythonTarget(
+        driver_source=(
+            "def dr_exec_main(request, emit):\n    emit(request)\n"
+        ),
+        request=request,
+        containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+    )
+    assert _canonical_declaration_digest(target) == (
+        "efd92cff97fbb61af1c3923f8e2eff55ea02ee98eb4e728cf586d570f4659cc0"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"kind": "process_executor"}, id="incomplete"),
+        pytest.param(
+            {
+                "kind": "process_executor",
+                "package_version": "0.1.0",
+                "source_commit": "0" * 40,
+                "source_state": "clean",
+                "session_id": None,
+                "extra": 1,
+            },
+            id="extra-key",
+        ),
+        pytest.param(
+            {
+                "package_version": "0.1.0",
+                "source_commit": "0" * 40,
+                "source_state": "clean",
+                "session_id": None,
+            },
+            id="missing-kind",
+        ),
+    ],
+)
+def test_executor_identity_rejects_incomplete_or_open_payloads(
+    payload: dict[str, object],
+) -> None:
+    document = build_identity_document(
+        schema="dr_exec.executor",
+        schema_version=1,
+        payload=payload,
+    )
+
+    with pytest.raises(ValidationError):
+        _validate_executor_identity(document)
+
+
+def test_executor_config_identity_rejects_a_foreign_schema_version() -> None:
+    document = build_identity_document(
+        schema="dr_exec.executor_config",
+        schema_version=2,
+        payload=ExecutorSelfBudgets.unbudgeted().model_dump(mode="json"),
+    )
+
+    with pytest.raises(ValueError, match="schema version 1"):
+        _validate_executor_config_identity(document)
 
 
 def test_environment_value_digest_ignores_declaration_order() -> None:

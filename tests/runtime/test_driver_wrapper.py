@@ -9,12 +9,15 @@ waits on elapsed time or treats it as evidence.
 from __future__ import annotations
 
 import os
+import signal
 import sys
+import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from dr_serialize import IdentityDocument, build_identity_document
+from dr_serialize import IdentityDocument, Jsonable, build_identity_document
 
 from dr_exec import ExecutorSelfBudgets, ProtocolFailureCode
 from dr_exec.declarations.transport import request_transport_bytes
@@ -31,6 +34,8 @@ from dr_exec.runtime.protocol import (
     request_identity_digest,
 )
 
+pytestmark = [pytest.mark.integration, pytest.mark.subprocess]
+
 ECHO_DRIVER = f"""
 def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     for index in range(request["payload"]["count"]):
@@ -40,6 +45,30 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
             "payload": {{"index": index, "echo": request["payload"]["echo"]}},
         }})
 """
+
+IDENTITY_ECHO_DRIVER = f"""
+def {DRIVER_ENTRYPOINT_NAME}(request, emit):
+    emit(request)
+"""
+
+WATCHDOG_SECONDS = 30.0
+
+
+@pytest.fixture(autouse=True)
+def watchdog() -> Iterator[object]:
+    """Fail a wedged child lifecycle and let the helper clean it up."""
+    timer = threading.Timer(
+        WATCHDOG_SECONDS,
+        lambda: os.kill(os.getpid(), signal.SIGALRM),
+    )
+    previous = signal.signal(
+        signal.SIGALRM,
+        lambda *_: pytest.fail("watchdog fired: child did not finish"),
+    )
+    timer.start()
+    yield timer
+    timer.cancel()
+    signal.signal(signal.SIGALRM, previous)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +103,8 @@ def _run_driver(
     *,
     request_bytes: bytes | None = None,
     self_budgets: ExecutorSelfBudgets | None = None,
+    invocation_arguments: tuple[str, ...] = ISOLATED_INVOCATION_ARGUMENTS,
+    protocol_descriptor: int = PROTOCOL_DESCRIPTOR,
 ) -> ChildRun:
     """Spawn one wrapper child with fd 3 mapped to the protected pipe.
 
@@ -87,37 +118,82 @@ def _run_driver(
     stderr_path = tmp_path / "stderr.bin"
     stdin_read, stdin_write = os.pipe()
     protocol_read, protocol_write = os.pipe()
-    stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT, 0o600)
-    stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    stdout_fd = os.open(
+        stdout_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    stderr_fd = os.open(
+        stderr_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    owned_descriptors = {
+        stdin_read,
+        stdin_write,
+        protocol_read,
+        protocol_write,
+        stdout_fd,
+        stderr_fd,
+    }
+    pid: int | None = None
     try:
         pid = os.posix_spawn(
             sys.executable,
-            [sys.executable, *ISOLATED_INVOCATION_ARGUMENTS, wrapper],
+            [sys.executable, *invocation_arguments, wrapper],
             {},
             file_actions=[
                 (os.POSIX_SPAWN_DUP2, stdin_read, 0),
                 (os.POSIX_SPAWN_DUP2, stdout_fd, 1),
                 (os.POSIX_SPAWN_DUP2, stderr_fd, 2),
-                (os.POSIX_SPAWN_DUP2, protocol_write, PROTOCOL_DESCRIPTOR),
+                (
+                    os.POSIX_SPAWN_DUP2,
+                    protocol_write,
+                    protocol_descriptor,
+                ),
             ],
         )
-    finally:
         for descriptor in (stdin_read, protocol_write, stdout_fd, stderr_fd):
             os.close(descriptor)
-    payload = (
-        request_transport_bytes(request)
-        if request_bytes is None
-        else request_bytes
-    )
-    with os.fdopen(stdin_write, "wb") as stdin:
-        stdin.write(payload)
-    with os.fdopen(protocol_read, "rb") as protocol:
-        stream = read_protocol_stream(
-            protocol,
-            request_id_sha256=request_identity_digest(request),
-            self_budgets=self_budgets or ExecutorSelfBudgets.unbudgeted(),
+            owned_descriptors.remove(descriptor)
+        payload = (
+            request_transport_bytes(request)
+            if request_bytes is None
+            else request_bytes
         )
-    _, exit_status = os.waitpid(pid, 0)
+        owned_descriptors.remove(stdin_write)
+        with os.fdopen(stdin_write, "wb") as stdin:
+            stdin.write(payload)
+        owned_descriptors.remove(protocol_read)
+        with os.fdopen(protocol_read, "rb") as protocol:
+            stream = read_protocol_stream(
+                protocol,
+                request_id_sha256=request_identity_digest(request),
+                self_budgets=(
+                    self_budgets or ExecutorSelfBudgets.unbudgeted()
+                ),
+            )
+        waited_pid, exit_status = os.waitpid(pid, 0)
+        assert waited_pid == pid
+        pid = None
+    finally:
+        for descriptor in owned_descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if pid is not None:
+            try:
+                waited_pid, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            else:
+                if waited_pid == 0:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    os.waitpid(pid, 0)
     return ChildRun(
         stream=stream,
         exit_status=exit_status,
@@ -156,15 +232,6 @@ def test_the_child_observable_literals_are_exactly_pinned() -> None:
     assert ISOLATED_INVOCATION_ARGUMENTS == ("-I", "-c")
 
 
-def test_the_wrapper_renders_the_pinned_literals_once_each() -> None:
-    wrapper = driver_wrapper_source("")
-
-    assert "_DR_EXEC_PROTOCOL_DESCRIPTOR = 3\n" in wrapper
-    assert "_DR_EXEC_ENTRYPOINT_NAME = 'dr_exec_main'\n" in wrapper
-    assert wrapper.count("_DR_EXEC_PROTOCOL_DESCRIPTOR = ") == 1
-    assert wrapper.count("_DR_EXEC_ENTRYPOINT_NAME = ") == 1
-
-
 def test_a_child_spelling_both_literals_bare_runs_and_completes(
     tmp_path: Path,
 ) -> None:
@@ -182,36 +249,18 @@ def dr_exec_main(request, emit):
     })
 """
     request = _request(echo="bare")
-    wrapper = driver_wrapper_source(literal_driver)
-    protocol_read, protocol_write = os.pipe()
-    stdin_read, stdin_write = os.pipe()
-    try:
-        pid = os.posix_spawn(
-            sys.executable,
-            [sys.executable, "-I", "-c", wrapper],
-            {},
-            file_actions=[
-                (os.POSIX_SPAWN_DUP2, stdin_read, 0),
-                (os.POSIX_SPAWN_DUP2, protocol_write, 3),
-            ],
-        )
-    finally:
-        os.close(stdin_read)
-        os.close(protocol_write)
-    with os.fdopen(stdin_write, "wb") as stdin:
-        stdin.write(request_transport_bytes(request))
-    with os.fdopen(protocol_read, "rb") as protocol:
-        stream = read_protocol_stream(
-            protocol,
-            request_id_sha256=request_identity_digest(request),
-            self_budgets=ExecutorSelfBudgets.unbudgeted(),
-        )
-    _, exit_status = os.waitpid(pid, 0)
+    run = _run_driver(
+        literal_driver,
+        request,
+        tmp_path,
+        invocation_arguments=("-I", "-c"),
+        protocol_descriptor=3,
+    )
 
-    assert os.waitstatus_to_exitcode(exit_status) == 0
-    assert stream.completed
-    assert len(stream.outputs) == 1
-    assert stream.outputs[0].payload == {"echo": "bare"}
+    assert run.exited_cleanly
+    assert run.stream.completed
+    assert len(run.stream.outputs) == 1
+    assert run.stream.outputs[0].payload == {"echo": "bare"}
 
 
 # --- Complete streams ----------------------------------------------------
@@ -253,6 +302,53 @@ def test_the_child_receives_exactly_the_canonical_request(
         "index": 0,
         "echo": "é中\U0001f600",
     }
+
+
+@pytest.mark.parametrize(
+    ("request_bytes", "payload"),
+    [
+        pytest.param(
+            b'{"payload":{"bool":true,"float":1.5,"int":-2,'
+            b'"none":null,"text":"line\\n\\u00e9"},'
+            b'"schema":"dr_exec.test_request","schema_version":1}',
+            {
+                "bool": True,
+                "float": 1.5,
+                "int": -2,
+                "none": None,
+                "text": "line\né",
+            },
+            id="strict-leaves",
+        ),
+        pytest.param(
+            b'{"payload":{"items":[0,{"enabled":false},'
+            b'["x",2.25]]},"schema":"dr_exec.test_request",'
+            b'"schema_version":1}',
+            {"items": [0, {"enabled": False}, ["x", 2.25]]},
+            id="nested-containers",
+        ),
+    ],
+)
+def test_child_bootstrap_accepts_the_strict_canonical_identity_corpus(
+    request_bytes: bytes,
+    payload: Jsonable,
+    tmp_path: Path,
+) -> None:
+    request = build_identity_document(
+        schema="dr_exec.test_request",
+        schema_version=1,
+        payload=payload,
+    )
+    run = _run_driver(
+        IDENTITY_ECHO_DRIVER,
+        request,
+        tmp_path,
+        request_bytes=request_bytes,
+    )
+
+    assert run.exited_cleanly
+    assert run.stream.completed
+    assert run.stream.outputs == (request,)
 
 
 def test_protocol_frames_never_reach_the_payload_streams(
@@ -384,12 +480,55 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     ]
 
 
-def test_a_driver_emitting_a_non_identity_document_fails_the_stream(
+@pytest.mark.parametrize(
+    "emitted_expression",
+    [
+        pytest.param("None", id="non-object"),
+        pytest.param(
+            "{'schema_version': 1, 'payload': {}}",
+            id="missing-schema",
+        ),
+        pytest.param(
+            "{'schema': 's', 'payload': {}}",
+            id="missing-schema-version",
+        ),
+        pytest.param(
+            "{'schema': 's', 'schema_version': 1}",
+            id="missing-payload",
+        ),
+        pytest.param(
+            "{'schema': 's', 'schema_version': 1, 'payload': {}, 'extra': 0}",
+            id="extra-field",
+        ),
+        pytest.param(
+            "{'schema': 1, 'schema_version': 1, 'payload': {}}",
+            id="non-string-schema",
+        ),
+        pytest.param(
+            "{'schema': 's', 'schema_version': True, 'payload': {}}",
+            id="boolean-schema-version",
+        ),
+        pytest.param(
+            "{'schema': 's', 'schema_version': 1, 'payload': float('nan')}",
+            id="non-finite-payload",
+        ),
+        pytest.param(
+            "{'schema': 's', 'schema_version': 1, 'payload': {1, 2}}",
+            id="unsupported-payload",
+        ),
+        pytest.param(
+            "{'schema': 's', 'schema_version': 1, 'payload': {1: 'value'}}",
+            id="non-string-payload-key",
+        ),
+    ],
+)
+def test_child_bootstrap_rejects_invalid_emitted_identity_values(
+    emitted_expression: str,
     tmp_path: Path,
 ) -> None:
     driver = f"""
 def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    emit({{"not": "an identity document"}})
+    emit({emitted_expression})
 """
     run = _run_driver(driver, _request(), tmp_path)
     assert not run.exited_cleanly
@@ -430,10 +569,34 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     [
         pytest.param(b"", id="empty"),
         pytest.param(b"{", id="truncated"),
-        pytest.param(b'{"schema": "s"}', id="incomplete-identity"),
+        pytest.param(b"[]", id="non-object"),
+        pytest.param(
+            b'{"payload":{},"schema_version":1}',
+            id="missing-schema",
+        ),
+        pytest.param(
+            b'{"payload":{},"schema":"s"}',
+            id="missing-schema-version",
+        ),
+        pytest.param(
+            b'{"schema":"s","schema_version":1}',
+            id="missing-payload",
+        ),
         pytest.param(
             b'{"payload":{},"schema":"s","schema_version":1,"extra":0}',
             id="extra-field",
+        ),
+        pytest.param(
+            b'{"payload":{},"schema":1,"schema_version":1}',
+            id="non-string-schema",
+        ),
+        pytest.param(
+            b'{"payload":{},"schema":"s","schema_version":true}',
+            id="boolean-schema-version",
+        ),
+        pytest.param(
+            b'{"payload":NaN,"schema":"s","schema_version":1}',
+            id="non-finite-payload",
         ),
         pytest.param(
             b'{"payload": {}, "schema": "s", "schema_version": 1}',

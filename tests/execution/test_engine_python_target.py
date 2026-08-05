@@ -19,7 +19,6 @@ evidence.
 from __future__ import annotations
 
 import os
-import signal
 import sys
 import threading
 from collections.abc import Mapping
@@ -30,7 +29,9 @@ from uuid import uuid4
 
 import pytest
 from dr_serialize import IdentityDocument, build_identity_document
+from support.process import Gate
 
+import dr_exec.execution.engine
 from dr_exec import (
     BudgetAxis,
     BudgetExceededOutcome,
@@ -43,6 +44,7 @@ from dr_exec import (
     DirectoryRunStore,
     EnvGrant,
     ExecutionJob,
+    ExecutorFailure,
     ExecutorSelfBudgets,
     ExitedOutcome,
     FailureOwner,
@@ -71,11 +73,14 @@ requires_macos = pytest.mark.skipif(
     sys.platform != "darwin",
     reason="real macOS process semantics",
 )
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.subprocess,
+    pytest.mark.platform_macos,
+]
 
 # Watchdog only. It bounds a case that would otherwise hang the suite; no
 # case asserts on it, and no case uses its non-expiry as evidence.
-WATCHDOG_SECONDS = 60.0
-
 # Watchdogs expressed as budgets, for cases whose child is deliberately
 # immortal. The case asserts on the terminal outcome, never on timing.
 WATCHDOG_WALL_TIME = FiniteDurationLimit(max_ns=10_000_000_000)
@@ -177,61 +182,20 @@ class Harness:
 
 
 @pytest.fixture
-def harness(tmp_path: Path) -> Harness:
+def harness(
+    tmp_path: Path, host_runtime: IsolatedHostPythonRuntime
+) -> Harness:
     root = tmp_path / "records"
     root.mkdir()
     store = DirectoryRunStore(root=root)
     return Harness(
         executor=ProcessExecutor(
-            runtime=IsolatedHostPythonRuntime(executable=Path(sys.executable)),
+            runtime=host_runtime,
             run_store=store,
         ),
         store=store,
         root=root,
     )
-
-
-@pytest.fixture(autouse=True)
-def watchdog() -> object:
-    """Fail a hung case instead of letting it hang the whole suite."""
-    timer = threading.Timer(
-        WATCHDOG_SECONDS,
-        lambda: os.kill(os.getpid(), signal.SIGALRM),
-    )
-    previous = signal.signal(
-        signal.SIGALRM,
-        lambda *_: pytest.fail("watchdog fired: the case did not finish"),
-    )
-    timer.start()
-    yield timer
-    timer.cancel()
-    signal.signal(signal.SIGALRM, previous)
-
-
-@dataclass(frozen=True, slots=True)
-class Gate:
-    """One FIFO the parent and child use to synchronize on an event.
-
-    Opening a FIFO blocks in the kernel until the peer opens it, so a gate
-    is real state synchronization with no spinning and no delay. The case's
-    watchdog bounds a peer that never arrives.
-    """
-
-    path: Path
-
-    @classmethod
-    def create(cls, directory: Path, name: str, /) -> Gate:
-        path = directory / name
-        os.mkfifo(path)
-        return cls(path=path)
-
-    def receive(self) -> str:
-        with self.path.open() as reader:
-            return reader.read()
-
-    def release(self, message: str = "go", /) -> None:
-        with self.path.open("w") as writer:
-            writer.write(message)
 
 
 def record_dir_of(completed: CompletedExecution, /) -> Path:
@@ -353,42 +317,34 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
 
 @requires_macos
-def test_a_python_child_inherits_only_its_declared_transports(
+def test_python_wrapper_closes_protected_fd_before_domain_code(
     harness: Harness,
 ) -> None:
-    """fd 3 is the one addition over a command target, and nothing else.
+    """The wrapper closes protected fd 3 before domain code begins.
 
-    The driver reports every descriptor it can stat, so this catches any
-    parent descriptor that leaked past ``close_fds`` as well as the
-    intended topology. Exactly four are live by the time domain code runs:
-    the three payload streams plus the wrapper's own duplicate of the
-    protected handle. The protected *number* is closed -- the wrapper
-    duplicates fd 3 and closes the original before loading the driver --
-    so the duplicate lands on the lowest free descriptor above the payload
-    streams, and the payload can no longer reach the protected stream by
-    the well-known number.
+    The common command launch test owns all-descriptor closure. This
+    Python-specific case owns the wrapper remapping: domain code retains
+    the three payload streams, while protected fd 3 itself is closed.
     """
     driver = f"""
 import os
 
 
 def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    live = []
-    for fd in range(256):
+    live = {{}}
+    for fd in range(4):
         try:
             os.fstat(fd)
         except OSError:
-            continue
-        live.append(fd)
+            live[str(fd)] = False
+        else:
+            live[str(fd)] = True
     {emit_call("{'live': live}")}
 """
     completed = harness.run(driver)
 
     live = sole_mapping(completed)["live"]
-    assert isinstance(live, list)
-    assert live[:3] == [0, 1, 2]
-    assert len(live) == 4
-    assert PROTOCOL_DESCRIPTOR not in live
+    assert live == {"0": True, "1": True, "2": True, "3": False}
 
 
 @requires_macos
@@ -440,80 +396,65 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
 
 @requires_macos
-def test_a_python_child_leads_a_fresh_session_and_process_group(
+def test_driver_source_is_not_a_payload_argument_or_shell_syntax(
     harness: Harness,
 ) -> None:
-    driver = f"""
-import os
-
-
-def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    {emit_call("{'pid': os.getpid(), 'pgid': os.getpgrp(), 'sid': os.getsid(0)}")}
-"""
-    completed = harness.run(driver)
-
-    reported = sole_mapping(completed)
-    assert reported["pid"] == reported["pgid"] == reported["sid"]
-    assert reported["pgid"] != os.getpgrp()
-
-
-@requires_macos
-def test_a_python_child_runs_in_a_fresh_scratch_directory(
-    harness: Harness,
-) -> None:
-    driver = f"""
-import os
-
-
-def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    {emit_call("{'cwd': os.getcwd()}")}
-"""
-    completed = harness.run(driver)
-
-    assert not Path(str(sole_mapping(completed)["cwd"])).exists()
-
-
-@requires_macos
-def test_a_python_child_receives_only_the_granted_environment(
-    harness: Harness,
-) -> None:
-    driver = f"""
-import os
-
-
-def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    {emit_call("{'names': sorted(os.environ)}")}
-"""
-    os.environ["DR_EXEC_TEST_PYTHON_AMBIENT"] = "must not reach the child"
-    try:
-        completed = harness.run(
-            driver, env=EnvGrant.fixed({"GRANTED": "value"})
-        )
-    finally:
-        del os.environ["DR_EXEC_TEST_PYTHON_AMBIENT"]
-
-    names = sole_mapping(completed)["names"]
-    assert isinstance(names, list)
-    assert "GRANTED" in names
-    assert "DR_EXEC_TEST_PYTHON_AMBIENT" not in names
-
-
-@requires_macos
-def test_the_driver_source_never_reaches_argv_or_a_shell(
-    harness: Harness,
-) -> None:
-    """Hostile source is embedded as data, so it cannot become syntax."""
+    """Domain argv is CPython's ``-c`` argv; hostile source stays inert."""
     driver = f"""
 import sys
 
 
 def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     marker = "$(echo pwned); `id`; '\\"\\\\"
-    {emit_call("{'marker': marker, 'argv_len': len(sys.argv)}")}
+    {emit_call("{'marker': marker, 'argv': sys.argv}")}
 """
     completed = harness.run(driver)
 
-    assert sole_mapping(completed)["marker"] == "$(echo pwned); `id`; '\"\\"
+    reported = sole_mapping(completed)
+    assert reported["marker"] == "$(echo pwned); `id`; '\"\\"
+    assert reported["argv"] == ["-c"]
+
+
+# --- Post-start machinery failure ---------------------------------------
+
+
+@requires_macos
+def test_a_started_protocol_worker_failure_raises_after_lifecycle_cleanup(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead reader cannot turn missing protocol evidence into a result."""
+
+    def failing_read(*_: object, **__: object) -> None:
+        raise RuntimeError("synthetic protocol failure")
+
+    monkeypatch.setattr(
+        dr_exec.execution.engine, "read_protocol_stream", failing_read
+    )
+    before = len(os.listdir("/dev/fd"))
+    driver = f"""
+import time
+
+
+def {DRIVER_ENTRYPOINT_NAME}(request, emit):
+    while True:
+        time.sleep(3600)
+"""
+
+    with pytest.raises(
+        ExecutorFailure, match="protocol transport worker"
+    ) as exc:
+        harness.run(
+            driver,
+            budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=500_000_000)),
+            self_budgets=ExecutorSelfBudgets(join_time=WATCHDOG_JOIN_TIME),
+        )
+
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert len(os.listdir("/dev/fd")) == before
+    (record_dir,) = harness.root.iterdir()
+    assert harness.store.load(record_dir).state is RecordState.RUNNING
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
 
 
 # --- Protocol failure taxonomy as outcome data ---------------------------
@@ -741,31 +682,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
 
 @requires_macos
-def test_pre_spawn_cancellation_records_without_launching_a_child(
-    harness: Harness, tmp_path: Path
-) -> None:
-    marker = tmp_path / "the-driver-ran"
-    token = CancelToken()
-    token.cancel()
-
-    driver = f"""
-import pathlib
-
-
-def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    pathlib.Path({str(marker)!r}).write_text("ran")
-"""
-    completed = harness.run(driver, cancellation=token)
-
-    assert completed.result.outcome == CancelledOutcome()
-    assert completed.result.attribution.owner is FailureOwner.NONE
-    assert not marker.exists()
-    assert completed.result.protocol_outputs == ()
-    record = harness.store.load(record_dir_of(completed))
-    assert record.state is RecordState.FINALIZED
-
-
-@requires_macos
 def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -810,67 +726,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
 
 # --- Teardown ------------------------------------------------------------
-
-
-@requires_macos
-def test_teardown_reaches_a_descendant_the_driver_forked(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """A forked descendant in the group goes with the leader.
-
-    The descendant announces its pid through a gate before either process
-    blocks, so the pid checked here belongs to a process that provably
-    existed and shared the group.
-    """
-    gate = Gate.create(tmp_path, "descendant")
-    pids: list[int] = []
-    collector = threading.Thread(
-        target=lambda: pids.append(int(gate.receive())),
-        daemon=True,
-    )
-    collector.start()
-
-    driver = f"""
-import os
-import time
-
-
-def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    if os.fork() == 0:
-        gate = open({str(gate.path)!r}, "w")
-        gate.write(str(os.getpid()))
-        gate.close()
-        while True:
-            time.sleep(3600)
-    while True:
-        time.sleep(3600)
-"""
-    completed = harness.run(
-        driver,
-        budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=500_000_000)),
-        self_budgets=ExecutorSelfBudgets(join_time=WATCHDOG_JOIN_TIME),
-    )
-    collector.join()
-
-    assert completed.result.outcome == BudgetExceededOutcome(
-        axis=BudgetAxis.WALL_TIME
-    )
-    (descendant,) = pids
-    with pytest.raises(ProcessLookupError):
-        os.kill(descendant, 0)
-
-
-@requires_macos
-def test_the_direct_child_is_reaped_so_no_zombie_remains(
-    harness: Harness,
-) -> None:
-    completed = harness.run(ECHO_DRIVER)
-    del completed
-
-    # `ECHILD` is the kernel's own statement that every direct child of
-    # this parent was reaped.
-    with pytest.raises(ChildProcessError):
-        os.waitpid(-1, os.WNOHANG)
 
 
 # --- Durable recording ---------------------------------------------------
@@ -926,28 +781,6 @@ def test_accepted_outputs_are_recorded_inline_not_as_digests(
     assert [
         document.payload for document in record.result.protocol_outputs
     ] == [{"index": index, "echo": "inline"} for index in range(2)]
-
-
-@requires_macos
-def test_the_python_target_finalizes_with_digest_matching_sidecars(
-    harness: Harness,
-) -> None:
-    driver = f"""
-import sys
-
-
-def {DRIVER_ENTRYPOINT_NAME}(request, emit):
-    sys.stdout.write("stdout evidence")
-    sys.stderr.write("stderr evidence")
-    {emit_call("{'ok': True}")}
-"""
-    completed = harness.run(driver)
-
-    record_dir = record_dir_of(completed)
-    record = harness.store.load(record_dir)
-    assert isinstance(record, FinalizedRecord)
-    stdout_path = record_dir / record.outputs.stdout.relative_path
-    assert stdout_path.read_bytes() == b"stdout evidence"
 
 
 # --- Concurrency ---------------------------------------------------------

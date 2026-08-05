@@ -2,16 +2,17 @@
 
 dr-exec owns the canonical manifest model, the typed lifecycle handles,
 the secret-safe projection of an execution result into durable evidence,
-the receipt semantics, and the bounded, strictly validated load path. The
-pinned ``dr_store.docdir`` primitive owns directory allocation, atomic
+the receipt semantics, and the size-preflighted, strictly validated load
+path. The pinned ``dr_store`` Document Directory owns allocation, atomic
 durable manifest replacement, sidecar streaming, truncation, digests, and
 verified sidecar reads: sidecar lengths and digests are read out of the
 finalized ``SidecarSummary`` and are never recomputed here.
 
 Loading is the shared read path applied to durable evidence. dr-exec
-bounds the stored manifest bytes before anything decodes them and then
-validates those same bytes, so a loaded record is a validation of what is
-on disk rather than of a re-rendering of it.
+refuses a manifest whose statically observed size exceeds its structural
+ceiling before reading it and then validates the acquired bytes directly.
+Concurrent growth or replacement between the size preflight and the read
+can exceed that ceiling; v1 does not claim a race-safe memory bound.
 """
 
 from __future__ import annotations
@@ -23,8 +24,7 @@ from pathlib import Path
 from typing import Final, cast
 
 from dr_serialize import Jsonable, SerializationError, Sha256Digest
-from dr_store.docdir import DocumentDirectory, SidecarSummary
-from dr_store.errors import DocumentDirectoryError
+from dr_store import DocumentDirectory, DocumentDirectoryError, SidecarSummary
 from pydantic import TypeAdapter, ValidationError
 
 from dr_exec.core.errors import ExecutorFailure, RecordLoadError
@@ -84,16 +84,13 @@ _RUN_RECORD_ADAPTER: TypeAdapter[RunRecord] = TypeAdapter(RunRecord)
 
 # The pinned structural ceiling on manifest bytes. This is not a budget:
 # ``DirectoryRunStore`` carries no self-budgets, so there is no declared
-# limit to apply here, and the design's read path nonetheless requires
-# dr-exec to bound bytes before any decode. Stating the number here means
-# the read is bounded by something dr-exec owns and a test pins, rather
-# than by whatever the machine happens to tolerate when the pinned
-# Document Directory reads a manifest whole. Honest limitation: protocol
-# outputs are retained inline and complete, so an unbudgeted run can in
-# principle write a manifest this large and then fail to read it back.
-# That is the structural limit of reading a manifest into memory at all,
-# made explicit and refused before the read rather than left to surface
-# as memory exhaustion.
+# limit to apply here. Stating the number here gives static manifests a
+# dr-exec-owned, test-pinned size preflight rather than leaving their size
+# wholly implicit. The separate stat and read are intentionally not a
+# race-safe memory bound: concurrent growth or replacement can make the
+# acquired bytes exceed the observed size. Protocol outputs are retained
+# inline and complete, so an unbudgeted run can also write a static manifest
+# this large and then fail to read it back.
 STRUCTURAL_MANIFEST_BYTE_CEILING: Final = 256 * 1024 * 1024
 
 
@@ -476,13 +473,14 @@ def _directory(record_dir: Path, /) -> DocumentDirectory:
     return DocumentDirectory(record_dir, MANIFEST_NAME)
 
 
-def _read_bounded_manifest_bytes(record_dir: Path, /) -> bytes:
-    """Return the stored manifest bytes, refusing an over-ceiling file.
+def _read_size_preflighted_manifest_bytes(record_dir: Path, /) -> bytes:
+    """Return manifest bytes after a static directory-entry size preflight.
 
-    The size comes from the directory entry, so nothing is read to learn
-    it and an oversized manifest is never materialized. A manifest that
-    cannot be stat-ed or read at all is the same missing-or-unreadable
-    failure either way.
+    An already-oversized file is refused without being materialized. The
+    stat and read are separate operations: concurrent growth or replacement
+    can make the returned bytes exceed the ceiling, and this helper does not
+    claim otherwise. A manifest that cannot be stat-ed or read at all is the
+    same missing-or-unreadable failure either way.
     """
     manifest_path = record_dir / MANIFEST_NAME
     try:
@@ -502,18 +500,20 @@ def _load_record(record_dir: Path, /) -> RunRecord:
     """Read, then strictly validate, the manifest at ``record_dir``.
 
     This is the shared read path applied to durable evidence: dr-exec
-    bounds the stored bytes before decode, hands exactly those bytes to
-    the pinned bounded strict decode and canonical-equality check, and
-    then validates those same original bytes in strict JSON mode. The
-    decoded ``Jsonable`` never reaches Pydantic, so the record that loads
-    is a validation of the bytes on disk rather than of a re-rendering
-    of them. dr-exec then owns lifecycle meaning.
+    size-preflights a static manifest before decode, hands the acquired bytes
+    to the pinned bounded strict decode and canonical-equality check, and
+    then validates those same original bytes in strict JSON mode. The decoded
+    ``Jsonable`` never reaches Pydantic, so the record that loads is a
+    validation of the bytes acquired from disk rather than a re-rendering of
+    them. Concurrent file growth or replacement can exceed the preflighted
+    size; v1 does not claim a race-safe memory bound. dr-exec then owns
+    lifecycle meaning.
 
     ``DirectoryRunStore`` carries no self-budgets, so
     ``STRUCTURAL_MANIFEST_BYTE_CEILING`` -- not the declarable
-    ``manifest_bytes`` axis -- is what bounds this read.
+    ``manifest_bytes`` axis -- is what preflights a static file.
     """
-    manifest_bytes = _read_bounded_manifest_bytes(record_dir)
+    manifest_bytes = _read_size_preflighted_manifest_bytes(record_dir)
     try:
         require_canonical_json_bytes(
             manifest_bytes,
@@ -538,17 +538,32 @@ def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:
     The digest pins the stored bytes exactly. A stored sidecar carries no
     segment boundary, so the two declared segment lengths are verifiable
     only as their sum: the head/tail split is a manifest assertion, not a
-    property the stored bytes can confirm. ``relative_path`` is already
-    validated normalized and relative, so it can only name a child of
-    the run directory.
+    property the stored bytes can confirm. A finalized dr-exec record may
+    name only the two fixed direct-child artifact paths; the instance-scoped
+    Document Directory verifier then refuses symlinks and verifies the exact
+    descriptor it inspected.
     """
-    for artifact, stream in (
-        (record.outputs.stdout, record.result.payload_outputs.stdout),
-        (record.outputs.stderr, record.result.payload_outputs.stderr),
+    directory = _directory(record_dir)
+    for expected_name, artifact, stream in (
+        (
+            STDOUT_SIDECAR_NAME,
+            record.outputs.stdout,
+            record.result.payload_outputs.stdout,
+        ),
+        (
+            STDERR_SIDECAR_NAME,
+            record.outputs.stderr,
+            record.result.payload_outputs.stderr,
+        ),
     ):
+        if artifact.relative_path != Path(expected_name):
+            raise RecordLoadError(
+                f"run record at {record_dir} names an unexpected "
+                f"{expected_name} artifact path"
+            )
         try:
-            DocumentDirectory.verify_sidecar(
-                record_dir / artifact.relative_path,
+            directory.verify_sidecar(
+                expected_name,
                 expected_digest=artifact.sha256,
                 expected_head_length=stream.head_bytes,
                 expected_tail_length=stream.tail_bytes,

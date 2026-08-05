@@ -17,12 +17,13 @@ qualification evidence for the lifecycle claims.
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import signal
 import subprocess
 import sys
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +31,7 @@ from uuid import uuid4
 
 import pytest
 from dr_serialize import build_identity_document
+from support.process import Gate
 
 import dr_exec.execution.engine
 import dr_exec.execution.spawn
@@ -78,8 +80,6 @@ from dr_exec import (
 from dr_exec.execution.engine import SCRATCH_DIRECTORY_PREFIX, run_execution
 from dr_exec.execution.spawn import (
     SETUP_STAGE_CHDIR,
-    SETUP_STAGE_SESSION,
-    SetupFailure,
 )
 from dr_exec.recording.store import FinalizableRun, PreparedRun, RunningRun
 
@@ -92,16 +92,20 @@ requires_macos = pytest.mark.skipif(
     sys.platform != "darwin",
     reason="real macOS process semantics",
 )
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.subprocess,
+    pytest.mark.platform_macos,
+]
 
 # Watchdog only. It bounds a case that would otherwise hang the suite; no
 # case ever asserts on it, and no case uses its non-expiry as evidence.
-WATCHDOG_SECONDS = 30.0
-
 # Watchdogs expressed as budgets. A test that needs the engine itself to
 # stop an intentionally-immortal child declares one of these; the case
 # then asserts on the terminal outcome, never on how long it took.
 WATCHDOG_WALL_TIME = FiniteDurationLimit(max_ns=5_000_000_000)
 WATCHDOG_JOIN_TIME = FiniteDurationLimit(max_ns=5_000_000_000)
+ESCAPEE_JOIN_TIME = FiniteDurationLimit(max_ns=500_000_000)
 
 # An input far past any pipe buffer a kernel offers, so a child that never
 # reads it leaves the feed mid-payload rather than absorbing it all.
@@ -114,6 +118,7 @@ class Harness:
 
     store: DirectoryRunStore
     root: Path
+    runtime: IsolatedHostPythonRuntime
 
     def run(
         self,
@@ -159,7 +164,7 @@ class Harness:
     ) -> CompletedExecution:
         return run_execution(
             job,
-            runtime=IsolatedHostPythonRuntime(executable=Path(sys.executable)),
+            runtime=self.runtime,
             run_store=self.store if store is None else store,
             self_budgets=(
                 ExecutorSelfBudgets.unbudgeted()
@@ -203,65 +208,21 @@ def finalized_record(
 
 
 @pytest.fixture
-def harness(tmp_path: Path) -> Harness:
+def harness(
+    tmp_path: Path, host_runtime: IsolatedHostPythonRuntime
+) -> Harness:
     root = tmp_path / "records"
     root.mkdir()
-    return Harness(store=DirectoryRunStore(root=root), root=root)
-
-
-@pytest.fixture(autouse=True)
-def watchdog() -> object:
-    """Fail a hung case instead of letting it hang the whole suite.
-
-    The timer is a watchdog: a case that finishes normally cancels it, and
-    no case ever asserts that it did not fire.
-    """
-    timer = threading.Timer(
-        WATCHDOG_SECONDS,
-        lambda: os.kill(os.getpid(), signal.SIGALRM),
+    return Harness(
+        store=DirectoryRunStore(root=root),
+        root=root,
+        runtime=host_runtime,
     )
-    previous = signal.signal(
-        signal.SIGALRM,
-        lambda *_: pytest.fail("watchdog fired: the case did not finish"),
-    )
-    timer.start()
-    yield timer
-    timer.cancel()
-    signal.signal(signal.SIGALRM, previous)
 
 
 def python_command(source: str, /) -> tuple[str, ...]:
     """One real child that is a fresh isolated interpreter, not a shell."""
     return (sys.executable, "-I", "-c", source)
-
-
-@dataclass(frozen=True, slots=True)
-class Gate:
-    """One FIFO the parent and child use to synchronize on an event.
-
-    Opening a FIFO blocks in the kernel until the other side opens it, so
-    a gate is real state synchronization with no spinning and no delay:
-    the open returns exactly when the peer arrives. The case's watchdog is
-    what bounds a peer that never does.
-    """
-
-    path: Path
-
-    @classmethod
-    def create(cls, directory: Path, name: str, /) -> Gate:
-        path = directory / name
-        os.mkfifo(path)
-        return cls(path=path)
-
-    def receive(self) -> str:
-        """Block until the peer writes, then return exactly what it sent."""
-        with self.path.open() as reader:
-            return reader.read()
-
-    def release(self, message: str = "go", /) -> None:
-        """Unblock a peer waiting on this gate."""
-        with self.path.open("w") as writer:
-            writer.write(message)
 
 
 # --- Recognized outcomes -------------------------------------------------
@@ -434,30 +395,34 @@ def test_both_streams_drain_concurrently_past_one_pipe_buffer(
 
 
 @requires_macos
-def test_a_command_child_inherits_exactly_three_descriptors(
+def test_a_command_child_excludes_a_high_inheritable_parent_descriptor(
     harness: Harness,
 ) -> None:
-    """fd 3 is executor-owned and is never granted to a command target.
-
-    The child reports every descriptor it can stat, so this catches both
-    the protocol descriptor and any parent descriptor that leaked past
-    ``close_fds``.
-    """
-    completed = harness.run(
-        python_command(
-            "import os, sys\n"
-            "live = []\n"
-            "for fd in range(256):\n"
-            "    try:\n"
-            "        os.fstat(fd)\n"
-            "    except OSError:\n"
-            "        continue\n"
-            "    live.append(fd)\n"
-            "sys.stdout.write(repr(live))\n"
+    """``close_fds`` excludes inheritable descriptors above a low scan."""
+    seed_read, seed_write = os.pipe()
+    high_descriptor = fcntl.fcntl(seed_read, fcntl.F_DUPFD, 512)
+    os.set_inheritable(high_descriptor, True)
+    try:
+        assert high_descriptor >= 512
+        assert os.get_inheritable(high_descriptor)
+        completed = harness.run(
+            python_command(
+                "import os, sys\n"
+                "try:\n"
+                f"    os.fstat({high_descriptor})\n"
+                "except OSError:\n"
+                "    inherited = False\n"
+                "else:\n"
+                "    inherited = True\n"
+                "sys.stdout.write(repr(inherited))\n"
+            )
         )
-    )
+    finally:
+        os.close(high_descriptor)
+        os.close(seed_write)
+        os.close(seed_read)
 
-    assert completed.result.payload_outputs.stdout.head == b"[0, 1, 2]"
+    assert completed.result.payload_outputs.stdout.head == b"False"
 
 
 @requires_macos
@@ -1128,29 +1093,38 @@ def test_a_descendant_that_leaves_the_session_escapes_the_claim(
         daemon=True,
     )
     collector.start()
+    escapee_was_alive = False
+    try:
+        with pytest.raises(ExecutorFailure, match="join budget"):
+            harness.run(
+                python_command(
+                    "import os, time\n"
+                    "if os.fork() == 0:\n"
+                    "    os.setsid()\n"
+                    f"    gate = open({str(gate.path)!r}, 'w')\n"
+                    "    gate.write(str(os.getpid()))\n"
+                    "    gate.close()\n"
+                    "    while True:\n"
+                    "        time.sleep(3600)\n"
+                    "while True:\n"
+                    "    time.sleep(3600)\n"
+                ),
+                budgets=Budgets(
+                    wall_time=FiniteDurationLimit(max_ns=500_000_000)
+                ),
+                self_budgets=ExecutorSelfBudgets(join_time=ESCAPEE_JOIN_TIME),
+            )
+    finally:
+        collector.join()
+        for escapee in escapee_pids:
+            with suppress(ProcessLookupError):
+                os.kill(escapee, 0)
+                escapee_was_alive = True
+            with suppress(ProcessLookupError):
+                os.kill(escapee, signal.SIGKILL)
 
-    with pytest.raises(ExecutorFailure, match="join budget"):
-        harness.run(
-            python_command(
-                "import os, time\n"
-                "if os.fork() == 0:\n"
-                "    os.setsid()\n"
-                f"    gate = open({str(gate.path)!r}, 'w')\n"
-                "    gate.write(str(os.getpid()))\n"
-                "    gate.close()\n"
-                "    while True:\n"
-                "        time.sleep(3600)\n"
-                "while True:\n"
-                "    time.sleep(3600)\n"
-            ),
-            budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=500_000_000)),
-            self_budgets=ExecutorSelfBudgets(join_time=WATCHDOG_JOIN_TIME),
-        )
-
-    collector.join()
-    (escapee,) = escapee_pids
-    os.kill(escapee, 0)
-    os.kill(escapee, signal.SIGKILL)
+    assert len(escapee_pids) == 1
+    assert escapee_was_alive
 
     record = harness.store.load(harness.only_record_dir())
     assert record.state is RecordState.RUNNING
@@ -1177,30 +1151,39 @@ def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
         daemon=True,
     )
     collector.start()
+    escapee_was_alive = False
+    try:
+        with pytest.raises(ExecutorFailure, match="join budget"):
+            harness.run(
+                python_command(
+                    "import os, time\n"
+                    "if os.fork() == 0:\n"
+                    "    os.setsid()\n"
+                    f"    gate = open({str(gate.path)!r}, 'w')\n"
+                    "    gate.write(str(os.getpid()))\n"
+                    "    gate.close()\n"
+                    "    while True:\n"
+                    "        time.sleep(3600)\n"
+                    "while True:\n"
+                    "    time.sleep(3600)\n"
+                ),
+                stdin=b"x" * UNREADABLE_STDIN_BYTES,
+                budgets=Budgets(
+                    wall_time=FiniteDurationLimit(max_ns=500_000_000)
+                ),
+                self_budgets=ExecutorSelfBudgets(join_time=ESCAPEE_JOIN_TIME),
+            )
+    finally:
+        collector.join()
+        for escapee in escapee_pids:
+            with suppress(ProcessLookupError):
+                os.kill(escapee, 0)
+                escapee_was_alive = True
+            with suppress(ProcessLookupError):
+                os.kill(escapee, signal.SIGKILL)
 
-    with pytest.raises(ExecutorFailure, match="join budget"):
-        harness.run(
-            python_command(
-                "import os, time\n"
-                "if os.fork() == 0:\n"
-                "    os.setsid()\n"
-                f"    gate = open({str(gate.path)!r}, 'w')\n"
-                "    gate.write(str(os.getpid()))\n"
-                "    gate.close()\n"
-                "    while True:\n"
-                "        time.sleep(3600)\n"
-                "while True:\n"
-                "    time.sleep(3600)\n"
-            ),
-            stdin=b"x" * UNREADABLE_STDIN_BYTES,
-            budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=500_000_000)),
-            self_budgets=ExecutorSelfBudgets(join_time=WATCHDOG_JOIN_TIME),
-        )
-
-    collector.join()
-    (escapee,) = escapee_pids
-    os.kill(escapee, 0)
-    os.kill(escapee, signal.SIGKILL)
+    assert len(escapee_pids) == 1
+    assert escapee_was_alive
 
     record = harness.store.load(harness.only_record_dir())
     assert record.state is RecordState.RUNNING
@@ -1425,6 +1408,7 @@ class _GatedMarkingStore(DirectoryRunStore):
 @requires_macos
 def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
     tmp_path: Path,
+    host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
     """Draining is live across the durable `running` publish.
 
@@ -1456,7 +1440,11 @@ def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
         target=release_after_the_oversized_write, daemon=True
     )
     watcher.start()
-    completed = Harness(store=store, root=root).execute(
+    completed = Harness(
+        store=store,
+        root=root,
+        runtime=host_runtime,
+    ).execute(
         ExecutionJob(
             job_id=JobId(uuid4()),
             target=TrustedCommandTarget(
@@ -1484,6 +1472,7 @@ def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
 @requires_macos
 def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
     tmp_path: Path,
+    host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
     """The same ordering in the input direction, which fails identically.
 
@@ -1506,7 +1495,11 @@ def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
 
     watcher = threading.Thread(target=release_after_the_full_read, daemon=True)
     watcher.start()
-    completed = Harness(store=store, root=root).execute(
+    completed = Harness(
+        store=store,
+        root=root,
+        runtime=host_runtime,
+    ).execute(
         ExecutionJob(
             job_id=JobId(uuid4()),
             target=TrustedCommandTarget(
@@ -1750,6 +1743,107 @@ def test_every_call_gets_a_fresh_child_and_a_distinct_attempt_id(
 
 
 @requires_macos
+def test_bootstrap_launch_failure_closes_every_attempt_resource(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``Popen`` leaves prepared state and no owned resources."""
+    scratch_paths: list[Path] = []
+    original_scratch = dr_exec.execution.engine._scratch_workspace
+
+    @contextmanager
+    def observed_scratch() -> Iterator[Path]:
+        with original_scratch() as scratch:
+            scratch_paths.append(scratch)
+            yield scratch
+
+    def failing_launch(
+        *,
+        executable: str,
+        argv: tuple[str, ...],
+        environment: dict[str, str],
+        scratch_directory: str,
+        descriptor_map: tuple[tuple[int, int], ...],
+        status_write: int,
+    ) -> subprocess.Popen[bytes]:
+        del (
+            executable,
+            argv,
+            environment,
+            scratch_directory,
+            descriptor_map,
+            status_write,
+        )
+        raise OSError(errno.EMFILE, "synthetic launch failure")
+
+    monkeypatch.setattr(
+        dr_exec.execution.engine, "_scratch_workspace", observed_scratch
+    )
+    monkeypatch.setattr(
+        dr_exec.execution.engine, "launch_bootstrap", failing_launch
+    )
+    before = len(os.listdir("/dev/fd"))
+
+    with pytest.raises(ExecutorFailure, match="could not start") as raised:
+        harness.run(python_command("pass"))
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert len(os.listdir("/dev/fd")) == before
+    assert len(scratch_paths) == 1
+    assert not scratch_paths[0].exists()
+    record = harness.store.load(harness.only_record_dir())
+    assert record.state is RecordState.PREPARED
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
+
+
+@requires_macos
+def test_a_started_output_worker_failure_raises_after_lifecycle_cleanup(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead pump cannot turn missing output into a clean completion."""
+
+    def failing_run(_: object) -> None:
+        raise RuntimeError("synthetic output failure")
+
+    monkeypatch.setattr(
+        dr_exec.execution.engine._OutputPump, "run", failing_run
+    )
+    before = len(os.listdir("/dev/fd"))
+
+    with pytest.raises(
+        ExecutorFailure, match="output transport worker"
+    ) as exc:
+        harness.run(
+            python_command("import time; time.sleep(3600)"),
+            budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=500_000_000)),
+            self_budgets=ExecutorSelfBudgets(join_time=WATCHDOG_JOIN_TIME),
+        )
+
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert len(os.listdir("/dev/fd")) == before
+    record = harness.store.load(harness.only_record_dir())
+    assert record.state is RecordState.RUNNING
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
+
+
+@requires_macos
+def test_an_escaped_stdin_oserror_remains_ordinary_transport_behavior(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child closing stdin early is not executor machinery failure."""
+
+    def failing_feed(*_: object) -> None:
+        raise OSError(errno.EPIPE, "synthetic closed stdin")
+
+    monkeypatch.setattr(dr_exec.execution.engine, "_feed", failing_feed)
+
+    completed = harness.run(python_command("pass"), stdin=b"unread input")
+
+    assert completed.result.outcome == ExitedOutcome(exit_code=0)
+
+
+@requires_macos
 def test_a_store_failure_after_the_spawn_still_reaps_the_direct_child(
     harness: Harness,
 ) -> None:
@@ -1798,7 +1892,7 @@ def test_a_thread_that_cannot_start_still_tears_down_the_group(
 
     def failing_start(
         target: Callable[[], None], name: str, /
-    ) -> threading.Thread:
+    ) -> dr_exec.execution.engine._TransportWorker:
         started.append(name)
         if name == "dr-exec-output":
             raise RuntimeError("can't start new thread")
@@ -1844,7 +1938,7 @@ def test_a_partial_transport_start_leaks_no_descriptor(
 
     def failing_start(
         target: Callable[[], None], name: str, /
-    ) -> threading.Thread:
+    ) -> dr_exec.execution.engine._TransportWorker:
         if name == "dr-exec-protocol":
             raise RuntimeError("can't start new thread")
         return original(target, name)
@@ -2019,52 +2113,6 @@ def test_an_unbudgeted_startup_axis_installs_no_deadline(
     )
 
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
-
-
-# --- Teardown when the helper leads no group ------------------------------
-
-
-@requires_macos
-def test_a_setup_failure_before_setsid_signals_no_process_group(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A helper whose `setsid` failed has no group to tear down.
-
-    Before `setsid` succeeds the helper is still in the parent's own
-    process group, so its pid is not a group id. Signalling by that number
-    would target whatever unrelated group happens to hold it, so this path
-    reaps the direct child and signals nothing.
-
-    The failure is injected at the status pipe rather than by making a real
-    `setsid` fail, because the engine's decision is made on the reported
-    stage: that is the input this pins. The child is reaped either way,
-    which the `ECHILD` check is what proves.
-    """
-    signalled: list[tuple[int, int]] = []
-
-    def recording_signal(pid: int, number: int, /) -> bool:
-        signalled.append((pid, number))
-        return False
-
-    monkeypatch.setattr(
-        dr_exec.execution.engine, "signal_process_group", recording_signal
-    )
-    monkeypatch.setattr(
-        dr_exec.execution.engine,
-        "parse_setup_status",
-        lambda line: SetupFailure(
-            stage=SETUP_STAGE_SESSION, errno=errno.EPERM
-        ),
-    )
-
-    completed = harness.run(python_command("pass"))
-
-    assert signalled == []
-    outcome = completed.result.outcome
-    assert isinstance(outcome, SpawnFailedOutcome)
-    assert outcome.error_message == SETUP_STAGE_SESSION
-    with pytest.raises(ChildProcessError):
-        os.waitpid(-1, os.WNOHANG)
 
 
 @requires_macos

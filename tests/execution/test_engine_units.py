@@ -12,8 +12,10 @@ from __future__ import annotations
 import errno
 import json
 import os
+import signal
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -22,11 +24,16 @@ from dr_exec import (
     BudgetExceededOutcome,
     Budgets,
     CancelledOutcome,
+    ExecutorFailure,
+    ExecutorSelfBudgets,
     ExitedOutcome,
     FailureOwner,
+    FiniteDurationLimit,
     FiniteOutput,
     OutputOverflowPolicy,
     PayloadRetentionBudget,
+    ProtocolFailedOutcome,
+    ProtocolFailureCode,
     SignaledOutcome,
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
@@ -38,6 +45,8 @@ from dr_exec.execution.engine import (
     _DrainState,
     _OutputPump,
     _spawn_outcome,
+    _started_thread,
+    _tear_down,
 )
 from dr_exec.execution.retention import PayloadRetention
 from dr_exec.execution.spawn import (
@@ -58,6 +67,8 @@ from dr_exec.execution.spawn import (
 )
 
 if TYPE_CHECKING:
+    import subprocess
+
     from dr_exec.declarations.models import OutputBudget
     from dr_exec.recording.models import ExecutionOutcome
 
@@ -82,6 +93,23 @@ def finite_output_budget(
             ),
         ),
     )
+
+
+@dataclass(slots=True)
+class _ProcessProbe:
+    """The process operations whose teardown ordering is contract evidence."""
+
+    pid: int = 4321
+    signals: list[int] = field(default_factory=list)
+    wait_calls: int = 0
+
+    def send_signal(self, number: int, /) -> None:
+        self.signals.append(number)
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        self.wait_calls += 1
+        return 0
 
 
 # --- Retention -----------------------------------------------------------
@@ -371,6 +399,22 @@ def test_a_setup_failure_with_no_reported_errno_still_classifies() -> None:
             BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME),
             FailureOwner.PAYLOAD,
         ),
+        (
+            ProtocolFailedOutcome(
+                failure_code=ProtocolFailureCode.INCOMPLETE_STREAM,
+                failure_detail="stopped",
+                accepted_output_count=0,
+            ),
+            FailureOwner.PAYLOAD,
+        ),
+        (
+            ProtocolFailedOutcome(
+                failure_code=ProtocolFailureCode.OVERSIZED_FRAME,
+                failure_detail="bounded",
+                accepted_output_count=0,
+            ),
+            FailureOwner.EXECUTOR,
+        ),
         (CancelledOutcome(), FailureOwner.NONE),
     ],
 )
@@ -384,6 +428,96 @@ def test_every_recognized_outcome_gets_one_evidence_based_owner(
     stronger evidence exists, not because the payload was proven at fault.
     """
     assert _attribute(outcome).owner is owner
+
+
+# --- Teardown classification and escalation -----------------------------
+
+
+def test_a_transport_worker_captures_non_exception_base_failures() -> None:
+    """The thread boundary reports every failure after the worker stops."""
+
+    def stop_thread() -> None:
+        raise SystemExit("synthetic worker exit")
+
+    worker = _started_thread(stop_thread, "dr-exec-test")
+    worker.thread.join(timeout=1)
+
+    assert not worker.thread.is_alive()
+    with pytest.raises(ExecutorFailure, match="test transport worker") as exc:
+        worker.raise_if_failed()
+    assert isinstance(exc.value.__cause__, SystemExit)
+
+
+def test_session_stage_teardown_signals_only_the_direct_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reported pre-setsid failure never targets a process group."""
+    process = _ProcessProbe()
+    group_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "dr_exec.execution.engine.signal_process_group",
+        lambda pid, number: group_signals.append((pid, number)),
+    )
+    monkeypatch.setattr(
+        "dr_exec.execution.engine._reaped_within",
+        lambda *_: True,
+    )
+
+    _tear_down(
+        cast("subprocess.Popen[bytes]", process),
+        ExecutorSelfBudgets(
+            termination_time=FiniteDurationLimit(max_ns=1_000_000)
+        ),
+        leads_group=False,
+    )
+
+    assert group_signals == []
+    assert process.signals == [signal.SIGTERM]
+    assert process.wait_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("reaped_after_term", "expected_signals"),
+    [
+        pytest.param(True, [signal.SIGTERM], id="cooperative"),
+        pytest.param(
+            False,
+            [signal.SIGTERM, signal.SIGKILL],
+            id="escalated",
+        ),
+    ],
+)
+def test_teardown_escalation_follows_the_termination_result(
+    monkeypatch: pytest.MonkeyPatch,
+    reaped_after_term: bool,
+    expected_signals: list[int],
+) -> None:
+    """Only a child that survives the graceful window receives SIGKILL."""
+    process = _ProcessProbe()
+    group_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "dr_exec.execution.engine.signal_process_group",
+        lambda pid, number: group_signals.append((pid, number)) or True,
+    )
+    monkeypatch.setattr(
+        "dr_exec.execution.engine._reaped_within",
+        lambda *_: reaped_after_term,
+    )
+    monkeypatch.setattr(
+        "dr_exec.execution.engine._group_survives",
+        lambda *_: False,
+    )
+
+    _tear_down(
+        cast("subprocess.Popen[bytes]", process),
+        ExecutorSelfBudgets(
+            termination_time=FiniteDurationLimit(max_ns=1_000_000)
+        ),
+    )
+
+    assert [number for _, number in group_signals] == expected_signals
+    assert process.signals == expected_signals
+    assert process.wait_calls == 1
 
 
 def test_a_pump_that_cannot_register_still_closes_what_it_owns() -> None:

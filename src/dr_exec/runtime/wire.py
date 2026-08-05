@@ -15,20 +15,20 @@ FRAME_TERMINATOR = b"\n"
 
 
 class ProtocolPrelude(ContractModel):
-    version: Literal[1] = 1
+    version: Literal[1]
     kind: Literal[ProtocolFrameKind.PRELUDE] = ProtocolFrameKind.PRELUDE
     request_id_sha256: Sha256Digest
 
 
 class ProtocolOutput(ContractModel):
-    version: Literal[1] = 1
+    version: Literal[1]
     kind: Literal[ProtocolFrameKind.OUTPUT] = ProtocolFrameKind.OUTPUT
     sequence: NonNegativeInt
     document: IdentityDocumentField
 
 
 class ProtocolComplete(ContractModel):
-    version: Literal[1] = 1
+    version: Literal[1]
     kind: Literal[ProtocolFrameKind.COMPLETE] = ProtocolFrameKind.COMPLETE
     output_count: NonNegativeInt
 

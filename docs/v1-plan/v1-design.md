@@ -104,7 +104,7 @@ dr-exec or domain boundary model
 ### Read
 
 ```text
-bounded bytes acquired by dr-exec
+boundary-limited bytes acquired by dr-exec
   -> dr-serialize bounded strict JSON decode
   -> dr-serialize canonical re-encode and byte-for-byte equality check
   -> dr-exec strict Pydantic JSON-mode validation of the same original bytes
@@ -113,7 +113,10 @@ bounded bytes acquired by dr-exec
 
 ### Validation ownership
 
-- Dr-exec bounds bytes before decode.
+- Dr-exec applies each boundary's acquisition limit before decode. Manifest
+  loading uses a static size preflight followed by a whole-file read; concurrent
+  growth or replacement can exceed that preflight and is outside its memory-bound
+  claim.
 - Shared decoder rejects:
   - invalid UTF-8;
   - duplicate keys;
@@ -188,12 +191,22 @@ frame, identity, and record model under exact pinned dependency releases.
   without launching a child; one observed after spawn enters the same teardown
   step.
 
+### Fake executor
+
+- `FakeExecutor` validates each declaration and returns one consumer-scripted
+  `CompletedExecution` from its queue or responder.
+- It synchronizes call capture and queue selection and passes the call's
+  cancellation token to the responder.
+- The consumer script owns completion job binding, attempt identity, and
+  cancellation outcome. Production allocation, lifecycle, and recording
+  semantics belong to `ProcessExecutor`.
+
 ### Outcomes and exceptions
 
 - The engine constructs outcome data for recognized spawn, child, budget,
   cancellation, and protocol states.
-- Invalid pre-spawn declarations and machinery failures that prevent a
-  trustworthy result raise typed exceptions.
+- Invalid pre-spawn declarations and parent-observed machinery failures that
+  prevent a trustworthy result raise typed exceptions.
 - Exception translation preserves underlying cause.
 - Record prepare failure: prevent spawn; raise.
 - Recording degradation after attempt start: receipt data; does not replace
@@ -212,9 +225,13 @@ frame, identity, and record model under exact pinned dependency releases.
   interpreter builds at different paths compare as distinct runtimes; this
   false-split bias and its remedies are documented in
   [isolated-host runtime identity portability](../future-plans/isolated-host-runtime-identity-portability.md).
-- Prepare fixed `<executable> -I -c <library-wrapper-source>` command; the
-  wrapper embeds the declared consumer `driver_source` as data, opens the
-  protocol handle, decodes the request, resolves `dr_exec_main`, and invokes it.
+- Prepare fixed `<executable> -I -c <library-wrapper-source>` command. The
+  wrapper source is the OS-level `-c` argv element and contains the declared
+  consumer `driver_source` as inert data within the wrapper representation. The
+  payload sees CPython's own `sys.argv` (`["-c"]`), with no domain source
+  argument. The wrapper opens the protocol handle, decodes the request, resolves
+  `dr_exec_main`, and intentionally evaluates the embedded driver; no shell
+  interprets either source string.
 - Do not:
   - spawn per preparation or payload invocation;
   - choose budgets;
@@ -270,9 +287,16 @@ extension. It adds one fixed helper interpreter startup per job.
   `dr_exec_main(request, emit)`. The library-owned wrapper decodes and validates
   the request, evaluates the source, resolves that function, and supplies an
   emitter that validates and writes complete canonical output frames.
-- Missing/non-callable entrypoint, source-load failure, or callback failure is
-  a payload-owned protocol outcome; bootstrap or writer machinery failure is
-  executor-owned.
+- Missing/non-callable entrypoint, source-load failure, or callback failure
+  stops the child without a completion frame. The parent observes an incomplete
+  protocol stream and preserves accepted outputs.
+- When a child-side protected-writer failure leaves the protocol incomplete, v1
+  has no separate child-to-parent signal that distinguishes it from another
+  incomplete stream. Absent higher-precedence evidence, the parent can classify
+  only `INCOMPLETE_STREAM`, with the existing payload attribution; it does not
+  infer the child-internal cause.
+- A parent-observed transport-worker failure is executor machinery failure and
+  raises after lifecycle cleanup instead of becoming a protocol outcome.
 - Honest limitation: payload can discover, close, or write inherited
   descriptors directly.
 - Malformed protected bytes: executor protocol failure; not in-process tamper
@@ -669,13 +693,14 @@ Synchronization rules:
   - no full materialization;
   - no future/thread/process per job.
 - Normal close: stop intake; drain active work.
-- Cancellation boundary: `Executor.run()` accepts one optional `CancelToken`;
-  the pool creates one token per active call, and every supported executor runs
-  the shared cancellation conformance cases.
-- Pre-spawn cancellation: finalize a recorded `CancelledOutcome` without
-  spawning.
-- Post-spawn cancellation: perform group-targeted teardown, reap the direct
-  child, finalize the record, and return `CancelledOutcome`.
+- Cancellation boundary: `Executor.run()` accepts one optional `CancelToken`,
+  and the pool creates one token per active call.
+- `ProcessExecutor` observes pre-spawn cancellation by finalizing a recorded
+  `CancelledOutcome` without spawning. After spawn it performs group-targeted
+  teardown, reaps the direct child, finalizes the record, and returns
+  `CancelledOutcome`.
+- `FakeExecutor` passes the token to its responder but does not manufacture or
+  rewrite a cancellation outcome; the consumer script owns that completion.
 - Abort: stop intake, cancel every active token, wait for executor calls to
   finish required teardown, then close.
 - Closed pool: cannot reopen.

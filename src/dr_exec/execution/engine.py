@@ -509,10 +509,52 @@ def _close_descriptors(descriptors: Iterable[int], /) -> None:
             os.close(descriptor)
 
 
-def _started_thread(target: Callable[[], None], name: str, /) -> Thread:
-    thread = Thread(target=target, name=name, daemon=True)
+@dataclass(slots=True)
+class _WorkerFailure:
+    """The at-most-one exception produced by a transport worker body."""
+
+    error: BaseException | None = None
+
+
+@dataclass(slots=True)
+class _TransportWorker:
+    """One started transport thread plus any failure from its body."""
+
+    name: str
+    thread: Thread
+    failure: _WorkerFailure
+
+    @property
+    def failed(self) -> bool:
+        return self.failure.error is not None
+
+    def raise_if_failed(self) -> None:
+        error = self.failure.error
+        if error is None:
+            return
+        raise ExecutorFailure(
+            f"the {self.name} transport worker failed"
+        ) from error
+
+
+def _started_thread(
+    target: Callable[[], None], name: str, /
+) -> _TransportWorker:
+    failure = _WorkerFailure()
+
+    def observe_failure() -> None:
+        try:
+            target()
+        except BaseException as error:  # noqa: BLE001 - thread boundary
+            failure.error = error
+
+    thread = Thread(target=observe_failure, name=name, daemon=True)
     thread.start()
-    return thread
+    return _TransportWorker(
+        name=name.removeprefix("dr-exec-"),
+        thread=thread,
+        failure=failure,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +617,7 @@ def _await_child(
     deadline_ns: int | None,
     fail_on_overflow: bool,
     cancellation: CancelToken | None,
+    transport_failed: Callable[[], bool],
 ) -> _StopReason | None:
     """Observe the child until it exits or the engine must stop it.
 
@@ -588,6 +631,11 @@ def _await_child(
     """
     while True:
         if process.poll() is not None:
+            return None
+        if transport_failed():
+            # The caller tears down first, then joins and raises the
+            # captured worker exception. Returning here stops a live child
+            # without manufacturing an execution outcome from partial I/O.
             return None
         if fail_on_overflow and state.overflow.is_set():
             return _StopReason(axis=BudgetAxis.PAYLOAD_OUTPUT, cancelled=False)
@@ -742,7 +790,7 @@ class _Transports:
     release_write: int
     protocol_forward_read: int | None
     protocol_forward_write: int | None
-    threads: tuple[Thread, ...] = ()
+    threads: tuple[_TransportWorker, ...] = ()
 
     def take_stdin(self) -> int:
         """Hand the stdin write end to the feed thread that closes it."""
@@ -773,9 +821,13 @@ class _Transports:
         self.protocol_forward_write = None
         return descriptor
 
-    def adopt(self, thread: Thread, /) -> None:
+    def adopt(self, thread: _TransportWorker, /) -> None:
         """Register one started thread as this frame's to join and release."""
         self.threads = (*self.threads, thread)
+
+    def failed(self) -> bool:
+        """Report whether any started worker body has already failed."""
+        return any(worker.failed for worker in self.threads)
 
     def release(self) -> None:
         """Wake every transport thread that can block on a descriptor.
@@ -804,17 +856,19 @@ class _Transports:
         """
         join_ns = _finite_ns(self_budgets.join_time)
         deadline = None if join_ns is None else time.monotonic_ns() + join_ns
-        for thread in self.threads:
+        for worker in self.threads:
             remaining = (
                 None
                 if deadline is None
                 else max(0.0, (deadline - time.monotonic_ns()) / 1e9)
             )
-            thread.join(remaining)
-        if any(thread.is_alive() for thread in self.threads):
+            worker.thread.join(remaining)
+        if any(worker.thread.is_alive() for worker in self.threads):
             raise ExecutorFailure(
                 "payload transports did not reach EOF within the join budget"
             )
+        for worker in self.threads:
+            worker.raise_if_failed()
 
     def close(self) -> None:
         """Release every transport thread, wait for them, then free the ends.
@@ -831,8 +885,8 @@ class _Transports:
         holding one the kernel may have already handed to something else.
         """
         self.release()
-        for thread in self.threads:
-            thread.join()
+        for worker in self.threads:
+            worker.thread.join()
         _close_descriptors(
             descriptor
             for descriptor in (
@@ -1370,6 +1424,7 @@ class _EngineCall:
             deadline_ns=self._deadline_ns(job, started_ns),
             fail_on_overflow=_fails_on_overflow(job),
             cancellation=cancellation,
+            transport_failed=transports.failed,
         )
 
     def _mark_running(

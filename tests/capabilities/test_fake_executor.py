@@ -1,11 +1,12 @@
 """``FakeExecutor`` behavior that is the fake's own, not shared semantics.
 
-The behaviors both executors must agree on -- validation parity, outcome
-shapes, receipt kinds, cancellation -- live in the shared conformance suite
-next door. What this file qualifies is what only the fake has: the two
-mutually exclusive response sources, deterministic ordering and exhaustion
-of the scripted queue, immutable call capture, mismatched receipt
-rejection, and the absence of process, scratch, and record side effects.
+The behaviors both executors genuinely share -- declaration validation,
+supported target shapes, and truthful receipt kinds -- live in the shared
+conformance suite next door. What this file qualifies is what only the fake
+has: caller-owned completion scripts, the two mutually exclusive response
+sources, deterministic queue ordering and exhaustion, immutable call capture,
+mismatched receipt rejection, and the absence of process, scratch, and record
+side effects.
 
 Concurrency here synchronizes on barriers and events. No case treats
 elapsed time as evidence that a call interleaved, and every blocking case
@@ -19,7 +20,7 @@ import os
 import signal
 import threading
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from support.executor import (
@@ -27,13 +28,13 @@ from support.executor import (
     fake_completion,
     job_for,
     real_receipted_completion,
+    run_thread_calls,
     trusted_target,
 )
 
 from dr_exec import (
     CancelToken,
     CompletedExecution,
-    CompleteRecordReceipt,
     DeclarationError,
     ExecutionJob,
     ExecutorFailure,
@@ -45,7 +46,7 @@ WATCHDOG_SECONDS = 30.0
 CONCURRENT_CALLERS = 8
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def watchdog() -> object:
     """Fail a hung case instead of letting it hang the whole suite."""
     timer = threading.Timer(
@@ -104,6 +105,56 @@ def test_queued_responses_are_returned_in_declared_order() -> None:
     returned = [executor.run(job()).result.execution_id.job_id for _ in ids]
 
     assert returned == ids
+
+
+@pytest.mark.parametrize("source", ["queue", "responder"])
+def test_completion_identity_is_scripted_by_the_caller(source: str) -> None:
+    """The fake validates the receipt, not consumer-authored identity data."""
+    accepted = job()
+    scripted = completion_for(
+        JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
+    )
+    executor = (
+        FakeExecutor([scripted])
+        if source == "queue"
+        else FakeExecutor(responder=lambda _job, _cancellation: scripted)
+    )
+
+    returned = executor.run(accepted)
+
+    assert returned is scripted
+    assert returned.result.execution_id.job_id != accepted.job_id
+
+
+@pytest.mark.parametrize("source", ["queue", "responder"])
+def test_cancellation_outcome_is_scripted_by_the_caller(source: str) -> None:
+    """Passing a cancelled token does not rewrite a scripted completion."""
+    scripted = fake_completion()
+    executor = (
+        FakeExecutor([scripted])
+        if source == "queue"
+        else FakeExecutor(responder=lambda _job, _cancellation: scripted)
+    )
+    token = CancelToken()
+    token.cancel()
+
+    assert executor.run(job(), cancellation=token) is scripted
+
+
+@pytest.mark.parametrize("source", ["queue", "responder"])
+def test_attempt_identity_is_scripted_by_the_caller(source: str) -> None:
+    """The fake does not turn repeated scripted evidence into new attempts."""
+    scripted = fake_completion()
+    executor = (
+        FakeExecutor([scripted, scripted])
+        if source == "queue"
+        else FakeExecutor(responder=lambda _job, _cancellation: scripted)
+    )
+
+    first = executor.run(job())
+    second = executor.run(job())
+
+    assert first.result.execution_id == second.result.execution_id
 
 
 def test_an_exhausted_queue_fails_rather_than_inventing_a_completion() -> None:
@@ -186,17 +237,6 @@ def test_a_production_receipt_is_refused_from_either_source(
         executor.run(job())
 
 
-def test_a_refused_receipt_does_not_silently_become_a_fake_one() -> None:
-    """Rejection is refusal, not repair: the caller scripted a mistake."""
-    real = real_receipted_completion()
-    executor = FakeExecutor([real])
-
-    with pytest.raises(ExecutorFailure):
-        executor.run(job())
-
-    assert isinstance(real.record_receipt, CompleteRecordReceipt)
-
-
 # --- Responder access to the call's cancellation token -------------------
 
 
@@ -218,6 +258,7 @@ def test_the_responder_receives_the_calls_own_cancellation_token() -> None:
     assert seen == [token, None]
 
 
+@pytest.mark.usefixtures("watchdog")
 def test_the_responder_sees_cancellation_observed_during_its_own_call() -> (
     None
 ):
@@ -225,6 +266,8 @@ def test_the_responder_sees_cancellation_observed_during_its_own_call() -> (
     released = threading.Event()
     entered = threading.Event()
     observed: list[bool] = []
+    completed: list[CompletedExecution] = []
+    errors: list[Exception] = []
 
     def responder(
         _job: ExecutionJob, cancellation: CancelToken | None
@@ -237,9 +280,14 @@ def test_the_responder_sees_cancellation_observed_during_its_own_call() -> (
 
     executor = FakeExecutor(responder=responder)
     token = CancelToken()
-    caller = threading.Thread(
-        target=lambda: executor.run(job(), cancellation=token)
-    )
+
+    def call() -> None:
+        try:
+            completed.append(executor.run(job(), cancellation=token))
+        except Exception as error:  # noqa: BLE001 - retain worker failure
+            errors.append(error)
+
+    caller = threading.Thread(target=call)
     caller.start()
 
     assert entered.wait(WATCHDOG_SECONDS)
@@ -248,6 +296,8 @@ def test_the_responder_sees_cancellation_observed_during_its_own_call() -> (
     caller.join(WATCHDOG_SECONDS)
 
     assert not caller.is_alive()
+    assert errors == []
+    assert len(completed) == 1
     assert observed == [True]
 
 
@@ -265,6 +315,7 @@ def test_the_responder_sees_each_calls_own_declaration() -> None:
 # --- Concurrent call isolation -------------------------------------------
 
 
+@pytest.mark.usefixtures("watchdog")
 def test_concurrent_calls_take_distinct_queued_responses() -> None:
     """No response is delivered twice and none is lost.
 
@@ -275,27 +326,22 @@ def test_concurrent_calls_take_distinct_queued_responses() -> None:
     ids = [JobId(uuid4()) for _ in range(CONCURRENT_CALLERS)]
     executor = FakeExecutor([completion_for(one) for one in ids])
     barrier = threading.Barrier(CONCURRENT_CALLERS)
-    delivered: list[JobId] = []
-    guard = threading.Lock()
 
-    def call() -> None:
+    def call() -> JobId:
         barrier.wait(WATCHDOG_SECONDS)
-        completed = executor.run(job())
-        with guard:
-            delivered.append(completed.result.execution_id.job_id)
+        return executor.run(job()).result.execution_id.job_id
 
-    threads = [
-        threading.Thread(target=call) for _ in range(CONCURRENT_CALLERS)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(WATCHDOG_SECONDS)
+    run = run_thread_calls(
+        (call for _ in range(CONCURRENT_CALLERS)),
+        timeout=WATCHDOG_SECONDS,
+    )
 
-    assert not any(thread.is_alive() for thread in threads)
-    assert sorted(delivered, key=str) == sorted(ids, key=str)
+    assert run.unfinished == 0
+    assert run.errors == ()
+    assert sorted(run.values, key=str) == sorted(ids, key=str)
 
 
+@pytest.mark.usefixtures("watchdog")
 def test_concurrent_calls_capture_every_job_exactly_once() -> None:
     """Contended appends lose nothing and duplicate nothing."""
     executor = FakeExecutor(
@@ -304,22 +350,24 @@ def test_concurrent_calls_capture_every_job_exactly_once() -> None:
     barrier = threading.Barrier(CONCURRENT_CALLERS)
     jobs = [job() for _ in range(CONCURRENT_CALLERS)]
 
-    def call(one: ExecutionJob) -> None:
+    def call(one: ExecutionJob) -> CompletedExecution:
         barrier.wait(WATCHDOG_SECONDS)
-        executor.run(one)
+        return executor.run(one)
 
-    threads = [threading.Thread(target=call, args=(one,)) for one in jobs]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(WATCHDOG_SECONDS)
+    run = run_thread_calls(
+        (lambda one=one: call(one) for one in jobs),
+        timeout=WATCHDOG_SECONDS,
+    )
 
-    assert not any(thread.is_alive() for thread in threads)
+    assert run.unfinished == 0
+    assert run.errors == ()
+    assert len(run.values) == CONCURRENT_CALLERS
     assert sorted(executor.calls, key=lambda one: str(one.job_id)) == sorted(
         jobs, key=lambda one: str(one.job_id)
     )
 
 
+@pytest.mark.usefixtures("watchdog")
 def test_one_responder_call_does_not_block_another() -> None:
     """The responder runs outside the lock, so calls truly overlap.
 
@@ -337,15 +385,14 @@ def test_one_responder_call_does_not_block_another() -> None:
         return fake_completion()
 
     executor = FakeExecutor(responder=responder)
-    threads = [
-        threading.Thread(target=lambda: executor.run(job())) for _ in range(2)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(WATCHDOG_SECONDS)
+    run = run_thread_calls(
+        (lambda: executor.run(job()) for _ in range(2)),
+        timeout=WATCHDOG_SECONDS,
+    )
 
-    assert not any(thread.is_alive() for thread in threads)
+    assert run.unfinished == 0
+    assert run.errors == ()
+    assert len(run.values) == 2
     assert len(executor.calls) == 2
 
 

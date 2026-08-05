@@ -31,6 +31,12 @@ line-length = 79
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
+markers = [
+    "integration: crosses a filesystem, runtime, or process boundary",
+    "subprocess: starts, probes, or supervises a real child process",
+    "platform_macos: qualifies behavior supported only on macOS",
+    "serial_fork: calls os.fork directly and must run outside xdist workers",
+]
 
 [tool.ty.src]
 include = ["scripts", "src", "tests"]

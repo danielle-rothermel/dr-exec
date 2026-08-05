@@ -4,14 +4,13 @@
 fake, which is the right substrate for questions about ordering and
 admission. It cannot answer one question: whether the scheduler and the
 production engine actually compose -- whether real children spawn, real
-records land, and the concurrency bound holds when the work is genuine
-processes rather than a responder returning a value.
+records land, and genuine child processes can overlap under scheduling.
 
 So this file is deliberately small and deliberately real. It runs actual
 macOS processes through `ProcessExecutor.run_many` and
 `ProcessExecutor.open_pool`, over a real `DirectoryRunStore`, and checks
 the properties that only real execution can establish: one durable record
-per job, real outcomes, and no bound violation under real contention.
+per job, real outcomes, and controlled overlap of genuine children.
 
 Everything here is darwin-marked. The containment and process-group
 semantics the engine rests on are macOS's, and the engine refuses any
@@ -28,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import socket
 import sys
 import threading
 from collections.abc import AsyncIterator, Iterator
@@ -37,6 +37,7 @@ import pytest
 from support.executor import job_for, python_target, trusted_target
 
 from dr_exec import (
+    CompletedExecution,
     CompleteRecordReceipt,
     DirectoryRunStore,
     ExecutionJob,
@@ -55,6 +56,11 @@ requires_macos = pytest.mark.skipif(
     sys.platform != "darwin",
     reason="real macOS process semantics",
 )
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.subprocess,
+    pytest.mark.platform_macos,
+]
 
 
 @pytest.fixture(autouse=True)
@@ -74,11 +80,13 @@ def watchdog() -> Iterator[object]:
 
 
 @pytest.fixture
-def executor(tmp_path: Path) -> ProcessExecutor:
+def executor(
+    tmp_path: Path, host_runtime: IsolatedHostPythonRuntime
+) -> ProcessExecutor:
     records = tmp_path / "records"
     records.mkdir()
     return ProcessExecutor(
-        runtime=IsolatedHostPythonRuntime(executable=Path(sys.executable)),
+        runtime=host_runtime,
         run_store=DirectoryRunStore(root=records),
     )
 
@@ -109,7 +117,7 @@ def test_a_real_batch_completes_every_job_and_records_each_one(
     record directories is what distinguishes real execution from a
     scheduler that merely produced values.
     """
-    batch = [clean_exit_job() for _ in range(6)]
+    batch = [clean_exit_job() for _ in range(4)]
 
     completed = list(
         executor.run_many(
@@ -220,7 +228,7 @@ def test_a_real_python_target_runs_through_the_pool(
     what shows the scheduler does not disturb the engine's descriptor and
     protocol handling.
     """
-    batch = [job_for(python_target(f"pooled-{index}")) for index in range(3)]
+    batch = [job_for(python_target("pooled"))]
 
     completed = list(
         executor.run_many(
@@ -238,49 +246,77 @@ def test_a_real_python_target_runs_through_the_pool(
 
 
 @requires_macos
-def test_one_real_pool_bounds_how_many_children_run_at_once(
-    executor: ProcessExecutor, tmp_path: Path
+def test_a_real_pool_holds_multiple_children_in_flight_together(
+    executor: ProcessExecutor,
 ) -> None:
-    """The bound holds against real processes, not just a fake's counter.
+    """The real engine reaches configured overlap under parent-held gates.
 
-    Each child creates a file named for its own pid, counts the files
-    present, then removes its own. The count a child reports is therefore
-    the number of children that were genuinely alive alongside it at that
-    instant, observed from inside the concurrency rather than sampled by
-    the parent -- the parent never polls and never times anything.
-
-    A two-slot pool over six real children must never let any child see
-    three.
+    The deterministic fake-backed scheduler cases own the capacity bound.
+    This integration case owns the remaining composition claim: two real
+    children both announce that they are alive before either is released.
+    A serial implementation cannot reach the second announcement.
     """
-    shared = tmp_path / "children"
-    shared.mkdir()
     slots = 2
-    batch = [_peak_reporting_job(shared) for _ in range(6)]
+    completed: list[CompletedExecution] = []
+    failure: BaseException | None = None
 
-    completed = list(
-        executor.run_many(
-            batch,
-            config=ExecutionPoolConfig(
-                capacity=FixedPoolCapacity(max_active_jobs=slots)
-            ),
-        )
-    )
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    host, port = server.getsockname()
+    batch = [_parent_gated_job(host, port) for _ in range(3)]
+    server.listen(len(batch))
 
+    def run_batch() -> None:
+        nonlocal failure
+        try:
+            completed.extend(
+                executor.run_many(
+                    batch,
+                    config=ExecutionPoolConfig(
+                        capacity=FixedPoolCapacity(max_active_jobs=slots)
+                    ),
+                )
+            )
+        except BaseException as raised:  # noqa: BLE001
+            failure = raised
+
+    driver = threading.Thread(target=run_batch)
+    driver.start()
+    connections: list[socket.socket] = []
+    try:
+        for _ in range(slots):
+            connection, _ = server.accept()
+            assert connection.recv(1) == b"A"
+            connections.append(connection)
+
+        for connection in connections:
+            connection.sendall(b"R")
+            connection.close()
+        connections.clear()
+
+        tail, _ = server.accept()
+        assert tail.recv(1) == b"A"
+        tail.sendall(b"R")
+        tail.close()
+    finally:
+        for connection in connections:
+            connection.close()
+        server.close()
+
+    driver.join(WATCHDOG_SECONDS)
+    assert not driver.is_alive(), "watchdog fired joining the real batch"
+    assert failure is None
     assert len(completed) == len(batch)
-    observed = [
-        int(one.result.payload_outputs.stdout.head) for one in completed
-    ]
-    assert observed and max(observed) <= slots
 
 
-def _peak_reporting_job(shared: Path, /) -> ExecutionJob:
-    """A child that reports how many siblings were running beside it."""
+def _parent_gated_job(host: str, port: int, /) -> ExecutionJob:
+    """A child that announces entry and waits for its parent's release."""
     source = (
-        "import os, pathlib\n"
-        f"shared = pathlib.Path({str(shared)!r})\n"
-        "mine = shared / str(os.getpid())\n"
-        "mine.write_bytes(b'')\n"
-        "print(len(list(shared.iterdir())), end='')\n"
-        "mine.unlink()\n"
+        "import socket\n"
+        "gate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        f"gate.connect(({host!r}, {port}))\n"
+        "gate.sendall(b'A')\n"
+        "assert gate.recv(1) == b'R'\n"
+        "gate.close()\n"
     )
     return job_for(trusted_target((sys.executable, "-I", "-c", source)))

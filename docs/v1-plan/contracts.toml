@@ -105,8 +105,11 @@ date = "2026-08-04"
 enforcement_modes = ["constructed_invariant", "runtime_guarantee", "scope_exclusion"]
 enforcement = """
 `IsolatedHostPythonRuntime` accepts only a resolved executable regular file, \
-uses the fixed isolated invocation, probes and records runtime facts, and the \
-v1 runtime vocabulary contains no hermetic or manifest-bearing variant.
+uses the fixed isolated invocation, and probes and records runtime facts. The \
+wrapper source is the OS-level `-c` argument and contains consumer driver text \
+as inert data in its representation; domain code sees CPython's own `sys.argv` \
+without a source argument, and no shell interprets the text. The v1 runtime \
+vocabulary contains no hermetic or manifest-bearing variant.
 """
 
 [[contracts]]
@@ -137,10 +140,10 @@ participate in records and identity, and the engine installs no hidden, \
 adaptive, machine-derived, or capacity-derived finite limit. A supported axis \
 is one a declaration may legally spell; each axis is enforced by the single \
 component that owns its boundary. `DirectoryRunStore` carries no self-budgets, \
-so a declared `manifest_bytes` value reaches no enforcement point in v1; the \
-manifest read is instead bounded before decode by a stated, test-pinned \
-structural ceiling, which is a property of reading a manifest into memory \
-rather than a caller-declared limit.
+so a declared `manifest_bytes` value reaches no enforcement point in v1. A \
+stated, test-pinned structural ceiling rejects a statically oversized manifest \
+before reading it. The separate size preflight and read do not bound bytes under \
+concurrent growth or replacement and are not a race-safe memory bound.
 """
 
 [[contracts]]
@@ -206,7 +209,9 @@ statement = """
 Every trustworthy recognized attempt outcome, including spawn absence, budget \
 exhaustion, cancellation, signal, protocol failure, and ordinary exit status, \
 returns one `CompletedExecution` with one `ExecutionResult`. Invalid pre-spawn \
-declarations and machinery failures that prevent a trustworthy result raise. \
+declarations and parent-observed machinery failures that prevent a trustworthy \
+result raise. A child-side protected-writer failure has no separate signal in \
+v1, so the parent cannot distinguish it from another incomplete protocol stream. \
 Ordinary exit status remains raw data for caller interpretation. Attribution is \
 one evidence-based diagnostic classification, not exhaustive causal proof or a \
 retry guarantee.
@@ -220,9 +225,11 @@ date = "2026-08-04"
 enforcement_modes = ["validation_rejection", "modeled_outcome", "runtime_guarantee"]
 enforcement = """
 The engine validates before spawn, models recognized spawn and child outcomes, \
-preserves accepted protocol outputs on later failure, translates machinery \
-exceptions with their cause, and selects post-teardown outcome and owner from \
-recorded evidence using pinned precedence.
+preserves accepted protocol outputs on later failure, translates \
+parent-observed machinery exceptions with their cause, and selects \
+post-teardown outcome and owner from recorded evidence using pinned precedence. \
+Absent higher-precedence evidence, EOF before protocol completion is classified \
+as `INCOMPLETE_STREAM`; its cause is not inferred from child internals.
 """
 
 [[contracts]]
@@ -406,43 +413,50 @@ variants closed and fully validated.
 date = "2026-08-04"
 enforcement_modes = ["constructed_invariant", "governance"]
 enforcement = """
-The public protocols module exports only the three named Protocols, every \
-supported implementation runs role-specific shared behavioral conformance, and \
-review rejects new scheduling or serialized-data Protocols without a standing \
-contract revision.
+The public protocols module exports only the three named Protocols. Shared \
+executor conformance covers the one-method boundary, declaration validation, \
+supported target acceptance, and each implementation's truthful receipt kind; \
+role-specific qualification covers concurrent call isolation and the semantics \
+each implementation owns. Review rejects new scheduling or serialized-data \
+Protocols without a standing contract revision.
 """
 
 [[contracts]]
 key = "thread_safe_executor_calls"
-title = "Executor calls are thread-safe and attempt-local"
+title = "Executor calls are thread-safe and call-isolated"
 statement = """
 `Executor.run` is safe to call concurrently from threads in one parent process. \
-Each call keeps mutable process, scratch, recording, I/O, and cancellation state \
-local to its physical attempt and shares no ambient per-run configuration. \
+Each call is isolated from other calls' mutable implementation state. Production \
+execution keeps process, scratch, recording, I/O, cancellation, and physical \
+attempt identity call-local; the scripted fake synchronizes call capture and \
+queue selection without manufacturing those production resources or identities. \
 `ExecutionPool` has one owning async lifecycle and does not imply cross-thread \
 pool control.
 """
 rationale = """
 Consumers perform parallel evaluation while holding surrounding workflow state; \
-call-local execution prevents one attempt from corrupting another without \
+call-local execution prevents one call from corrupting another without \
 turning scheduler ownership into process-global mutable state.
 """
 date = "2026-08-04"
 enforcement_modes = ["runtime_guarantee", "governance"]
 enforcement = """
-Production and fake executors allocate or synchronize all mutable call state, \
-use distinct attempt, scratch, and record identities, pass concurrent isolation \
-conformance, and the pool rejects lifecycle operations outside its owning async \
-context.
+`ProcessExecutor` allocates distinct attempt, scratch, and record identities and \
+keeps mutable transport and cancellation state per call. `FakeExecutor` \
+synchronizes captured calls and queued response selection and invokes responders \
+outside that lock. Both pass concurrent call-isolation conformance, and the pool \
+rejects lifecycle operations outside its owning async context.
 """
 
 [[contracts]]
 key = "domain_free_execution_jobs"
 title = "Execution jobs remain domain-free sharing units"
 statement = """
-One caller-defined `ExecutionJob` is the independent scheduling, setup-sharing, \
-budget, scratch, and child-lifetime unit and produces one `CompletedExecution`. \
-The request and driver own domain dimensions, internal items, and completeness; \
+One caller-defined `ExecutionJob` is the independent production scheduling, \
+setup-sharing, budget, scratch, and child-lifetime unit; each trustworthy \
+recognized `ProcessExecutor` outcome produces one `CompletedExecution`. The fake \
+accepts the same job shape but returns only consumer-scripted completions. The \
+request and driver own domain dimensions, internal items, and completeness; \
 dr-exec preserves each complete validated protocol output but never models a \
 cross-product or synthesizes missing domain results.
 """
@@ -454,10 +468,11 @@ boundary without embedding domain policy in execution infrastructure.
 date = "2026-08-04"
 enforcement_modes = ["constructed_invariant", "modeled_outcome", "scope_exclusion"]
 enforcement = """
-`Executor.run` maps one immutable `ExecutionJob` to one fresh child and one \
-completion, the protocol preserves complete outputs and request identity, domain \
-adapters validate their own result sets, and the v1 API contains no dimension, \
-per-test, or cross-product scheduling model.
+`ProcessExecutor.run` maps one immutable `ExecutionJob` to one fresh child and \
+one completion. `FakeExecutor.run` maps one validated job to one \
+consumer-scripted completion. The protocol preserves complete outputs and \
+request identity, domain adapters validate their own result sets, and the v1 API \
+contains no dimension, per-test, or cross-product scheduling model.
 """
 
 [[contracts]]
@@ -504,17 +519,20 @@ The responder receives the call's cancellation token. The fake executes no \
 payload, creates no scratch space, and uses an explicit fake record receipt.
 """
 rationale = """
-One strict library fake keeps consumer tests aligned with declarations and \
-cancellation without pretending that fake calls prove spawn behavior or durable \
-execution.
+One strict library fake keeps consumer tests aligned with declarations and lets \
+consumers script cancellation-dependent behavior without pretending that fake \
+calls prove production outcome, identity, spawn, or recording semantics.
 """
 date = "2026-08-04"
 enforcement_modes = ["validation_rejection", "constructed_invariant", "governance"]
 enforcement = """
-Construction rejects simultaneous queued responses and a responder, calls and \
-response selection are synchronized, shared executor conformance covers \
-validation, concurrency, and cancellation, and dr-exec retains real-engine \
-ownership for lifecycle while consumers retain real-execution oracle tests.
+Construction rejects simultaneous queued responses and a responder; calls and \
+queued response selection are synchronized; and the responder receives the \
+call's cancellation token. Shared executor conformance covers declaration \
+validation, supported target acceptance, and truthful receipt kinds; role-specific \
+tests cover concurrent call isolation. The consumer script owns completion job \
+binding, attempt identity, and cancellation outcome; `ProcessExecutor` owns their \
+production semantics.
 """
 
 [[contracts]]

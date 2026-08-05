@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from uuid import UUID
+
 import pytest
 
 from dr_exec.recording import provenance
@@ -40,7 +43,9 @@ def test_an_embedded_commit_yields_clean_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _embed(monkeypatch, "a" * 40)
+    monkeypatch.setattr(provenance, "version", lambda _name: "9.8.7")
     snapshot = _snapshot_source()
+    assert snapshot.package_version == "9.8.7"
     assert snapshot.source_state == "clean"
     assert snapshot.source_commit == "a" * 40
     assert snapshot.session_id is None
@@ -61,6 +66,37 @@ def test_an_absent_commit_yields_unknown_provenance(
     assert snapshot.source_state == "unknown"
     assert snapshot.source_commit is None
     assert snapshot.session_id is not None
+
+
+def test_an_absent_distribution_yields_complete_unknown_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_session_id = UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72")
+
+    def absent(_name: str) -> object:
+        raise PackageNotFoundError
+
+    monkeypatch.setattr(provenance, "version", absent)
+    monkeypatch.setattr(provenance, "metadata", absent)
+    monkeypatch.setattr(provenance, "uuid4", lambda: fixed_session_id)
+
+    assert _snapshot_source() == ExecutorSourceSnapshot(
+        package_version="unknown",
+        source_commit=None,
+        source_state="unknown",
+        session_id=str(fixed_session_id),
+    )
+
+
+def test_absent_distribution_metadata_is_not_an_absent_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def absent(_name: str) -> object:
+        raise PackageNotFoundError
+
+    monkeypatch.setattr(provenance, "metadata", absent)
+
+    assert _embedded_source_commit() is None
 
 
 @pytest.mark.parametrize(

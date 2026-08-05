@@ -18,3 +18,13 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ty check
       - run: uv run pytest -q
+
+  macos-qualification:
+    runs-on: depot-macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.1
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - run: uv run pytest -q -m platform_macos

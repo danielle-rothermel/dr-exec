@@ -9,8 +9,11 @@ build the *same* jobs so a parity claim compares like with like.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock, Thread
 from uuid import uuid4
 
 from dr_serialize import build_identity_document
@@ -49,6 +52,48 @@ def dr_exec_main(request, emit):
         "payload": {"echo": request["payload"]["echo"]},
     })
 """
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadCallResults[T]:
+    """Terminal values, failures, and unfinished calls from one thread batch."""
+
+    values: tuple[T, ...]
+    errors: tuple[Exception, ...]
+    unfinished: int
+
+
+def run_thread_calls[T](
+    calls: Iterable[Callable[[], T]],
+    /,
+    *,
+    timeout: float,
+) -> ThreadCallResults[T]:
+    """Run calls together and retain every terminal worker outcome."""
+    values: list[T] = []
+    errors: list[Exception] = []
+    guard = Lock()
+
+    def capture(call: Callable[[], T]) -> None:
+        try:
+            value = call()
+        except Exception as error:  # noqa: BLE001 - propagate worker failures
+            with guard:
+                errors.append(error)
+        else:
+            with guard:
+                values.append(value)
+
+    threads = [Thread(target=capture, args=(call,)) for call in calls]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout)
+    return ThreadCallResults(
+        values=tuple(values),
+        errors=tuple(errors),
+        unfinished=sum(thread.is_alive() for thread in threads),
+    )
 
 
 # --- Targets and jobs ----------------------------------------------------

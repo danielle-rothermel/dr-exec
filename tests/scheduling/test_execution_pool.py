@@ -10,10 +10,10 @@ substrate instead, so each call's start and finish are events the test
 sets rather than moments it hopes for. Real-engine coverage lives in
 `test_pool_real_engine.py`, where it belongs.
 
-Behaviors both surfaces share are qualified through both. That is the
-point of one scheduler core: `run_many` and `run_stream` are not two
-implementations to compare but one implementation reached two ways, so a
-parity failure here means the core stopped being shared.
+Shared admission, resident accounting, publication, cancellation, and break
+behavior are qualified once against the scheduler core. Surface cases remain
+only where the drivers differ: async source pulling and concurrent feeders for
+`run_stream`, and iterable laziness and generator cleanup for finite batches.
 
 Synchronization is on explicit gates and terminal state throughout. There
 is no sleep in this file, no elapsed-time assertion, and no case whose
@@ -56,7 +56,6 @@ from dr_exec.scheduling.scheduler import (
     _AdmissionResult,
     _Admitted,
     _ExecutionScheduler,
-    usable_cpu_count,
 )
 
 if TYPE_CHECKING:
@@ -77,9 +76,11 @@ def jobs(count: int, /) -> list[ExecutionJob]:
     return [job_for(trusted_target(("/usr/bin/true",))) for _ in range(count)]
 
 
-def gated_executor() -> tuple[FakeExecutor, GatedResponder]:
+def gated_executor(
+    *, cancellation_aware: bool = False
+) -> tuple[FakeExecutor, GatedResponder]:
     """A fake whose every call is held until the test releases it."""
-    responder = GatedResponder()
+    responder = GatedResponder(cancellation_aware=cancellation_aware)
     return FakeExecutor(responder=responder), responder
 
 
@@ -176,13 +177,26 @@ def join(thread: threading.Thread, /) -> None:
 # --- Capacity ------------------------------------------------------------
 
 
-def test_automatic_capacity_resolves_once_from_the_usable_cpu_count() -> None:
+def test_automatic_capacity_resolves_once_from_the_usable_cpu_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Automatic capacity is the usable CPU count, recorded as automatic.
 
     Reading it back twice must give the same answer: a bound that drifted
     with machine load would make the pool's own resident guarantee
     unstatable.
     """
+    resolved = iter((3, 7))
+    calls = 0
+
+    def resolve_usable_cpus() -> int:
+        nonlocal calls
+        calls += 1
+        return next(resolved)
+
+    monkeypatch.setattr(
+        "dr_exec.scheduling.pool.usable_cpu_count", resolve_usable_cpus
+    )
     pool = ExecutionPool(
         executor=immediate_executor(),
         config=ExecutionPoolConfig(capacity=AutoPoolCapacity()),
@@ -194,10 +208,11 @@ def test_automatic_capacity_resolves_once_from_the_usable_cpu_count() -> None:
 
     first, second = asyncio.run(open_and_read())
 
+    assert calls == 1
     assert first == second
     assert first.source is CapacitySource.AUTO  # ty: ignore[unresolved-attribute]
-    assert first.max_active_jobs == usable_cpu_count()  # ty: ignore[unresolved-attribute]
-    assert usable_cpu_count() >= 1
+    assert first.cpu_count == 3  # ty: ignore[unresolved-attribute]
+    assert first.max_active_jobs == 3  # ty: ignore[unresolved-attribute]
 
 
 def test_state_reports_each_lifecycle_stage_through_the_public_surface() -> (
@@ -221,8 +236,11 @@ def test_state_reports_each_lifecycle_stage_through_the_public_surface() -> (
     assert pool.state is ExecutionPoolState.CLOSED
 
 
-def test_fixed_capacity_uses_the_selected_slot_count() -> None:
+def test_fixed_capacity_uses_the_selected_slot_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A fixed pool records its own count and still names the machine."""
+    monkeypatch.setattr("dr_exec.scheduling.pool.usable_cpu_count", lambda: 5)
     pool = fixed_pool(immediate_executor(), 3)
 
     async def open_and_read() -> object:
@@ -233,7 +251,7 @@ def test_fixed_capacity_uses_the_selected_slot_count() -> None:
 
     assert capacity.source is CapacitySource.FIXED  # ty: ignore[unresolved-attribute]
     assert capacity.max_active_jobs == 3  # ty: ignore[unresolved-attribute]
-    assert capacity.cpu_count == usable_cpu_count()  # ty: ignore[unresolved-attribute]
+    assert capacity.cpu_count == 5  # ty: ignore[unresolved-attribute]
 
 
 @pytest.mark.parametrize("slots", [0, -1])
@@ -285,7 +303,7 @@ def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
         assert not scheduler.can_admit()
 
         responder.release(first.job_id)
-        responder.await_finish(first.job_id)
+        responder.await_executor_returned(first.job_id)
         assert not scheduler.can_admit()
         assert third.job_id not in responder.started
 
@@ -368,7 +386,9 @@ def test_a_stalled_consumer_stops_the_source_advancing() -> None:
                 collected.append(completion.context)
                 if len(collected) == 2:
                     stalled.set()
-                    await asyncio.to_thread(resume.wait, WATCHDOG_SECONDS)
+                    await asyncio.to_thread(
+                        wait_for, resume, what="the stalled consumer to resume"
+                    )
 
     streamer = in_thread(lambda: asyncio.run(stream()))
 
@@ -389,45 +409,29 @@ def test_a_stalled_consumer_stops_the_source_advancing() -> None:
     assert source.pulled == len(batch)
 
 
-def test_capacity_bounds_how_many_calls_are_ever_in_flight_at_once() -> None:
-    """One job consumes one slot, and slots are the concurrency bound.
+def test_capacity_is_reached_by_genuinely_overlapping_executor_calls() -> None:
+    """Configured concurrency is exercised, not merely left unviolated.
 
-    Every call reports its own arrival and departure, so the peak overlap
-    is counted directly rather than inferred. Two slots over eight jobs
-    must never show three calls inside the executor at the same time.
+    Every call reports its own arrival and departure under one lock. Two
+    slots over four jobs must reach a peak of two calls held inside the
+    executor before either is released; a serial implementation cannot pass.
     """
-    executor = FakeExecutor(responder=_OverlapCounter(limit=2))
-    batch = jobs(8)
+    slots = 2
+    executor, responder = gated_executor()
+    batch = jobs(4)
+    completed: list[CompletedExecution] = []
 
-    completed = list(batch_of(executor, batch, slots=2))
+    driver = in_thread(
+        lambda: completed.extend(batch_of(executor, batch, slots=slots))
+    )
+    responder.await_arrival_count(slots)
+    assert responder.peak_active == slots
+    responder.release_all(batch)
+    join(driver)
 
     assert {one.result.execution_id.job_id for one in completed} == {
         job.job_id for job in batch
     }
-
-
-class _OverlapCounter:
-    """A responder that fails the case if concurrency exceeds the bound."""
-
-    def __init__(self, *, limit: int) -> None:
-        self._limit = limit
-        self._lock = threading.Lock()
-        self._active = 0
-
-    def __call__(
-        self, job: ExecutionJob, _cancellation: CancelToken | None, /
-    ) -> CompletedExecution:
-        with self._lock:
-            self._active += 1
-            if self._active > self._limit:
-                raise AssertionError(
-                    f"{self._active} calls overlapped a {self._limit}-slot pool"
-                )
-        try:
-            return completion_for(job.job_id)
-        finally:
-            with self._lock:
-                self._active -= 1
 
 
 # --- Completion order ----------------------------------------------------
@@ -446,27 +450,45 @@ def test_results_are_delivered_in_completion_order(
 ) -> None:
     """Delivery follows completion, whatever order submission was in.
 
-    Each call is released and observed finished before the next is
-    released, so completion order is imposed by the test rather than
-    raced for, and the delivered contexts must reproduce it exactly.
+    Each call is released and observed in the scheduler's ready queue before
+    the next is released, so publication order is imposed by the test rather
+    than raced for, and the delivered contexts must reproduce it exactly.
     """
     executor, responder = gated_executor()
     batch = jobs(3)
-    pool = fixed_pool(executor, 3)
+    pool = fixed_pool(executor, 4)
     collected: list[int] = []
+
+    parked = threading.Event()
+    may_finish_source = threading.Event()
+
+    async def parking_source() -> AsyncIterator[ExecutionSubmission[int]]:
+        async for submission in submissions_of(batch):
+            yield submission
+        parked.set()
+        await asyncio.to_thread(
+            wait_for,
+            may_finish_source,
+            what="the completion-order source to finish",
+        )
 
     async def stream() -> None:
         async with pool:
-            async for completion in pool.run_stream(submissions_of(batch)):
+            async for completion in pool.run_stream(parking_source()):
                 collected.append(completion.context)
 
     streamer = in_thread(lambda: asyncio.run(stream()))
 
     responder.await_arrival_count(3)
+    wait_for(parked, what="the completion-order source to park")
+    scheduler = pool._scheduler
+    assert scheduler is not None
     for index in finish_order:
         responder.release(batch[index].job_id)
-        responder.await_finish(batch[index].job_id)
+        responder.await_executor_returned(batch[index].job_id)
+        _await_scheduler_publication(scheduler, batch[index].job_id)
 
+    may_finish_source.set()
     join(streamer)
 
     assert collected == list(finish_order)
@@ -524,11 +546,11 @@ def test_abort_cancels_work_in_flight_and_awaits_its_teardown() -> None:
 
     The calls are genuinely mid-flight when abort begins -- the test waits
     for their arrival first -- and each observes a cancelled token. That
-    abort waited for them is what the finished gates show: they are set by
-    the time abort returns, which is the "await their teardown" half of
-    the promise.
+    abort waited for them is what the executor-returned gates show: they are
+    set by the time abort returns, which is the "await their teardown" half
+    of the promise.
     """
-    executor, responder = gated_executor()
+    executor, responder = gated_executor(cancellation_aware=True)
     batch = jobs(2)
     pool = fixed_pool(executor, 2)
 
@@ -545,12 +567,13 @@ def test_abort_cancels_work_in_flight_and_awaits_its_teardown() -> None:
 
     assert set(responder.cancelled) == {job.job_id for job in batch}
     for job in batch:
-        assert responder.finished_gate(job.job_id).is_set()
+        assert responder.executor_returned_gate(job.job_id).is_set()
+    responder.assert_no_watchers()
     assert pool.state is ExecutionPoolState.CLOSED
 
 
-def test_abort_cancels_admitted_work_no_worker_has_started() -> None:
-    """A submission cancelled mid-queue completes cancelled, never vanishes.
+def test_abort_stops_intake_before_the_next_submission_is_admitted() -> None:
+    """Abort cancels the resident call and never admits later source work.
 
     One slot, two jobs: the second is admitted only after the first is
     delivered, so aborting while the first is in flight leaves the second
@@ -558,7 +581,7 @@ def test_abort_cancels_admitted_work_no_worker_has_started() -> None:
     in-flight call reaches its cancelled outcome -- and the unadmitted job
     was never a queue entry to lose.
     """
-    executor, responder = gated_executor()
+    executor, responder = gated_executor(cancellation_aware=True)
     batch = jobs(2)
     first, second = batch
     pool = fixed_pool(executor, 1)
@@ -576,6 +599,69 @@ def test_abort_cancels_admitted_work_no_worker_has_started() -> None:
 
     assert first.job_id in responder.cancelled
     assert second.job_id not in responder.started
+    responder.assert_no_watchers()
+
+
+def test_abort_cancels_a_genuinely_admitted_pending_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abort cancels a queued token before its worker enters the executor."""
+    worker_waiting = threading.Event()
+    may_enter_scheduler = threading.Event()
+
+    class _EntryGatedThread(threading.Thread):
+        def run(self) -> None:
+            worker_waiting.set()
+            wait_for(
+                may_enter_scheduler,
+                what="the admitted worker to enter the scheduler",
+            )
+            super().run()
+
+    monkeypatch.setattr(
+        "dr_exec.scheduling.scheduler.Thread", _EntryGatedThread
+    )
+    executor, responder = gated_executor(cancellation_aware=True)
+    only = jobs(1)[0]
+    pool = fixed_pool(executor, 1)
+    token: CancelToken | None = None
+
+    async def abort_while_admitted() -> None:
+        nonlocal token
+        async with pool:
+            consumer = asyncio.create_task(
+                consume(pool.run_stream(submissions_of([only])))
+            )
+            await asyncio.to_thread(
+                wait_for,
+                worker_waiting,
+                what="the worker to wait before entry",
+            )
+            scheduler = pool._scheduler
+            assert scheduler is not None
+            with scheduler._condition:
+                assert len(scheduler._pending) == 1
+                token = scheduler._pending[0].cancellation
+
+            aborting = asyncio.create_task(pool.abort())
+            await asyncio.to_thread(_await_closed_intake, scheduler)
+            assert token.cancelled
+            assert only.job_id not in responder.started
+            may_enter_scheduler.set()
+            await asyncio.wait_for(aborting, WATCHDOG_SECONDS)
+            consumer.cancel()
+
+    try:
+        asyncio.run(abort_while_admitted())
+    finally:
+        may_enter_scheduler.set()
+
+    assert token is not None and token.cancelled
+    assert responder.started == (only.job_id,)
+    assert responder.cancelled == (only.job_id,)
+    assert responder.executor_returned_gate(only.job_id).is_set()
+    responder.assert_no_watchers()
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_a_cancelled_call_is_delivered_as_completion_data() -> None:
@@ -619,38 +705,6 @@ def test_a_cancelled_call_is_delivered_as_completion_data() -> None:
     assert outcomes[plain_job.job_id] != CancelledOutcome()
 
 
-def test_abort_does_not_promise_delivery_of_what_it_tore_down() -> None:
-    """Closing stops delivery; the durable half is what survives.
-
-    Abort exists to stop work and await teardown, not to flush results,
-    so a completion finished during an abort may never reach a consumer
-    that is no longer reading. What is guaranteed is the part that
-    matters: the call ran to its own end -- with a cancelled outcome and,
-    in production, its record -- before the pool closed. A consumer that
-    needs every result drains instead of aborting, which
-    `test_drain_to_empty_delivers_every_admitted_submission` pins.
-    """
-    executor, responder = gated_executor()
-    batch = jobs(1)
-    only = batch[0]
-    pool = fixed_pool(executor, 1)
-
-    async def abort_mid_flight() -> None:
-        async with pool:
-            reader = asyncio.create_task(
-                consume(pool.run_stream(submissions_of(batch)))
-            )
-            await asyncio.to_thread(responder.await_arrival, only.job_id)
-            await pool.abort()
-            reader.cancel()
-
-    asyncio.run(abort_mid_flight())
-
-    assert only.job_id in responder.cancelled
-    assert responder.finished_gate(only.job_id).is_set()
-    assert pool.state is ExecutionPoolState.CLOSED
-
-
 def test_drain_lets_admitted_work_finish_uncancelled() -> None:
     """Normal close stops intake and drains; it does not cancel.
 
@@ -665,21 +719,56 @@ def test_drain_lets_admitted_work_finish_uncancelled() -> None:
 
     async def drain_while_running() -> None:
         async with pool:
-            consumer = asyncio.create_task(
-                consume(pool.run_stream(submissions_of(batch)))
-            )
+            scheduler = pool._scheduler
+            assert scheduler is not None
+            assert scheduler.admit(only, None) is _AdmissionResult.ADMITTED
             await asyncio.to_thread(responder.await_arrival, only.job_id)
-            releaser = asyncio.create_task(
-                asyncio.to_thread(responder.release, only.job_id)
-            )
-            await pool.drain()
-            await releaser
-            consumer.cancel()
+            draining = asyncio.create_task(pool.drain())
+            await asyncio.to_thread(_await_closed_intake, scheduler)
+            responder.release(only.job_id)
+            await asyncio.wait_for(draining, WATCHDOG_SECONDS)
 
     asyncio.run(drain_while_running())
 
     assert responder.cancelled == ()
-    assert responder.finished_gate(only.job_id).is_set()
+    assert responder.executor_returned_gate(only.job_id).is_set()
+    responder.assert_no_watchers()
+    assert pool.state is ExecutionPoolState.CLOSED
+
+
+def test_exceptional_context_exit_preserves_the_error_and_awaits_abort() -> (
+    None
+):
+    """An exceptional owning-context exit aborts and preserves its exception."""
+
+    class _BodyFailure(Exception):
+        pass
+
+    failure = _BodyFailure("body failed")
+    executor, responder = gated_executor(cancellation_aware=True)
+    only = jobs(1)[0]
+    pool = fixed_pool(executor, 1)
+
+    async def fail_from_the_body() -> None:
+        consumer: asyncio.Task[None] | None = None
+        try:
+            async with pool:
+                consumer = asyncio.create_task(
+                    consume(pool.run_stream(submissions_of([only])))
+                )
+                await asyncio.to_thread(responder.await_arrival, only.job_id)
+                raise failure
+        finally:
+            if consumer is not None:
+                await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
+
+    with pytest.raises(_BodyFailure) as raised:
+        asyncio.run(fail_from_the_body())
+
+    assert raised.value is failure
+    assert responder.cancelled == (only.job_id,)
+    assert responder.executor_returned_gate(only.job_id).is_set()
+    responder.assert_no_watchers()
     assert pool.state is ExecutionPoolState.CLOSED
 
 
@@ -797,33 +886,6 @@ def test_a_failing_executor_call_breaks_the_pool() -> None:
     assert pool.state is ExecutionPoolState.BROKEN
 
 
-def test_a_break_survives_the_close_that_follows_it() -> None:
-    """A closed pool and a broken one are different answers, so it survives.
-
-    Leaving the context manager on the raise aborts the pool, which is a
-    real close: the scheduler shuts down and its workers are joined. What
-    the pool must not do is overwrite the break with an ordinary CLOSED,
-    because then a consumer could no longer tell a pool that delivered
-    everything from one that stopped being able to deliver at all.
-    """
-
-    def explode(
-        _job: ExecutionJob, _token: CancelToken | None, /
-    ) -> CompletedExecution:
-        raise ExecutorFailure("machinery failed")
-
-    pool = fixed_pool(FakeExecutor(responder=explode), 1)
-
-    async def stream() -> None:
-        async with pool:
-            await consume(pool.run_stream(submissions_of(jobs(1))))
-
-    with pytest.raises(ExecutorFailure, match="the execution pool broke"):
-        asyncio.run(stream())
-
-    assert pool.state is ExecutionPoolState.BROKEN
-
-
 @pytest.mark.parametrize("close", ["drain", "abort"])
 def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
     close: str,
@@ -896,6 +958,37 @@ def _await_closed_intake(scheduler: _ExecutionScheduler[object], /) -> None:
             lambda: scheduler._intake_closed, WATCHDOG_SECONDS
         ):
             raise AssertionError("watchdog fired waiting for closed intake")
+
+
+def _await_scheduler_publication(
+    scheduler: _ExecutionScheduler[object], *job_ids: JobId
+) -> None:
+    """Block until the exact jobs are present in the scheduler ready queue."""
+    expected = set(job_ids)
+    with scheduler._condition:
+        if not scheduler._condition.wait_for(
+            lambda: (
+                expected
+                <= {
+                    completion.completed_execution.result.execution_id.job_id
+                    for completion in scheduler._ready
+                }
+            ),
+            WATCHDOG_SECONDS,
+        ):
+            raise AssertionError(
+                "watchdog fired waiting for scheduler publication of "
+                f"{sorted(map(str, expected))}"
+            )
+
+
+def _await_scheduler_break[T](scheduler: _ExecutionScheduler[T], /) -> None:
+    """Block until the scheduler has retained its first machinery failure."""
+    with scheduler._condition:
+        if not scheduler._condition.wait_for(
+            lambda: scheduler._broken is not None, WATCHDOG_SECONDS
+        ):
+            raise AssertionError("watchdog fired waiting for scheduler break")
 
 
 def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
@@ -981,7 +1074,7 @@ class _BreakAfterBuffering:
         self._failing = failing
         self._arrived: dict[JobId, threading.Event] = {}
         self._release: dict[JobId, threading.Event] = {}
-        self._finished: dict[JobId, threading.Event] = {}
+        self._executor_returned: dict[JobId, threading.Event] = {}
         self._lock = threading.Lock()
 
     def __call__(
@@ -994,7 +1087,7 @@ class _BreakAfterBuffering:
                 raise ExecutorFailure("machinery failed")
             return completion_for(job.job_id)
         finally:
-            self.finished(job.job_id).set()
+            self.executor_returned(job.job_id).set()
 
     def arrived(self, job_id: JobId, /) -> threading.Event:
         with self._lock:
@@ -1004,33 +1097,34 @@ class _BreakAfterBuffering:
         with self._lock:
             return self._release.setdefault(job_id, threading.Event())
 
-    def finished(self, job_id: JobId, /) -> threading.Event:
+    def executor_returned(self, job_id: JobId, /) -> threading.Event:
         with self._lock:
-            return self._finished.setdefault(job_id, threading.Event())
+            return self._executor_returned.setdefault(
+                job_id, threading.Event()
+            )
 
     def await_arrivals(self, *job_ids: JobId) -> None:
         for job_id in job_ids:
             wait_for(self.arrived(job_id), what=f"job {job_id} to start")
 
-    def buffer(self, *job_ids: JobId) -> None:
-        """Let the named calls return, and wait until they have.
-
-        Waiting for the *finished* gate is what makes these completions
-        buffered rather than merely released: each call has returned, so
-        any result it will ever produce is already on its way to the ready
-        queue, and the consumer is parked in its source pull, so none of
-        them has been delivered.
-        """
+    def release_successes(self, *job_ids: JobId) -> None:
+        """Let successful executor responders return to their workers."""
         for job_id in job_ids:
             self.gate(job_id).set()
         for job_id in job_ids:
-            wait_for(self.finished(job_id), what=f"job {job_id} to finish")
+            wait_for(
+                self.executor_returned(job_id),
+                what=f"job {job_id} to return from its executor responder",
+            )
 
     def break_the_pool(self) -> None:
         """Release the failing call and wait until it has raised."""
         self.await_arrivals(self._failing)
         self.gate(self._failing).set()
-        wait_for(self.finished(self._failing), what="the failing call to end")
+        wait_for(
+            self.executor_returned(self._failing),
+            what="the failing executor responder to return",
+        )
 
 
 def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
@@ -1081,10 +1175,19 @@ def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
             await asyncio.to_thread(
                 wait_for, parked, what="the source to park past its last job"
             )
+            scheduler = pool._scheduler
+            assert scheduler is not None
             await asyncio.to_thread(
-                responder.buffer, first.job_id, second.job_id
+                responder.release_successes, first.job_id, second.job_id
+            )
+            await asyncio.to_thread(
+                _await_scheduler_publication,
+                scheduler,
+                first.job_id,
+                second.job_id,
             )
             await asyncio.to_thread(responder.break_the_pool)
+            await asyncio.to_thread(_await_scheduler_break, scheduler)
             may_proceed.set()
             await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
 
@@ -1100,7 +1203,9 @@ def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
     assert pool.state is ExecutionPoolState.BROKEN
 
 
-def test_a_batch_break_delivers_the_buffered_tail_before_it_raises() -> None:
+def test_a_batch_break_delivers_the_buffered_tail_before_it_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The same drain-before-raise through the synchronous surface.
 
     One scheduler core reached two ways must end a break the same way, so
@@ -1113,6 +1218,16 @@ def test_a_batch_break_delivers_the_buffered_tail_before_it_raises() -> None:
     """
     first, second, failing = jobs(3)
     responder = _BreakAfterBuffering(failing.job_id)
+    captured: list[_ExecutionScheduler[object]] = []
+
+    class _CapturingScheduler(_ExecutionScheduler[object]):
+        def __init__(self, *, executor: Executor, capacity: int) -> None:
+            super().__init__(executor=executor, capacity=capacity)
+            captured.append(self)
+
+    monkeypatch.setattr(
+        "dr_exec.execution.executor._ExecutionScheduler", _CapturingScheduler
+    )
     parked = threading.Event()
     may_proceed = threading.Event()
 
@@ -1139,8 +1254,12 @@ def test_a_batch_break_delivers_the_buffered_tail_before_it_raises() -> None:
 
     consumer = in_thread(consume_the_batch)
     wait_for(parked, what="the source to park past its last job")
-    responder.buffer(first.job_id, second.job_id)
+    assert len(captured) == 1
+    scheduler = captured[0]
+    responder.release_successes(first.job_id, second.job_id)
+    _await_scheduler_publication(scheduler, first.job_id, second.job_id)
     responder.break_the_pool()
+    _await_scheduler_break(scheduler)
     may_proceed.set()
     join(consumer)
 
@@ -1222,7 +1341,10 @@ def test_a_worker_that_cannot_start_breaks_the_pool_rather_than_hanging(
 # --- Requested close during intake ---------------------------------------
 
 
-def test_a_drain_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
+@pytest.mark.parametrize("close_kind", ["drain", "abort"])
+def test_a_close_landing_mid_pull_ends_the_stream_without_a_failure(
+    close_kind: str,
+) -> None:
     """A requested close is not a scheduler-wide failure.
 
     Every realistic source awaits between items -- a lease from a
@@ -1239,9 +1361,8 @@ def test_a_drain_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
     What is pinned is the shape of the ending, not a delivery count. The
     consumer reaches the end of its stream and the pool reports a clean
     close; which completions a concurrent drain still hands over is not
-    promised, because closing stops delivery -- the same limit
-    `test_abort_does_not_promise_delivery_of_what_it_tore_down` states.
-    What must never arrive is the submission from beyond the close.
+    promised, because closing stops delivery. What must never arrive is
+    the submission from beyond the close.
     """
     parked = asyncio.Event()
     may_proceed = asyncio.Event()
@@ -1255,57 +1376,23 @@ def test_a_drain_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
     pool = fixed_pool(immediate_executor(), 2)
     delivered: list[int] = []
 
-    async def drain_mid_pull() -> None:
+    async def close_mid_pull() -> None:
         async with pool:
+            scheduler = pool._scheduler
+            assert scheduler is not None
             stream = pool.run_stream(parking_source())
             consumer = asyncio.create_task(
                 _collect_contexts(stream, delivered)
             )
             await asyncio.wait_for(parked.wait(), WATCHDOG_SECONDS)
-            drainer = asyncio.create_task(pool.drain())
+            close = pool.drain if close_kind == "drain" else pool.abort
+            closing = asyncio.create_task(close())
+            await asyncio.to_thread(_await_closed_intake, scheduler)
             may_proceed.set()
             await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
-            await asyncio.wait_for(drainer, WATCHDOG_SECONDS)
+            await asyncio.wait_for(closing, WATCHDOG_SECONDS)
 
-    asyncio.run(drain_mid_pull())
-
-    assert 1 not in delivered
-    assert pool.state is ExecutionPoolState.CLOSED
-
-
-def test_an_abort_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
-    """Abort is the same requested close, one step stronger.
-
-    It cancels what is in flight rather than letting it finish, but it is
-    still a lifecycle operation the caller asked for, so the consumer
-    reaches the end of its stream instead of catching a failure that
-    would say the pool could not be trusted.
-    """
-    parked = asyncio.Event()
-    may_proceed = asyncio.Event()
-
-    async def parking_source() -> AsyncIterator[ExecutionSubmission[int]]:
-        yield ExecutionSubmission(job=jobs(1)[0], context=0)
-        parked.set()
-        await may_proceed.wait()
-        yield ExecutionSubmission(job=jobs(1)[0], context=1)
-
-    pool = fixed_pool(immediate_executor(), 2)
-    delivered: list[int] = []
-
-    async def abort_mid_pull() -> None:
-        async with pool:
-            stream = pool.run_stream(parking_source())
-            consumer = asyncio.create_task(
-                _collect_contexts(stream, delivered)
-            )
-            await asyncio.wait_for(parked.wait(), WATCHDOG_SECONDS)
-            aborter = asyncio.create_task(pool.abort())
-            may_proceed.set()
-            await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
-            await asyncio.wait_for(aborter, WATCHDOG_SECONDS)
-
-    asyncio.run(abort_mid_pull())
+    asyncio.run(close_mid_pull())
 
     assert 1 not in delivered
     assert pool.state is ExecutionPoolState.CLOSED
@@ -1322,42 +1409,6 @@ async def _collect_contexts(
 
 
 # --- Several sources, one pool -------------------------------------------
-
-
-def test_several_source_loops_feed_one_pool_under_its_one_bound() -> None:
-    """The host shape: many sources, one bound, one scheduler.
-
-    Two streams run concurrently on one open pool. Both are served, and
-    the bound that admits is the pool's own rather than one per stream:
-    capacity two against two sources of two means exactly two calls are in
-    flight, and the rest start only as delivery frees resident slots.
-    """
-    executor, responder = gated_executor()
-    both = (jobs(2), jobs(2))
-    pool = fixed_pool(executor, 2)
-    delivered: list[int] = []
-
-    async def two_streams() -> None:
-        async with pool:
-            streams = [
-                asyncio.create_task(
-                    _collect_contexts(
-                        pool.run_stream(submissions_of(batch)), delivered
-                    )
-                )
-                for batch in both
-            ]
-            # Two arrivals is the whole bound; a third would mean a
-            # per-stream bound, so the count is the assertion.
-            await asyncio.to_thread(responder.await_arrival_count, 2)
-            assert len(responder.started) == 2
-            for batch in both:
-                await asyncio.to_thread(responder.release_all, batch)
-            await asyncio.wait_for(asyncio.gather(*streams), WATCHDOG_SECONDS)
-
-    asyncio.run(two_streams())
-
-    assert sorted(delivered) == [0, 0, 1, 1]
 
 
 def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
@@ -1520,7 +1571,7 @@ def test_a_finite_batch_consumes_its_input_lazily() -> None:
     one completion before the count is read. With two slots, no more than
     the resident bound may ever have been pulled.
     """
-    batch = jobs(1000)
+    batch = jobs(2)
     pulled = 0
 
     def counting() -> Iterator[ExecutionJob]:
@@ -1528,6 +1579,7 @@ def test_a_finite_batch_consumes_its_input_lazily() -> None:
         for job in batch:
             pulled += 1
             yield job
+        raise AssertionError("the batch pulled beyond resident capacity")
 
     stream = batch_of(immediate_executor(), counting(), slots=2)
     next(stream)
@@ -1537,68 +1589,59 @@ def test_a_finite_batch_consumes_its_input_lazily() -> None:
     assert observed <= 2
 
 
-def test_an_abandoned_batch_still_drains_its_admitted_work() -> None:
+def test_an_abandoned_batch_still_drains_its_admitted_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Closing the iterator early still awaits in-flight teardown.
 
     The drain happens in the generator's own cleanup, so a caller who
     stops consuming cannot leave an executor call running behind the
-    pool's back. The finished gates are set by the time `close` returns.
+    pool's back. The executor-returned gates are set when `close` returns.
     """
     executor, responder = gated_executor()
     batch = jobs(2)
+    first, held = batch
+    captured: list[_ExecutionScheduler[object]] = []
+
+    class _CapturingScheduler(_ExecutionScheduler[object]):
+        def __init__(self, *, executor: Executor, capacity: int) -> None:
+            super().__init__(executor=executor, capacity=capacity)
+            captured.append(self)
+
+    monkeypatch.setattr(
+        "dr_exec.execution.executor._ExecutionScheduler", _CapturingScheduler
+    )
     stream = batch_of(executor, batch, slots=2)
 
     primer = in_thread(lambda: next(stream, None))
     responder.await_arrival_count(2)
-    responder.release_all(batch)
+    responder.release(first.job_id)
     join(primer)
+    assert len(captured) == 1
+    scheduler = captured[0]
 
-    stream.close()
+    closer = in_thread(stream.close)
+    _await_closed_intake(scheduler)
+    assert not responder.executor_returned_gate(held.job_id).is_set()
+    responder.release(held.job_id)
+    join(closer)
 
     for job in batch:
-        assert responder.finished_gate(job.job_id).is_set()
+        assert responder.executor_returned_gate(job.job_id).is_set()
+    responder.assert_no_watchers()
 
 
-# --- Sync and async parity -----------------------------------------------
+# --- Driver-specific termination ----------------------------------------
 
 
-@pytest.mark.parametrize("slots", [1, 2, 5])
-def test_both_surfaces_deliver_the_same_completions(slots: int) -> None:
-    """One scheduler reached two ways delivers one set of completions.
+@pytest.mark.parametrize("surface", ["batch", "stream"])
+def test_each_driver_handles_an_empty_source(surface: str) -> None:
+    """Each driver terminates cleanly without a submission or completion."""
+    if surface == "batch":
+        assert list(batch_of(immediate_executor(), [], slots=1)) == []
+        return
 
-    Parity is not two implementations agreeing; it is the same core driven
-    differently. Varying capacity exercises the bound below, at, and above
-    the batch size.
-    """
-    batch = jobs(4)
-    expected = {job.job_id for job in batch}
-
-    from_batch = {
-        one.result.execution_id.job_id
-        for one in batch_of(immediate_executor(), batch, slots=slots)
-    }
-
-    pool = fixed_pool(immediate_executor(), slots)
-
-    async def stream() -> set[JobId]:
-        async with pool:
-            return {
-                completion.completed_execution.result.execution_id.job_id
-                async for completion in pool.run_stream(submissions_of(batch))
-            }
-
-    from_stream = asyncio.run(stream())
-
-    assert from_batch == expected
-    assert from_stream == expected
-
-
-@pytest.mark.parametrize("slots", [1, 3])
-def test_both_surfaces_handle_an_empty_source(slots: int) -> None:
-    """No submissions means no completions, and no hang."""
-    assert list(batch_of(immediate_executor(), [], slots=slots)) == []
-
-    pool = fixed_pool(immediate_executor(), slots)
+    pool = fixed_pool(immediate_executor(), 1)
 
     async def stream() -> list[object]:
         async with pool:
@@ -1608,27 +1651,3 @@ def test_both_surfaces_handle_an_empty_source(slots: int) -> None:
             ]
 
     assert asyncio.run(stream()) == []
-
-
-@pytest.mark.parametrize("slots", [1, 2])
-def test_both_surfaces_bound_concurrency_the_same_way(slots: int) -> None:
-    """The bound is the scheduler's, so it holds through either surface."""
-    batch = jobs(6)
-
-    list(
-        batch_of(
-            FakeExecutor(responder=_OverlapCounter(limit=slots)),
-            batch,
-            slots=slots,
-        )
-    )
-
-    pool = fixed_pool(
-        FakeExecutor(responder=_OverlapCounter(limit=slots)), slots
-    )
-
-    async def stream() -> None:
-        async with pool:
-            await consume(pool.run_stream(submissions_of(batch)))
-
-    asyncio.run(stream())

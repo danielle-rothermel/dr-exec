@@ -119,7 +119,10 @@ def test_read_enforces_the_declared_depth_bound(
 
 def test_a_real_boundary_validates_the_same_canonical_bytes() -> None:
     """The closed-model tail runs on the bytes the front half verified."""
-    prelude = ProtocolPrelude(request_id_sha256=Sha256Digest("a" * 64))
+    prelude = ProtocolPrelude(
+        version=1,
+        request_id_sha256=Sha256Digest("a" * 64),
+    )
     data = canonical_model_bytes(prelude)
 
     assert decode_frame(data, max_depth=READ_MAX_DEPTH) == prelude
@@ -138,7 +141,10 @@ def test_a_real_boundary_rejects_a_valid_document_of_the_wrong_model(
 
 def test_a_real_boundary_rejects_extra_fields() -> None:
     """An extra key in canonical position still fails model validation."""
-    prelude = ProtocolPrelude(request_id_sha256=Sha256Digest("a" * 64))
+    prelude = ProtocolPrelude(
+        version=1,
+        request_id_sha256=Sha256Digest("a" * 64),
+    )
     data = canonical_model_bytes(prelude).replace(
         b'{"kind"', b'{"extra":1,"kind"', 1
     )

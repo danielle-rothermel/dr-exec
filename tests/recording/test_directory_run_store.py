@@ -9,26 +9,43 @@ outcomes; no case uses a sleep or elapsed time as evidence.
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
-import re
+from base64 import urlsafe_b64encode
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
 import pytest
-from dr_serialize import canonical_json_bytes
-from dr_store.errors import DocumentDirectoryError
+from dr_serialize import (
+    IdentityDocument,
+    Sha256Digest,
+    build_identity_document,
+    canonical_identity_json_bytes,
+    canonical_json_bytes,
+)
+from dr_store import (
+    AllocationError,
+    DocumentDirectory,
+    DocumentDirectoryError,
+    ManifestPublishError,
+    SidecarSummary,
+    SidecarWriter,
+)
 from pydantic import ValidationError
 
 import dr_exec.recording.store
 from dr_exec import (
     AttemptId,
+    BudgetAxis,
+    BudgetExceededOutcome,
     Budgets,
     CancelledOutcome,
     CompleteRecordReceipt,
+    ContainmentProfile,
     DegradedRecordReceipt,
     DirectoryRunStore,
     EnvGrant,
@@ -37,6 +54,7 @@ from dr_exec import (
     ExecutionMeasurements,
     ExecutionOutcome,
     ExecutionResult,
+    ExecutionTargetRecord,
     ExecutorFailure,
     ExitedOutcome,
     FailureOwner,
@@ -57,8 +75,14 @@ from dr_exec import (
     RunningRecord,
     RunningRun,
     RunRecordHeader,
+    RuntimeKind,
+    RuntimeRecord,
+    SignaledOutcome,
     SpawnAbsentOutcome,
+    SpawnFailedOutcome,
     TrustedCommandTargetRecord,
+    UntrustedCommandTargetRecord,
+    UntrustedPythonTargetRecord,
 )
 from dr_exec.declarations.models import (
     ExecutorSelfBudgets,
@@ -77,22 +101,24 @@ from dr_exec.recording.store import (
     STDERR_SIDECAR_NAME,
     STDOUT_SIDECAR_NAME,
     STRUCTURAL_MANIFEST_BYTE_CEILING,
-    _read_bounded_manifest_bytes,
+    _read_size_preflighted_manifest_bytes,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from dr_serialize import IdentityDocument, Jsonable
+    from dr_serialize import Jsonable
 
-SECRET_ARGUMENT = "hunter2-argv-secret"
-SECRET_STDIN = b"hunter2-stdin-secret"
-SECRET_ENV_VALUE = "hunter2-env-secret"
-SECRET_EXECUTABLE = "/nonexistent/hunter2-executable-secret"
-SECRET_ERROR_DETAIL = "hunter2-diagnostic-secret"
+SECRET_ARGUMENT = 'hunter2-argv-"secret"'
+SECRET_STDIN = b'hunter2-stdin-"secret"'
+SECRET_ENV_VALUE = 'hunter2-env-"secret"'
+SECRET_EXECUTABLE = '/nonexistent/hunter2-"executable-secret"'
+SECRET_ERROR_DETAIL = 'hunter2-diagnostic-"secret"'
 PREPARED_AT = datetime(2026, 8, 4, 12, 0, 0, 500000, tzinfo=UTC)
 STARTED_AT = datetime(2026, 8, 4, 12, 0, 1, 500000, tzinfo=UTC)
 FINISHED_AT = datetime(2026, 8, 4, 12, 0, 2, 500000, tzinfo=UTC)
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
@@ -119,14 +145,19 @@ def _header() -> RunRecordHeader:
     )
 
 
-def _declaration(execution_id: ExecutionId) -> RunDeclaration:
+def _declaration(
+    execution_id: ExecutionId,
+    *,
+    target_record: ExecutionTargetRecord | None = None,
+) -> RunDeclaration:
     target = TrustedCommandTarget(
         argv=("/bin/echo", SECRET_ARGUMENT),
         stdin=SECRET_STDIN,
     )
     return RunDeclaration(
         execution_id=execution_id,
-        target=TrustedCommandTargetRecord(
+        target=target_record
+        or TrustedCommandTargetRecord(
             canonical_declaration_sha256=_canonical_declaration_digest(target)
         ),
         env=_build_env_grant_record(
@@ -136,10 +167,34 @@ def _declaration(execution_id: ExecutionId) -> RunDeclaration:
     )
 
 
-def _prepared_record(execution_id: ExecutionId) -> PreparedRecord:
+def _prepared_record(
+    execution_id: ExecutionId,
+    *,
+    target_record: ExecutionTargetRecord | None = None,
+) -> PreparedRecord:
     return PreparedRecord(
         header=_header(),
-        declaration=_declaration(execution_id),
+        declaration=_declaration(execution_id, target_record=target_record),
+    )
+
+
+def _runtime_record() -> RuntimeRecord:
+    resolved_executable = Path("/opt/py/bin/python3.13")
+    return RuntimeRecord(
+        kind=RuntimeKind.ISOLATED_HOST_PYTHON,
+        resolved_executable=resolved_executable,
+        id_doc=build_identity_document(
+            schema="dr_exec.isolated_host_python_runtime",
+            schema_version=1,
+            payload={
+                "kind": "isolated_host_python",
+                "resolved_executable": resolved_executable.as_posix(),
+                "implementation": "cpython",
+                "python_version": "3.13.2",
+                "cache_tag": "cpython-313",
+                "platform": "darwin",
+            },
+        ),
     )
 
 
@@ -188,6 +243,195 @@ def _result(
 
 def _manifest_bytes(record_dir: Path) -> bytes:
     return (record_dir / MANIFEST_NAME).read_bytes()
+
+
+class _FinalizeFaultWriter:
+    def __init__(
+        self, writer: SidecarWriter, *, fault: bool, errno: int
+    ) -> None:
+        self._writer = writer
+        self._fault = fault
+        self._errno = errno
+
+    def write(self, chunk: bytes, /) -> None:
+        self._writer.write(chunk)
+
+    def finalize(self) -> SidecarSummary:
+        summary = self._writer.finalize()
+        if self._fault:
+            try:
+                raise OSError(self._errno, os.strerror(self._errno))
+            except OSError as error:
+                raise AllocationError(
+                    "injected sidecar finalization fault"
+                ) from error
+        return summary
+
+
+def _install_finalization_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stage: Literal[
+        "stdout_finalize",
+        "stderr_open",
+        "stderr_finalize",
+        "manifest_publish",
+    ],
+    error_number: int,
+) -> None:
+    original_open = DocumentDirectory.open_sidecar
+
+    def open_sidecar(
+        directory: DocumentDirectory,
+        name: str,
+        *,
+        head_cap: int | None = None,
+        tail_cap: int | None = None,
+    ) -> SidecarWriter | _FinalizeFaultWriter:
+        if stage == "stderr_open" and name == STDERR_SIDECAR_NAME:
+            try:
+                raise OSError(error_number, os.strerror(error_number))
+            except OSError as error:
+                raise AllocationError("injected sidecar open fault") from error
+        writer = original_open(
+            directory,
+            name,
+            head_cap=head_cap,
+            tail_cap=tail_cap,
+        )
+        return _FinalizeFaultWriter(
+            writer,
+            fault=(stage == "stdout_finalize" and name == STDOUT_SIDECAR_NAME)
+            or (stage == "stderr_finalize" and name == STDERR_SIDECAR_NAME),
+            errno=error_number,
+        )
+
+    if stage == "manifest_publish":
+
+        def publish(_directory: DocumentDirectory, _manifest: object) -> None:
+            try:
+                raise OSError(error_number, os.strerror(error_number))
+            except OSError as error:
+                raise ManifestPublishError(
+                    "injected manifest publication fault"
+                ) from error
+
+        monkeypatch.setattr(DocumentDirectory, "publish", publish)
+    else:
+        monkeypatch.setattr(DocumentDirectory, "open_sidecar", open_sidecar)
+
+
+def _recoverable_encodings(secret: str | bytes, /) -> frozenset[bytes]:
+    raw = secret.encode() if isinstance(secret, str) else secret
+    text = raw.decode()
+    identity = build_identity_document(
+        schema="dr_exec.secret_canary",
+        schema_version=1,
+        payload={"secret": text},
+    )
+    return frozenset(
+        {
+            raw,
+            urlsafe_b64encode(raw),
+            json.dumps(text, ensure_ascii=True)[1:-1].encode(),
+            canonical_identity_json_bytes(identity),
+            hashlib.sha256(canonical_json_bytes(text)).hexdigest().encode(),
+        }
+    )
+
+
+def _leaf_key_paths(value: object, prefix: str = "") -> frozenset[str]:
+    paths: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(child, dict) and child:
+                paths.update(_leaf_key_paths(child, path))
+            elif isinstance(child, list):
+                paths.add(path)
+                for member in child:
+                    if isinstance(member, dict):
+                        paths.update(_leaf_key_paths(member, f"{path}[]"))
+            else:
+                paths.add(path)
+    return frozenset(paths)
+
+
+_PREPARED_LEAF_KEY_PATHS = frozenset(
+    [
+        "declaration.budgets.cpu_time.kind",
+        "declaration.budgets.disk_bytes.kind",
+        "declaration.budgets.file_size_bytes.kind",
+        "declaration.budgets.input_bytes.kind",
+        "declaration.budgets.memory_bytes.kind",
+        "declaration.budgets.open_file_count.kind",
+        "declaration.budgets.payload_output.kind",
+        "declaration.budgets.process_count.kind",
+        "declaration.budgets.wall_time.kind",
+        "declaration.env.canonical_values_sha256",
+        "declaration.env.excluded_var_names",
+        "declaration.env.kind",
+        "declaration.env.var_names",
+        "declaration.execution_id.attempt_id",
+        "declaration.execution_id.job_id",
+        "declaration.target.canonical_declaration_sha256",
+        "declaration.target.kind",
+        "header.executor_config_identity.payload.failure_detail_bytes.kind",
+        "header.executor_config_identity.payload.join_time.kind",
+        "header.executor_config_identity.payload.json_depth.kind",
+        "header.executor_config_identity.payload.manifest_bytes.kind",
+        "header.executor_config_identity.payload.narration_bytes.kind",
+        "header.executor_config_identity.payload.protocol_frame_bytes.kind",
+        "header.executor_config_identity.payload.protocol_output_count.kind",
+        "header.executor_config_identity.payload.protocol_total_bytes.kind",
+        "header.executor_config_identity.payload.recording_failure_count.kind",
+        "header.executor_config_identity.payload.startup_time.kind",
+        "header.executor_config_identity.payload.termination_time.kind",
+        "header.executor_config_identity.schema",
+        "header.executor_config_identity.schema_version",
+        "header.executor_identity.payload.kind",
+        "header.executor_identity.payload.package_version",
+        "header.executor_identity.payload.session_id",
+        "header.executor_identity.payload.source_commit",
+        "header.executor_identity.payload.source_state",
+        "header.executor_identity.schema",
+        "header.executor_identity.schema_version",
+        "header.prepared_at",
+        "header.schema_version",
+        "state",
+    ]
+)
+
+_FINALIZED_LEAF_KEY_PATHS = _PREPARED_LEAF_KEY_PATHS | frozenset(
+    [
+        "outputs.stderr.relative_path",
+        "outputs.stderr.sha256",
+        "outputs.stderr.size_bytes",
+        "outputs.stdout.relative_path",
+        "outputs.stdout.sha256",
+        "outputs.stdout.size_bytes",
+        "result.attribution.owner",
+        "result.execution_id.attempt_id",
+        "result.execution_id.job_id",
+        "result.measurements.duration_ns",
+        "result.measurements.finished_at",
+        "result.measurements.input_bytes",
+        "result.measurements.protocol_bytes_received",
+        "result.measurements.started_at",
+        "result.measurements.teardown_duration_ns",
+        "result.outcome.exit_code",
+        "result.outcome.kind",
+        "result.payload_outputs.stderr.dropped_bytes",
+        "result.payload_outputs.stderr.head_bytes",
+        "result.payload_outputs.stderr.produced_bytes",
+        "result.payload_outputs.stderr.tail_bytes",
+        "result.payload_outputs.stdout.dropped_bytes",
+        "result.payload_outputs.stdout.head_bytes",
+        "result.payload_outputs.stdout.produced_bytes",
+        "result.payload_outputs.stdout.tail_bytes",
+        "result.protocol_outputs",
+    ]
+)
 
 
 # --- valid prepared, running, finalized transitions -------------------
@@ -326,9 +570,17 @@ def test_finalizing_twice_degrades_rather_than_replacing_the_record(
     ("commit_state", "expected_state"),
     [
         pytest.param(
-            RecordState.PREPARED, RecordState.PREPARED, id="prepared"
+            RecordState.PREPARED,
+            RecordState.PREPARED,
+            marks=(pytest.mark.subprocess, pytest.mark.serial_fork),
+            id="prepared",
         ),
-        pytest.param(RecordState.RUNNING, RecordState.RUNNING, id="running"),
+        pytest.param(
+            RecordState.RUNNING,
+            RecordState.RUNNING,
+            marks=(pytest.mark.subprocess, pytest.mark.serial_fork),
+            id="running",
+        ),
     ],
 )
 def test_a_record_committed_before_parent_death_recovers_as_incomplete(
@@ -475,9 +727,54 @@ def test_accepted_protocol_outputs_stay_inline_and_complete(
 # --- secret-safe durable evidence -------------------------------------
 
 
-def test_no_lifecycle_manifest_exposes_a_recoverable_secret(
+@pytest.mark.parametrize(
+    ("outcome", "expected_outcome_keys"),
+    [
+        pytest.param(
+            ExitedOutcome(exit_code=0),
+            {"kind", "exit_code"},
+            id="exited",
+        ),
+        pytest.param(
+            SignaledOutcome(signal_number=9),
+            {"kind", "signal_number"},
+            id="signaled",
+        ),
+        pytest.param(
+            SpawnAbsentOutcome(executable=SECRET_EXECUTABLE),
+            {"kind"},
+            id="spawn-absent",
+        ),
+        pytest.param(
+            SpawnFailedOutcome(
+                errno=errno.EACCES,
+                error_message=SECRET_ERROR_DETAIL,
+            ),
+            {"kind", "errno"},
+            id="spawn-failed",
+        ),
+        pytest.param(
+            BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME),
+            {"kind", "axis"},
+            id="budget-exceeded",
+        ),
+        pytest.param(
+            ProtocolFailedOutcome(
+                failure_code=ProtocolFailureCode.INCOMPLETE_STREAM,
+                failure_detail=SECRET_ERROR_DETAIL,
+                accepted_output_count=0,
+            ),
+            {"kind", "failure_code", "accepted_output_count"},
+            id="protocol-failed",
+        ),
+        pytest.param(CancelledOutcome(), {"kind"}, id="cancelled"),
+    ],
+)
+def test_every_outcome_manifest_has_exact_keys_and_no_recoverable_secret(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
+    outcome: ExecutionOutcome,
+    expected_outcome_keys: set[str],
 ) -> None:
     prepared_run = store.prepare(_prepared_record(execution_id))
     prepared_bytes = _manifest_bytes(prepared_run.record_dir)
@@ -489,7 +786,7 @@ def test_no_lifecycle_manifest_exposes_a_recoverable_secret(
         running_run,
         _result(
             execution_id,
-            outcome=SpawnAbsentOutcome(executable=SECRET_EXECUTABLE),
+            outcome=outcome,
             attribution=ExecutionAttribution(
                 owner=FailureOwner.EXECUTOR, detail=SECRET_ERROR_DETAIL
             ),
@@ -497,12 +794,20 @@ def test_no_lifecycle_manifest_exposes_a_recoverable_secret(
     )
     finalized_bytes = _manifest_bytes(running_run.record_dir)
 
+    secrets = (
+        SECRET_ARGUMENT,
+        SECRET_STDIN,
+        SECRET_ENV_VALUE,
+        SECRET_EXECUTABLE,
+        SECRET_ERROR_DETAIL,
+    )
     for manifest in (prepared_bytes, running_bytes, finalized_bytes):
-        assert SECRET_ARGUMENT.encode() not in manifest
-        assert SECRET_STDIN not in manifest
-        assert SECRET_ENV_VALUE.encode() not in manifest
-        assert SECRET_EXECUTABLE.encode() not in manifest
-        assert SECRET_ERROR_DETAIL.encode() not in manifest
+        for secret in secrets:
+            for recoverable in _recoverable_encodings(secret):
+                assert recoverable not in manifest
+
+    finalized = json.loads(finalized_bytes)
+    assert set(finalized["result"]["outcome"]) == expected_outcome_keys
 
 
 def test_the_manifest_keeps_grant_identity_without_grant_values(
@@ -540,6 +845,29 @@ def test_the_manifest_excludes_pool_queue_and_lease_context(
     }
 
 
+def test_every_lifecycle_manifest_has_exact_recursive_key_paths(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    prepared_run = store.prepare(_prepared_record(execution_id))
+    prepared = json.loads(_manifest_bytes(prepared_run.record_dir))
+    assert _leaf_key_paths(prepared) == _PREPARED_LEAF_KEY_PATHS
+
+    running_run = store.mark_running(
+        prepared_run,
+        ProcessRecord(pid=4242, started_at=STARTED_AT),
+    )
+    running = json.loads(_manifest_bytes(running_run.record_dir))
+    assert _leaf_key_paths(running) == _PREPARED_LEAF_KEY_PATHS | {
+        "process.pid",
+        "process.started_at",
+    }
+
+    store.finalize(running_run, _result(execution_id))
+    finalized = json.loads(_manifest_bytes(running_run.record_dir))
+    assert _leaf_key_paths(finalized) == _FINALIZED_LEAF_KEY_PATHS
+
+
 def test_the_manifest_records_secret_free_invocation_evidence(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
@@ -553,6 +881,69 @@ def test_the_manifest_records_secret_free_invocation_evidence(
     assert set(target) == {"kind", "canonical_declaration_sha256"}
     assert target["kind"] == "trusted_command"
     assert len(target["canonical_declaration_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    ("target_record", "expected_paths"),
+    [
+        pytest.param(
+            TrustedCommandTargetRecord(
+                canonical_declaration_sha256=Sha256Digest("0" * 64)
+            ),
+            {"kind", "canonical_declaration_sha256"},
+            id="trusted-command",
+        ),
+        pytest.param(
+            UntrustedCommandTargetRecord(
+                canonical_declaration_sha256=Sha256Digest("0" * 64),
+                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+            ),
+            {
+                "kind",
+                "canonical_declaration_sha256",
+                "containment_profile",
+            },
+            id="untrusted-command",
+        ),
+        pytest.param(
+            UntrustedPythonTargetRecord(
+                canonical_declaration_sha256=Sha256Digest("0" * 64),
+                request_id_sha256=Sha256Digest("1" * 64),
+                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+                runtime=_runtime_record(),
+            ),
+            {
+                "kind",
+                "canonical_declaration_sha256",
+                "request_id_sha256",
+                "containment_profile",
+                "runtime.kind",
+                "runtime.resolved_executable",
+                "runtime.id_doc.schema",
+                "runtime.id_doc.schema_version",
+                "runtime.id_doc.payload.kind",
+                "runtime.id_doc.payload.resolved_executable",
+                "runtime.id_doc.payload.implementation",
+                "runtime.id_doc.payload.python_version",
+                "runtime.id_doc.payload.cache_tag",
+                "runtime.id_doc.payload.platform",
+            },
+            id="untrusted-python",
+        ),
+    ],
+)
+def test_each_target_record_has_exact_recursive_key_paths(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    target_record: ExecutionTargetRecord,
+    expected_paths: set[str],
+) -> None:
+    run = store.prepare(
+        _prepared_record(execution_id, target_record=target_record)
+    )
+    manifest = json.loads(_manifest_bytes(run.record_dir))
+
+    assert _leaf_key_paths(manifest["declaration"]["target"]) == expected_paths
 
 
 # --- degradation without changed attribution --------------------------
@@ -578,6 +969,88 @@ def test_an_unwritable_run_directory_degrades_the_receipt(
     assert receipt.record_dir == running_run.record_dir
     assert len(receipt.failures) == 1
     assert receipt.failures[0].operation == "finalize"
+
+
+@pytest.mark.parametrize(
+    ("stage", "error_number", "expected_files"),
+    [
+        pytest.param(
+            "stdout_finalize",
+            errno.EIO,
+            {MANIFEST_NAME, STDOUT_SIDECAR_NAME},
+            id="stdout-finalize",
+        ),
+        pytest.param(
+            "stderr_open",
+            errno.ENOSPC,
+            {MANIFEST_NAME, STDOUT_SIDECAR_NAME},
+            id="stderr-open-enospc",
+        ),
+        pytest.param(
+            "stderr_finalize",
+            errno.EIO,
+            {MANIFEST_NAME, STDOUT_SIDECAR_NAME, STDERR_SIDECAR_NAME},
+            id="stderr-finalize",
+        ),
+        pytest.param(
+            "manifest_publish",
+            errno.ENOSPC,
+            {MANIFEST_NAME, STDOUT_SIDECAR_NAME, STDERR_SIDECAR_NAME},
+            id="manifest-publish-enospc",
+        ),
+    ],
+)
+def test_finalization_faults_preserve_the_latest_manifest_and_degrade(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: Literal[
+        "stdout_finalize",
+        "stderr_open",
+        "stderr_finalize",
+        "manifest_publish",
+    ],
+    error_number: int,
+    expected_files: set[str],
+) -> None:
+    running_run = store.mark_running(
+        store.prepare(_prepared_record(execution_id)),
+        ProcessRecord(pid=4242, started_at=STARTED_AT),
+    )
+    committed = _manifest_bytes(running_run.record_dir)
+    _install_finalization_fault(
+        monkeypatch,
+        stage=stage,
+        error_number=error_number,
+    )
+
+    receipt = store.finalize(
+        running_run,
+        _result(
+            execution_id,
+            outcome=SpawnFailedOutcome(
+                errno=error_number,
+                error_message=SECRET_ERROR_DETAIL,
+            ),
+            stdout=_stream(head=b"stdout"),
+            stderr=_stream(head=b"stderr"),
+        ),
+    )
+
+    assert isinstance(receipt, DegradedRecordReceipt)
+    assert receipt.latest_state == RecordState.RUNNING
+    assert receipt.record_dir == running_run.record_dir
+    assert len(receipt.failures) == 1
+    failure = receipt.failures[0]
+    assert failure.operation == "finalize"
+    assert failure.errno == error_number
+    assert failure.detail.isidentifier()
+    assert SECRET_ERROR_DETAIL not in failure.detail
+    assert _manifest_bytes(running_run.record_dir) == committed
+    assert {entry.name for entry in running_run.record_dir.iterdir()} == (
+        expected_files
+    )
+    assert store.load(running_run.record_dir).state == RecordState.RUNNING
 
 
 def test_an_unwritable_directory_fails_mark_running_without_losing_prepared(
@@ -693,12 +1166,8 @@ def test_a_recording_failure_names_no_rejected_value(
     failure = receipt.failures[0]
     assert SECRET_EXECUTABLE not in failure.detail
     assert SECRET_STDIN.decode() not in failure.detail
-    # The detail is the failing type alone. Borrowing the underlying
-    # message would make dr-exec's secret-safety depend on how a pinned
-    # dependency happens to word its errors.
-    # Sidecars are flushed before the manifest, so an unwritable run
-    # directory faults on opening the first sidecar.
-    assert failure.detail == "AllocationError"
+    # The detail is a sanitized category, not the dependency's message.
+    assert failure.detail.isidentifier()
     assert failure.errno == errno.EACCES
 
 
@@ -818,32 +1287,20 @@ def test_load_rejects_a_corrupted_embedded_identity_document(
     assert raised.value.__cause__ is not None
 
 
-def test_the_manifest_read_validates_exactly_the_stored_bytes(
+def test_load_rejects_a_canonical_manifest_with_a_coercible_scalar(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Strict validation runs on the bytes that are on disk.
-
-    The load path reads the stored bytes itself and hands those same
-    bytes to strict validation, so nothing between disk and Pydantic
-    re-renders the record. Checked for every lifecycle state.
-    """
-
-    def stored_bytes_round_trip() -> bytes:
-        raw = _manifest_bytes(run.record_dir)
-        assert _read_bounded_manifest_bytes(run.record_dir) == raw
-        return raw
-
+    """Canonical JSON still fails when a strict field needs coercion."""
     run = store.prepare(_prepared_record(execution_id))
-    prepared_bytes = stored_bytes_round_trip()
-    running = store.mark_running(
-        run, ProcessRecord(pid=4242, started_at=STARTED_AT)
+    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest["header"]["schema_version"] = "1"
+    (run.record_dir / MANIFEST_NAME).write_bytes(
+        canonical_json_bytes(manifest)
     )
-    running_bytes = stored_bytes_round_trip()
-    store.finalize(running, _result(execution_id, stdout=_stream(b"a")))
-    finalized_bytes = stored_bytes_round_trip()
 
-    assert len({prepared_bytes, running_bytes, finalized_bytes}) == 3
+    with pytest.raises(RecordLoadError, match="not a valid"):
+        store.load(run.record_dir)
 
 
 def test_the_manifest_byte_ceiling_is_exactly_pinned() -> None:
@@ -856,11 +1313,11 @@ def test_the_manifest_byte_ceiling_is_exactly_pinned() -> None:
     assert STRUCTURAL_MANIFEST_BYTE_CEILING == 256 * 1024 * 1024
 
 
-def test_load_rejects_a_manifest_past_the_byte_ceiling_before_reading_it(
+def test_load_rejects_a_statically_oversized_manifest_before_reading_it(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Bytes are bounded before decode, from the directory entry alone.
+    """An already-oversized file is refused from its directory entry.
 
     The oversized manifest is grown sparsely, so a bound applied to bytes
     already read would have to materialize the whole file to reach the
@@ -877,7 +1334,7 @@ def test_load_rejects_a_manifest_past_the_byte_ceiling_before_reading_it(
         store.load(run.record_dir)
 
 
-def test_a_manifest_exactly_at_the_byte_ceiling_is_read_whole(
+def test_a_static_manifest_exactly_at_the_byte_ceiling_is_read_whole(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
     monkeypatch: pytest.MonkeyPatch,
@@ -896,7 +1353,7 @@ def test_a_manifest_exactly_at_the_byte_ceiling_is_read_whole(
         len(stored),
     )
 
-    assert _read_bounded_manifest_bytes(run.record_dir) == stored
+    assert _read_size_preflighted_manifest_bytes(run.record_dir) == stored
     assert store.load(run.record_dir).state == RecordState.PREPARED
 
 
@@ -959,6 +1416,50 @@ def test_load_rejects_an_unsafe_artifact_path_in_the_manifest(
     )
 
     with pytest.raises(RecordLoadError, match="not a valid"):
+        store.load(run.record_dir)
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "unexpected_path"),
+    [
+        pytest.param("stdout", "other-stdout.bin", id="stdout"),
+        pytest.param("stderr", "other-stderr.bin", id="stderr"),
+    ],
+)
+def test_load_requires_the_two_exact_artifact_paths(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    artifact_name: Literal["stdout", "stderr"],
+    unexpected_path: str,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    store.finalize(run, _result(execution_id))
+    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest["outputs"][artifact_name]["relative_path"] = unexpected_path
+    (run.record_dir / unexpected_path).write_bytes(b"")
+    (run.record_dir / MANIFEST_NAME).write_bytes(
+        canonical_json_bytes(manifest)
+    )
+
+    with pytest.raises(RecordLoadError, match="unexpected .* artifact path"):
+        store.load(run.record_dir)
+
+
+def test_load_rejects_an_equal_content_external_sidecar_symlink(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    tmp_path: Path,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    stdout = _stream(head=b"equal-content")
+    store.finalize(run, _result(execution_id, stdout=stdout))
+    stdout_path = run.record_dir / STDOUT_SIDECAR_NAME
+    external_path = tmp_path / "external-stdout.bin"
+    external_path.write_bytes(stdout_path.read_bytes())
+    stdout_path.unlink()
+    stdout_path.symlink_to(external_path)
+
+    with pytest.raises(RecordLoadError, match="does not match its record"):
         store.load(run.record_dir)
 
 
@@ -1039,18 +1540,14 @@ def test_the_on_disk_layout_literals_are_exactly_pinned() -> None:
     assert STDERR_SIDECAR_NAME == "stderr.bin"
 
 
-def test_an_allocated_run_directory_is_named_by_the_pinned_pattern(
+def test_an_allocated_run_directory_uses_the_owned_prefix_and_root(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
 
-    assert re.fullmatch(
-        r"run-\d{8}T\d{12}Z-"
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-        r"[0-9a-f]{4}-[0-9a-f]{12}",
-        run.record_dir.name,
-    )
+    assert run.record_dir.parent == store.root
+    assert run.record_dir.name.startswith(f"{RECORD_DIRECTORY_PREFIX}-")
 
 
 def test_a_finalized_run_directory_contains_exactly_the_pinned_files(
@@ -1073,40 +1570,29 @@ def test_the_lifecycle_state_literals_are_exactly_pinned() -> None:
     assert RecordState.PREPARED == "prepared"
     assert RecordState.RUNNING == "running"
     assert RecordState.FINALIZED == "finalized"
-    assert [state.value for state in RecordState] == [
-        "prepared",
-        "running",
-        "finalized",
-    ]
 
 
 def test_the_outcome_kind_literals_are_exactly_pinned() -> None:
-    assert [kind.value for kind in OutcomeKind] == [
-        "exited",
-        "signaled",
-        "spawn_absent",
-        "spawn_failed",
-        "budget_exceeded",
-        "protocol_failed",
-        "cancelled",
-    ]
+    assert OutcomeKind.EXITED == "exited"
+    assert OutcomeKind.SIGNALED == "signaled"
+    assert OutcomeKind.SPAWN_ABSENT == "spawn_absent"
+    assert OutcomeKind.SPAWN_FAILED == "spawn_failed"
+    assert OutcomeKind.BUDGET_EXCEEDED == "budget_exceeded"
+    assert OutcomeKind.PROTOCOL_FAILED == "protocol_failed"
+    assert OutcomeKind.CANCELLED == "cancelled"
 
 
 def test_the_failure_owner_literals_are_exactly_pinned() -> None:
-    assert [owner.value for owner in FailureOwner] == [
-        "none",
-        "payload",
-        "executor",
-        "machine",
-    ]
+    assert FailureOwner.NONE == "none"
+    assert FailureOwner.PAYLOAD == "payload"
+    assert FailureOwner.EXECUTOR == "executor"
+    assert FailureOwner.MACHINE == "machine"
 
 
 def test_the_receipt_kind_literals_are_exactly_pinned() -> None:
-    assert [kind.value for kind in RecordReceiptKind] == [
-        "complete",
-        "degraded",
-        "not_applicable",
-    ]
+    assert RecordReceiptKind.COMPLETE == "complete"
+    assert RecordReceiptKind.DEGRADED == "degraded"
+    assert RecordReceiptKind.NOT_APPLICABLE == "not_applicable"
 
 
 @pytest.mark.parametrize(

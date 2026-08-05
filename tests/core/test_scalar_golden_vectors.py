@@ -290,7 +290,7 @@ def test_untrusted_python_target_wire_spelling_is_pinned(
 
 
 def test_protocol_prelude_wire_spelling_is_pinned() -> None:
-    frame = ProtocolPrelude(request_id_sha256=ALL_E_DIGEST)
+    frame = ProtocolPrelude(version=1, request_id_sha256=ALL_E_DIGEST)
     assert canonical_model_bytes(frame) == (
         b'{"kind":"prelude","request_id_sha256":"eeeeeeeeeeeeeeeeeeeeeeee'
         b'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","version":1}'
@@ -300,7 +300,11 @@ def test_protocol_prelude_wire_spelling_is_pinned() -> None:
 def test_protocol_output_wire_spelling_is_pinned(
     request_document: IdentityDocument,
 ) -> None:
-    frame = ProtocolOutput(sequence=0, document=request_document)
+    frame = ProtocolOutput(
+        version=1,
+        sequence=0,
+        document=request_document,
+    )
     assert canonical_model_bytes(frame) == (
         b'{"document":{"payload":{"a":[1,{"z":null}],"b":2},"schema":'
         b'"dr_exec.test_request","schema_version":1},"kind":"output",'
@@ -309,7 +313,7 @@ def test_protocol_output_wire_spelling_is_pinned(
 
 
 def test_protocol_complete_wire_spelling_is_pinned() -> None:
-    frame = ProtocolComplete(output_count=1)
+    frame = ProtocolComplete(version=1, output_count=1)
     assert canonical_model_bytes(frame) == (
         b'{"kind":"complete","output_count":1,"version":1}'
     )

@@ -1,9 +1,11 @@
 """Fixed isolated invocation shape and the library-owned child wrapper.
 
-The interpreter is always invoked as ``<executable> -I -c <source>``. The
-consumer's ``driver_source`` never reaches argv, a shell, or an import
-path: the library-owned wrapper carries it as one embedded string literal
-bound to a fixed name.
+The interpreter is always invoked as ``<executable> -I -c <wrapper source>``.
+That wrapper source is one OS-level argv element and contains the consumer's
+``driver_source`` as inert data in one string literal bound to a fixed name.
+Domain code sees CPython's own ``sys.argv`` with no source argument; the wrapper
+intentionally evaluates the embedded driver, but no shell interprets either
+source string.
 
 The wrapper runs inside an isolated host interpreter that is not required
 to have dr-exec importable, so its body is stdlib-only and reproduces the
@@ -11,11 +13,13 @@ pinned canonical JSON profile directly. It opens the protected descriptor
 before any domain code, reads the request through EOF, validates it,
 resolves ``dr_exec_main``, and writes LF-terminated canonical frames.
 
-Failure ownership is split at the wrapper boundary. A missing or
-non-callable entrypoint, a source-load failure, and a callback failure are
-payload-owned: the wrapper stops without a completion frame, so the parent
-observes an incomplete stream with every previously accepted output
-preserved. A protected-writer failure is executor-owned machinery failure.
+A missing or non-callable entrypoint, source-load failure, or callback failure
+can stop the wrapper without a completion frame. If a protected-writer failure
+leaves the protocol incomplete, the parent preserves previously accepted output
+but has no separate signal that distinguishes the library-owned failure from
+another incomplete stream; it can classify only the protocol evidence it
+receives. Parent-observed transport worker failures remain executor machinery
+failures.
 """
 
 from __future__ import annotations

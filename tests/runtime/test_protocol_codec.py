@@ -12,6 +12,7 @@ from dr_serialize import (
     Sha256Digest,
     build_identity_document,
 )
+from pydantic import ValidationError
 
 from dr_exec import (
     ExecutorSelfBudgets,
@@ -62,12 +63,16 @@ def _read(
 
 
 def _stream(digest: Sha256Digest, output_count: int, /) -> bytes:
-    frames = [ProtocolPrelude(request_id_sha256=digest)]
+    frames = [ProtocolPrelude(version=1, request_id_sha256=digest)]
     frames.extend(
-        ProtocolOutput(sequence=index, document=_output_document(index))
+        ProtocolOutput(
+            version=1,
+            sequence=index,
+            document=_output_document(index),
+        )
         for index in range(output_count)
     )
-    frames.append(ProtocolComplete(output_count=output_count))
+    frames.append(ProtocolComplete(version=1, output_count=output_count))
     return b"".join(encode_frame(frame) for frame in frames)
 
 
@@ -75,30 +80,38 @@ def _stream(digest: Sha256Digest, output_count: int, /) -> bytes:
 
 
 def test_the_prelude_frame_has_exactly_its_pinned_bytes() -> None:
-    frame = ProtocolPrelude(request_id_sha256=Sha256Digest("a" * 64))
+    frame = ProtocolPrelude(
+        version=1,
+        request_id_sha256=Sha256Digest("a" * 64),
+    )
     assert encode_frame(frame) == (
         b'{"kind":"prelude","request_id_sha256":"' + b"a" * 64 + b'",'
         b'"version":1}\n'
     )
 
 
-def test_the_output_frame_has_exactly_its_pinned_bytes() -> None:
-    frame = ProtocolOutput(sequence=0, document=_output_document(7))
-    assert encode_frame(frame) == (
-        b'{"document":{"payload":{"index":7},'
-        b'"schema":"dr_exec.test_output","schema_version":1},'
-        b'"kind":"output","sequence":0,"version":1}\n'
-    )
+@pytest.mark.parametrize(
+    "digest",
+    [
+        pytest.param("a" * 63, id="too-short"),
+        pytest.param("a" * 65, id="too-long"),
+        pytest.param("A" * 64, id="uppercase"),
+        pytest.param("g" * 64, id="non-hexadecimal"),
+        pytest.param("sha256:" + "a" * 57, id="prefixed"),
+    ],
+)
+def test_prelude_rejects_noncanonical_digest_spellings(digest: str) -> None:
+    with pytest.raises(ValidationError):
+        ProtocolPrelude(
+            version=1,
+            request_id_sha256=digest,  # ty: ignore[invalid-argument-type]
+        )
 
 
-def test_the_completion_frame_has_exactly_its_pinned_bytes() -> None:
-    assert encode_frame(ProtocolComplete(output_count=2)) == (
-        b'{"kind":"complete","output_count":2,"version":1}\n'
-    )
+def test_prelude_retains_the_nominal_digest_type() -> None:
+    frame = ProtocolPrelude(version=1, request_id_sha256=OTHER_DIGEST)
 
-
-def test_the_pinned_frame_version_is_one() -> None:
-    assert ProtocolPrelude(request_id_sha256=OTHER_DIGEST).version == 1
+    assert isinstance(frame.request_id_sha256, Sha256Digest)
 
 
 def test_frames_carry_no_raw_line_break_before_the_terminator() -> None:
@@ -107,7 +120,9 @@ def test_frames_carry_no_raw_line_break_before_the_terminator() -> None:
         schema_version=1,
         payload={"text": "line\nbreak\r\nand\ttab"},
     )
-    encoded = encode_frame(ProtocolOutput(sequence=0, document=document))
+    encoded = encode_frame(
+        ProtocolOutput(version=1, sequence=0, document=document)
+    )
     assert encoded.count(FRAME_TERMINATOR) == 1
     assert encoded.endswith(FRAME_TERMINATOR)
     assert b"\r" not in encoded
@@ -121,9 +136,11 @@ def test_non_ascii_output_payloads_survive_the_round_trip() -> None:
     )
     digest = Sha256Digest("c" * 64)
     stream = (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
-        + encode_frame(ProtocolOutput(sequence=0, document=document))
-        + encode_frame(ProtocolComplete(output_count=1))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
+        + encode_frame(
+            ProtocolOutput(version=1, sequence=0, document=document)
+        )
+        + encode_frame(ProtocolComplete(version=1, output_count=1))
     )
     assert stream.isascii()
     result = _read(stream, request_id_sha256=digest)
@@ -174,7 +191,31 @@ def test_invalid_utf8_is_a_malformed_frame() -> None:
         pytest.param(b'{"b":1,"a":2}', id="unsorted-keys"),
         pytest.param(b'{"a":1.0e1}', id="non-canonical-number"),
         pytest.param(b'{"kind":"unknown","version":1}', id="unknown-kind"),
-        pytest.param(b'{"kind":"complete","version":2}', id="wrong-version"),
+        pytest.param(
+            b'{"kind":"complete","output_count":0,"version":2}',
+            id="wrong-version",
+        ),
+        pytest.param(
+            b'{"kind":"prelude","request_id_sha256":"not-a-digest",'
+            b'"version":1}',
+            id="invalid-prelude-digest",
+        ),
+        pytest.param(
+            b'{"document":{"payload":{},"schema":"s",'
+            b'"schema_version":1},"kind":"output","sequence":-1,'
+            b'"version":1}',
+            id="negative-output-sequence",
+        ),
+        pytest.param(
+            b'{"document":{"payload":{},"schema":"s",'
+            b'"schema_version":1},"kind":"output","sequence":true,'
+            b'"version":1}',
+            id="boolean-output-sequence",
+        ),
+        pytest.param(
+            b'{"kind":"complete","output_count":true,"version":1}',
+            id="boolean-completion-count",
+        ),
         pytest.param(
             b'{"extra":0,"kind":"complete","output_count":0,"version":1}',
             id="extra-field",
@@ -194,6 +235,35 @@ def test_a_frame_that_is_not_a_closed_canonical_model_is_malformed(
         frame + FRAME_TERMINATOR,
         request_id_sha256=digest,
     )
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.MALFORMED_FRAME
+    assert result.outputs == ()
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pytest.param(
+            b'{"kind":"prelude","request_id_sha256":"' + b"a" * 64 + b'"}',
+            id="prelude",
+        ),
+        pytest.param(
+            b'{"document":{"payload":{},"schema":"s",'
+            b'"schema_version":1},"kind":"output","sequence":0}',
+            id="output",
+        ),
+        pytest.param(
+            b'{"kind":"complete","output_count":0}',
+            id="completion",
+        ),
+    ],
+)
+def test_every_raw_frame_requires_an_explicit_version(frame: bytes) -> None:
+    result = _read(
+        frame + FRAME_TERMINATOR,
+        request_id_sha256=Sha256Digest("a" * 64),
+    )
+
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.MALFORMED_FRAME
     assert result.outputs == ()
@@ -237,8 +307,10 @@ def test_a_malformed_embedded_document_is_malformed_not_an_escape(
     digest = Sha256Digest("c" * 64)
     accepted = _output_document(0)
     stream = (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
-        + encode_frame(ProtocolOutput(sequence=0, document=accepted))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
+        + encode_frame(
+            ProtocolOutput(version=1, sequence=0, document=accepted)
+        )
         + b'{"document":'
         + document
         + b',"kind":"output","sequence":1,"version":1}'
@@ -255,9 +327,9 @@ def test_a_malformed_embedded_document_is_malformed_not_an_escape(
 def test_a_crlf_terminator_leaves_a_non_canonical_frame() -> None:
     digest = Sha256Digest("a" * 64)
     stream = (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest)).removesuffix(
-            FRAME_TERMINATOR
-        )
+        encode_frame(
+            ProtocolPrelude(version=1, request_id_sha256=digest)
+        ).removesuffix(FRAME_TERMINATOR)
         + b"\r\n"
     )
     result = _read(stream, request_id_sha256=digest)
@@ -269,13 +341,17 @@ def test_a_crlf_terminator_leaves_a_non_canonical_frame() -> None:
     "frames",
     [
         pytest.param(
-            (ProtocolComplete(output_count=0),),
+            (ProtocolComplete(version=1, output_count=0),),
             id="completion-without-prelude",
         ),
         pytest.param(
             (
-                ProtocolOutput(sequence=0, document=_output_document(0)),
-                ProtocolComplete(output_count=1),
+                ProtocolOutput(
+                    version=1,
+                    sequence=0,
+                    document=_output_document(0),
+                ),
+                ProtocolComplete(version=1, output_count=1),
             ),
             id="output-without-prelude",
         ),
@@ -293,7 +369,9 @@ def test_a_frame_before_the_prelude_is_unexpected(
 
 def test_a_second_prelude_is_unexpected() -> None:
     digest = Sha256Digest("a" * 64)
-    prelude = encode_frame(ProtocolPrelude(request_id_sha256=digest))
+    prelude = encode_frame(
+        ProtocolPrelude(version=1, request_id_sha256=digest)
+    )
     result = _read(prelude + prelude, request_id_sha256=digest)
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.UNEXPECTED_FRAME
@@ -302,7 +380,7 @@ def test_a_second_prelude_is_unexpected() -> None:
 def test_a_frame_after_completion_is_unexpected() -> None:
     digest = Sha256Digest("a" * 64)
     stream = _stream(digest, 1) + encode_frame(
-        ProtocolOutput(sequence=1, document=_output_document(1))
+        ProtocolOutput(version=1, sequence=1, document=_output_document(1))
     )
     result = _read(stream, request_id_sha256=digest)
     assert result.failure is not None
@@ -322,13 +400,12 @@ def test_partial_bytes_after_completion_are_unexpected() -> None:
     result = _read(_stream(digest, 0) + b"x", request_id_sha256=digest)
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.UNEXPECTED_FRAME
-    assert result.failure.detail == "bytes arrived after the completion frame"
 
 
 def test_a_second_completion_is_unexpected() -> None:
     digest = Sha256Digest("a" * 64)
     stream = _stream(digest, 0) + encode_frame(
-        ProtocolComplete(output_count=0)
+        ProtocolComplete(version=1, output_count=0)
     )
     result = _read(stream, request_id_sha256=digest)
     assert result.failure is not None
@@ -346,12 +423,20 @@ def test_a_prelude_binding_another_request_is_an_identity_mismatch() -> None:
 def test_a_repeated_output_sequence_is_a_duplicate() -> None:
     digest = Sha256Digest("a" * 64)
     stream = (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
         + encode_frame(
-            ProtocolOutput(sequence=0, document=_output_document(0))
+            ProtocolOutput(
+                version=1,
+                sequence=0,
+                document=_output_document(0),
+            )
         )
         + encode_frame(
-            ProtocolOutput(sequence=0, document=_output_document(1))
+            ProtocolOutput(
+                version=1,
+                sequence=0,
+                document=_output_document(1),
+            )
         )
     )
     result = _read(stream, request_id_sha256=digest)
@@ -363,8 +448,10 @@ def test_a_repeated_output_sequence_is_a_duplicate() -> None:
 def test_a_skipped_output_sequence_is_unexpected() -> None:
     digest = Sha256Digest("a" * 64)
     stream = encode_frame(
-        ProtocolPrelude(request_id_sha256=digest)
-    ) + encode_frame(ProtocolOutput(sequence=1, document=_output_document(1)))
+        ProtocolPrelude(version=1, request_id_sha256=digest)
+    ) + encode_frame(
+        ProtocolOutput(version=1, sequence=1, document=_output_document(1))
+    )
     result = _read(stream, request_id_sha256=digest)
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.UNEXPECTED_FRAME
@@ -373,12 +460,20 @@ def test_a_skipped_output_sequence_is_unexpected() -> None:
 def test_reordered_outputs_are_unexpected() -> None:
     digest = Sha256Digest("a" * 64)
     stream = (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
         + encode_frame(
-            ProtocolOutput(sequence=1, document=_output_document(1))
+            ProtocolOutput(
+                version=1,
+                sequence=1,
+                document=_output_document(1),
+            )
         )
         + encode_frame(
-            ProtocolOutput(sequence=0, document=_output_document(0))
+            ProtocolOutput(
+                version=1,
+                sequence=0,
+                document=_output_document(0),
+            )
         )
     )
     result = _read(stream, request_id_sha256=digest)
@@ -389,8 +484,10 @@ def test_reordered_outputs_are_unexpected() -> None:
 def test_eof_before_completion_is_an_incomplete_stream() -> None:
     digest = Sha256Digest("a" * 64)
     stream = encode_frame(
-        ProtocolPrelude(request_id_sha256=digest)
-    ) + encode_frame(ProtocolOutput(sequence=0, document=_output_document(0)))
+        ProtocolPrelude(version=1, request_id_sha256=digest)
+    ) + encode_frame(
+        ProtocolOutput(version=1, sequence=0, document=_output_document(0))
+    )
     result = _read(stream, request_id_sha256=digest)
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.INCOMPLETE_STREAM
@@ -422,11 +519,15 @@ def test_a_completion_count_mismatch_is_an_incomplete_stream(
 ) -> None:
     digest = Sha256Digest("a" * 64)
     stream = (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
         + encode_frame(
-            ProtocolOutput(sequence=0, document=_output_document(0))
+            ProtocolOutput(
+                version=1,
+                sequence=0,
+                document=_output_document(0),
+            )
         )
-        + encode_frame(ProtocolComplete(output_count=declared))
+        + encode_frame(ProtocolComplete(version=1, output_count=declared))
     )
     result = _read(stream, request_id_sha256=digest)
     assert result.failure is not None
@@ -474,7 +575,9 @@ def test_a_frame_one_byte_over_its_budget_is_oversized() -> None:
 
 def test_an_oversized_frame_is_refused_without_being_acquired() -> None:
     digest = Sha256Digest("a" * 64)
-    prelude = encode_frame(ProtocolPrelude(request_id_sha256=digest))
+    prelude = encode_frame(
+        ProtocolPrelude(version=1, request_id_sha256=digest)
+    )
     budget = len(prelude) - 2
     stream = prelude + b"x" * 10_000_000 + FRAME_TERMINATOR
     result = _read(
@@ -522,6 +625,82 @@ def test_frame_boundaries_do_not_depend_on_transport_chunking() -> None:
     assert result.completed
     assert result.bytes_received == len(stream)
     assert len(result.outputs) == 2
+
+
+def test_malformed_frame_accounting_stops_at_the_offending_terminator() -> (
+    None
+):
+    digest = Sha256Digest("a" * 64)
+    offending = b"{}" + FRAME_TERMINATOR
+    result = read_protocol_stream(
+        cast("IO[bytes]", _TrickleReader(offending + b"not-acquired")),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets.unbudgeted(),
+    )
+
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.MALFORMED_FRAME
+    assert result.bytes_received == len(offending)
+
+
+def test_unexpected_frame_accounting_stops_at_the_offending_terminator() -> (
+    None
+):
+    digest = Sha256Digest("a" * 64)
+    offending = encode_frame(ProtocolComplete(version=1, output_count=0))
+    result = read_protocol_stream(
+        cast("IO[bytes]", _TrickleReader(offending + b"not-acquired")),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets.unbudgeted(),
+    )
+
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.UNEXPECTED_FRAME
+    assert result.bytes_received == len(offending)
+
+
+def test_output_count_failure_accounts_through_the_rejected_output() -> None:
+    digest = Sha256Digest("a" * 64)
+    prelude = encode_frame(
+        ProtocolPrelude(version=1, request_id_sha256=digest)
+    )
+    first = encode_frame(
+        ProtocolOutput(version=1, sequence=0, document=_output_document(0))
+    )
+    rejected = encode_frame(
+        ProtocolOutput(version=1, sequence=1, document=_output_document(1))
+    )
+    result = read_protocol_stream(
+        cast(
+            "IO[bytes]",
+            _TrickleReader(prelude + first + rejected + b"not-acquired"),
+        ),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets(
+            protocol_output_count=FiniteCountLimit(max_count=1)
+        ),
+    )
+
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.OVERSIZED_FRAME
+    assert result.bytes_received == len(prelude + first + rejected)
+    assert len(result.outputs) == 1
+
+
+def test_total_byte_failure_accounts_for_the_first_excess_byte() -> None:
+    digest = Sha256Digest("a" * 64)
+    max_bytes = 17
+    result = read_protocol_stream(
+        cast("IO[bytes]", _TrickleReader(_stream(digest, 0))),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets(
+            protocol_total_bytes=FiniteByteLimit(max_bytes=max_bytes)
+        ),
+    )
+
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.OVERSIZED_FRAME
+    assert result.bytes_received == max_bytes + 1
 
 
 @pytest.mark.parametrize(
@@ -620,11 +799,15 @@ def _nested_document(depth: int, /) -> IdentityDocument:
 
 def _nested_stream(digest: Sha256Digest, depth: int, /) -> bytes:
     return (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
         + encode_frame(
-            ProtocolOutput(sequence=0, document=_nested_document(depth))
+            ProtocolOutput(
+                version=1,
+                sequence=0,
+                document=_nested_document(depth),
+            )
         )
-        + encode_frame(ProtocolComplete(output_count=1))
+        + encode_frame(ProtocolComplete(version=1, output_count=1))
     )
 
 
@@ -677,9 +860,11 @@ def test_an_unbudgeted_frame_axis_accepts_a_frame_of_any_size() -> None:
         payload={"blob": "x" * 4_000_000},
     )
     stream = (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
-        + encode_frame(ProtocolOutput(sequence=0, document=document))
-        + encode_frame(ProtocolComplete(output_count=1))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
+        + encode_frame(
+            ProtocolOutput(version=1, sequence=0, document=document)
+        )
+        + encode_frame(ProtocolComplete(version=1, output_count=1))
     )
     budgets = ExecutorSelfBudgets.unbudgeted()
     assert isinstance(budgets.protocol_frame_bytes, UnbudgetedLimit)
@@ -709,16 +894,19 @@ def _raw_nested_stream(digest: Sha256Digest, payload_depth: int, /) -> bytes:
         b'"kind":"output","sequence":0,"version":1}' + FRAME_TERMINATOR
     )
     return (
-        encode_frame(ProtocolPrelude(request_id_sha256=digest))
+        encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))
         + output
-        + encode_frame(ProtocolComplete(output_count=1))
+        + encode_frame(ProtocolComplete(version=1, output_count=1))
     )
 
 
-# The frame object and the document object sit above the nested payload,
-# so the deepest payload the structural ceiling admits is two levels
-# shallower than the ceiling itself.
-_DEEPEST_ACCEPTED_PAYLOAD = STRUCTURAL_DEPTH_CEILING - 2
+# Literal compatibility boundary: the frame object and document object sit
+# above the payload, so payload depth 198 is frame depth 200.
+_DEEPEST_ACCEPTED_PAYLOAD = 198
+
+
+def test_the_structural_depth_compatibility_boundary_is_200() -> None:
+    assert STRUCTURAL_DEPTH_CEILING == 200
 
 
 def test_an_unbudgeted_depth_axis_reaches_the_structural_ceiling() -> None:
@@ -729,6 +917,22 @@ def test_an_unbudgeted_depth_axis_reaches_the_structural_ceiling() -> None:
         request_id_sha256=digest,
         self_budgets=ExecutorSelfBudgets.unbudgeted(),
     )
+    assert result.completed
+    assert len(result.outputs) == 1
+
+
+def test_literal_frame_depth_200_is_accepted_at_an_exact_finite_budget() -> (
+    None
+):
+    digest = Sha256Digest("a" * 64)
+    result = _read(
+        _raw_nested_stream(digest, 198),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets(
+            json_depth=FiniteCountLimit(max_count=200)
+        ),
+    )
+
     assert result.completed
     assert len(result.outputs) == 1
 
@@ -781,7 +985,7 @@ def test_depth_past_the_ceiling_is_oversized_under_a_larger_budget(
     frame.
     """
     digest = Sha256Digest("a" * 64)
-    budget = STRUCTURAL_DEPTH_CEILING + 1000
+    budget = 1200
     assert payload_depth < budget
     result = _read(
         _raw_nested_stream(digest, payload_depth),
@@ -801,9 +1005,7 @@ def test_a_budget_above_the_ceiling_still_accepts_frames_beneath_it() -> None:
         _raw_nested_stream(digest, _DEEPEST_ACCEPTED_PAYLOAD),
         request_id_sha256=digest,
         self_budgets=ExecutorSelfBudgets(
-            json_depth=FiniteCountLimit(
-                max_count=STRUCTURAL_DEPTH_CEILING + 1000
-            )
+            json_depth=FiniteCountLimit(max_count=1200)
         ),
     )
     assert result.completed

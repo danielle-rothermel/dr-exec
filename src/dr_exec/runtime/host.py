@@ -98,9 +98,12 @@ class IsolatedHostPythonRuntime:
     ) -> PreparedPythonProcess:
         """Prepare the fixed isolated invocation for one Python target.
 
-        The command is always ``<executable> -I -c <wrapper-source>``; the
-        consumer's ``driver_source`` is embedded as data, never composed
-        into argv or interpreted by a shell.
+        The command is always ``<executable> -I -c <wrapper-source>``. That
+        wrapper source is one OS-level argv element and carries the consumer's
+        ``driver_source`` as inert data within the wrapper representation. The
+        payload sees CPython's own ``sys.argv`` with no domain source argument;
+        the wrapper intentionally evaluates the embedded driver, but no shell
+        interprets either source string.
         """
         return PreparedPythonProcess(
             argv=(

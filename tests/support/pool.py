@@ -8,10 +8,9 @@ says the machine was fast enough this once.
 
 So every case here drives a `FakeExecutor` whose responder blocks inside
 the call until the test releases it. That turns "a job is in flight" into
-an event the test sets, and "the scheduler admitted a fourth job" into an
-event the test can wait for or assert has not fired. The scheduler's own
-state never has to be inspected: the observable behavior is exactly the
-gate traffic.
+an event the test sets. Tests that qualify scheduler publication pair these
+responder-side gates with the scheduler's exact ready state; executor return
+and scheduler publication are deliberately not conflated.
 
 Two rules hold throughout, and the helpers exist to make them easy:
 
@@ -58,19 +57,24 @@ class GatedResponder:
     because they arrived, and it decides which finishes first by choosing
     which gate to open.
 
-    Cancellation is honored the way production honors it -- a call whose
-    token is already cancelled returns a cancelled outcome without
-    "running" -- so abort cases observe the same outcome data a real
-    cancelled call would produce.
+    Cancellation-aware instances honor cancellation the way production
+    does -- a call whose token is already cancelled returns a cancelled
+    outcome without "running" -- so abort cases observe the same outcome
+    data a real cancelled call would produce. Release-only instances start
+    no cancellation watcher.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, cancellation_aware: bool = False) -> None:
+        self._cancellation_aware = cancellation_aware
         self._lock = threading.Lock()
         self._arrived: dict[JobId, threading.Event] = {}
         self._release: dict[JobId, threading.Event] = {}
-        self._finished: dict[JobId, threading.Event] = {}
+        self._executor_returned: dict[JobId, threading.Event] = {}
         self._arrival_order: list[JobId] = []
         self._cancelled: list[JobId] = []
+        self._active = 0
+        self._peak_active = 0
+        self._watchers: list[threading.Thread] = []
         self.arrivals = threading.Semaphore(0)
 
     # --- Responder -------------------------------------------------------
@@ -93,32 +97,47 @@ class GatedResponder:
                 return self._cancelled_completion(job.job_id)
             return completion_for(job.job_id)
         finally:
-            self.finished_gate(job.job_id).set()
+            with self._lock:
+                self._active -= 1
+            self.executor_returned_gate(job.job_id).set()
 
     def _hold(
         self, job_id: JobId, cancellation: CancelToken | None, /
     ) -> bool:
         """Wait for release or cancellation; False means cancelled.
 
-        Two signals end the hold and either may arrive first, so a watcher
-        thread blocks on the token's own event and opens the release gate
-        when it fires. The result is one wait on one gate, with no polling
-        and no interval anywhere: whichever signal arrives first ends the
-        hold immediately.
+        Cancellation-aware instances use one watcher that blocks on the
+        token's own event and opens the release gate when it fires. Abort
+        is the intended release for those instances, and the watcher is
+        joined before this call returns. Ordinary gate-driven cases start
+        no watcher. Neither path polls or uses an interval.
 
         `CancelToken` exposes exactly this blocking wait for the engine's
         use, and the fake substrate needs the same primitive to behave
         like a call that observes cancellation promptly.
         """
         gate = self.release_gate(job_id)
-        if cancellation is not None:
-            _watch_token_into(cancellation, gate)
+        watcher: threading.Thread | None = None
+        if self._cancellation_aware and cancellation is not None:
+            if cancellation.cancelled:
+                return False
+            watcher = _watch_token_into(cancellation, gate)
+            with self._lock:
+                self._watchers.append(watcher)
         wait_for(gate, what=f"job {job_id} to be released or cancelled")
+        if watcher is not None:
+            watcher.join(WATCHDOG_SECONDS)
+            if watcher.is_alive():
+                raise AssertionError(
+                    f"watchdog fired joining cancellation watcher for {job_id}"
+                )
         return cancellation is None or not cancellation.cancelled
 
     def _announce(self, job_id: JobId, /) -> None:
         with self._lock:
             self._arrival_order.append(job_id)
+            self._active += 1
+            self._peak_active = max(self._peak_active, self._active)
         self.arrived_gate(job_id).set()
         self.arrivals.release()
 
@@ -145,19 +164,23 @@ class GatedResponder:
         with self._lock:
             return self._release.setdefault(job_id, threading.Event())
 
-    def finished_gate(self, job_id: JobId, /) -> threading.Event:
-        """Set when this job's call has returned to its worker.
+    def executor_returned_gate(self, job_id: JobId, /) -> threading.Event:
+        """Set when this job's executor responder has returned.
 
-        This is the gate that makes "the result is buffered but not
-        delivered" observable: the call is over, so any admission a
-        separate active bound would have allowed has already had its
-        chance to happen.
+        Scheduler publication is a later transition. Tests that need a
+        buffered completion must separately wait for the scheduler's ready
+        queue rather than treating this responder-side gate as publication.
         """
         with self._lock:
-            return self._finished.setdefault(job_id, threading.Event())
+            return self._executor_returned.setdefault(
+                job_id, threading.Event()
+            )
 
-    def await_finish(self, job_id: JobId, /) -> None:
-        wait_for(self.finished_gate(job_id), what=f"job {job_id} to finish")
+    def await_executor_returned(self, job_id: JobId, /) -> None:
+        wait_for(
+            self.executor_returned_gate(job_id),
+            what=f"job {job_id} to return from its executor responder",
+        )
 
     def await_arrival(self, job_id: JobId, /) -> None:
         """Block until this job's call is inside the executor."""
@@ -196,17 +219,42 @@ class GatedResponder:
         with self._lock:
             return tuple(self._cancelled)
 
+    @property
+    def peak_active(self) -> int:
+        """Largest number of responder calls held concurrently."""
+        with self._lock:
+            return self._peak_active
 
-def _watch_token_into(token: CancelToken, gate: threading.Event, /) -> None:
+    def assert_no_watchers(self) -> None:
+        """Assert that every cancellation watcher this responder made exited."""
+        with self._lock:
+            alive = [
+                watcher.name
+                for watcher in self._watchers
+                if watcher.is_alive()
+            ]
+        assert not alive, f"live cancellation watchers remain: {alive}"
+
+
+def _watch_token_into(
+    token: CancelToken, gate: threading.Event, /
+) -> threading.Thread:
     """Open `gate` as soon as `token` is cancelled, on its own thread.
 
     This is what lets one `Event.wait` stand for "released or cancelled".
-    The thread is a daemon and bounded by the same watchdog, so a case
-    that ends without cancelling leaves nothing behind.
+    Cancellation-aware responders use this only in cases where cancellation
+    is the intended release. The responder joins the returned thread before
+    the executor call returns; ordinary release-only cases start no watcher.
     """
 
     def watch() -> None:
         if token._wait(WATCHDOG_SECONDS):
             gate.set()
 
-    threading.Thread(target=watch, daemon=True).start()
+    watcher = threading.Thread(
+        target=watch,
+        name="gated-responder-cancellation-watcher",
+        daemon=True,
+    )
+    watcher.start()
+    return watcher
