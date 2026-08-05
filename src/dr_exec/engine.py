@@ -171,10 +171,6 @@ class _ResolvedTarget:
     wants_protocol: bool
 
 
-class _ExecutionScheduler:
-    """Non-public scheduler implementation placeholder."""
-
-
 def _now() -> datetime:
     return datetime.now(UTC)
 

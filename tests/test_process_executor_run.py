@@ -253,16 +253,3 @@ def test_run_validates_the_declaration_before_anything_durable(
         executor.run(job)
 
     assert list(store.root.iterdir()) == []
-
-
-# --- The PR 3 surface stays stubbed --------------------------------------
-
-
-def test_the_pool_surface_is_not_yet_implemented(
-    executor: ProcessExecutor,
-) -> None:
-    """Half-working scheduling would be worse than an explicit refusal."""
-    with pytest.raises(NotImplementedError):
-        executor.open_pool()
-    with pytest.raises(NotImplementedError):
-        next(executor.run_many([job_for(trusted_target())]))
