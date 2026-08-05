@@ -29,7 +29,7 @@ from uuid import uuid4
 
 import pytest
 from dr_serialize import IdentityDocument, build_identity_document
-from support.process import Gate
+from support.process import Gate, finish_threaded_calls, start_threaded_calls
 
 import dr_exec.execution.engine
 from dr_exec import (
@@ -788,28 +788,83 @@ def test_accepted_outputs_are_recorded_inline_not_as_digests(
 
 @requires_macos
 def test_concurrent_python_calls_keep_their_streams_separate(
-    harness: Harness,
+    harness: Harness, tmp_path: Path
 ) -> None:
-    """One executor, many threads: no stream crosses into another call."""
+    """All Python children overlap without crossing protected fd 3 streams."""
     call_count = 6
-    completions: list[CompletedExecution] = []
-    lock = threading.Lock()
-
-    def run_one(index: int, /) -> None:
-        completed = harness.run(ECHO_DRIVER, count=1, echo=f"call-{index}")
-        with lock:
-            completions.append(completed)
-
-    threads = [
-        threading.Thread(target=run_one, args=(index,))
+    callers_ready = threading.Barrier(call_count + 1)
+    arrivals = tuple(
+        Gate.create(tmp_path, f"python-arrival-{index}")
         for index in range(call_count)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    )
+    releases = tuple(
+        Gate.create(tmp_path, f"python-release-{index}")
+        for index in range(call_count)
+    )
+    driver = f"""
+import os
 
-    assert len(completions) == call_count
-    echoes = {sole_mapping(completed)["echo"] for completed in completions}
-    assert echoes == {f"call-{index}" for index in range(call_count)}
+
+def {DRIVER_ENTRYPOINT_NAME}(request, emit):
+    payload = request["payload"]
+    with open(payload["arrival"], "w") as gate:
+        gate.write(payload["call"])
+    open(payload["release"]).read()
+    {emit_call("{'call': payload['call'], 'cwd': os.getcwd(), 'pid': os.getpid()}")}
+"""
+
+    def run_one(index: int, /) -> CompletedExecution:
+        callers_ready.wait()
+        request = build_identity_document(
+            schema=REQUEST_SCHEMA,
+            schema_version=1,
+            payload={
+                "arrival": str(arrivals[index].path),
+                "call": f"call-{index}",
+                "release": str(releases[index].path),
+            },
+        )
+        return harness.run(
+            driver,
+            request=request,
+            budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+        )
+
+    calls = start_threaded_calls(
+        tuple(
+            lambda index=index: run_one(index) for index in range(call_count)
+        )
+    )
+    try:
+        callers_ready.wait()
+        assert tuple(gate.receive() for gate in arrivals) == tuple(
+            f"call-{index}" for index in range(call_count)
+        )
+    finally:
+        for gate in releases:
+            gate.release()
+        completions = finish_threaded_calls(calls)
+
+    outputs = []
+    for index, completed in enumerate(completions):
+        assert completed.result.outcome == ExitedOutcome(exit_code=0)
+        assert completed.result.attribution.owner is FailureOwner.NONE
+        assert completed.result.payload_outputs.stdout.head == b""
+        assert completed.result.payload_outputs.stderr.head == b""
+        assert completed.result.measurements.protocol_bytes_received > 0
+        payload = sole_mapping(completed)
+        assert payload["call"] == f"call-{index}"
+        outputs.append(payload)
+    assert len({str(output) for output in outputs}) == call_count
+    assert len({output["cwd"] for output in outputs}) == call_count
+    assert len({output["pid"] for output in outputs}) == call_count
     assert len({record_dir_of(c) for c in completions}) == call_count
+    assert (
+        len(
+            {
+                completed.result.execution_id.attempt_id
+                for completed in completions
+            }
+        )
+        == call_count
+    )

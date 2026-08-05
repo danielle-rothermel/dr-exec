@@ -31,7 +31,11 @@ from uuid import uuid4
 
 import pytest
 from dr_serialize import build_identity_document
-from support.process import Gate
+from support.process import (
+    Gate,
+    finish_threaded_calls,
+    start_threaded_calls,
+)
 
 import dr_exec.execution.engine
 import dr_exec.execution.spawn
@@ -67,6 +71,7 @@ from dr_exec import (
     RecordState,
     RunningRecord,
     RunRecord,
+    RunStore,
     SignaledOutcome,
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
@@ -160,7 +165,7 @@ class Harness:
         *,
         self_budgets: ExecutorSelfBudgets | None = None,
         cancellation: CancelToken | None = None,
-        store: DirectoryRunStore | None = None,
+        store: RunStore | None = None,
     ) -> CompletedExecution:
         return run_execution(
             job,
@@ -1338,45 +1343,84 @@ def test_a_spawn_absence_finalizes_directly_from_prepared(
 def test_the_running_manifest_is_published_while_the_child_is_alive(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The `running` state is read from disk mid-run, not inferred after it.
-
-    Two gates order the case exactly: the child announces itself and then
-    blocks, the watcher reads the published manifest while the child is
-    provably still there, and only then releases it. Nothing waits on
-    elapsed time in either direction.
-    """
-    announce = Gate.create(tmp_path, "announce")
+    """Read ``running`` only after its publication returns, with a live child."""
+    arrived = Gate.create(tmp_path, "arrived")
     release = Gate.create(tmp_path, "release")
-    observed: list[RunRecord] = []
+    marked_running = threading.Event()
+    observing_store = _MarkRunningObservedStore(
+        delegate=harness.store,
+        marked_running=marked_running,
+    )
+    (call,) = start_threaded_calls(
+        (
+            lambda: harness.execute(
+                ExecutionJob(
+                    job_id=JobId(uuid4()),
+                    target=TrustedCommandTarget(
+                        argv=python_command(
+                            "import os, sys\n"
+                            f"with open({str(arrived.path)!r}, 'w') as gate:\n"
+                            "    gate.write(str(os.getpid()))\n"
+                            f"open({str(release.path)!r}).read()\n"
+                            "sys.stdout.write(str(os.getpid()))\n"
+                        )
+                    ),
+                    env=EnvGrant.none(),
+                    budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+                ),
+                store=observing_store,
+            ),
+        )
+    )
 
-    def observe_then_release() -> None:
-        announce.receive()
+    try:
+        child_pid = int(arrived.receive())
+        assert marked_running.wait(timeout=5), (
+            "mark_running publication watchdog fired"
+        )
         (record_dir,) = sorted(harness.root.iterdir())
-        observed.append(harness.store.load(record_dir))
+        record = observing_store.load(record_dir)
+    finally:
         release.release()
-
-    watcher = threading.Thread(target=observe_then_release, daemon=True)
-    watcher.start()
-    completed = harness.run(
-        python_command(
-            "import os, sys\n"
-            f"gate = open({str(announce.path)!r}, 'w')\n"
-            "gate.write(str(os.getpid()))\n"
-            "gate.close()\n"
-            "sys.stdout.write(str(os.getpid()))\n"
-            "sys.stdout.flush()\n"
-            f"open({str(release.path)!r}).read()\n"
-        ),
-        budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
-    )
-    watcher.join()
-
-    (record,) = observed
+        (completed,) = finish_threaded_calls((call,))
     assert isinstance(record, RunningRecord)
-    assert record.process.pid == int(
-        completed.result.payload_outputs.stdout.head.decode()
-    )
+    assert record.process.pid == child_pid
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
+    assert (
+        completed.result.payload_outputs.stdout.head == str(child_pid).encode()
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkRunningObservedStore:
+    """Delegate storage and signal only after ``mark_running`` returns."""
+
+    delegate: DirectoryRunStore
+    marked_running: threading.Event
+
+    def prepare(self, record: PreparedRecord, /) -> PreparedRun:
+        return self.delegate.prepare(record)
+
+    def mark_running(
+        self,
+        prepared_run: PreparedRun,
+        process: ProcessRecord,
+        /,
+    ) -> RunningRun:
+        running_run = self.delegate.mark_running(prepared_run, process)
+        self.marked_running.set()
+        return running_run
+
+    def finalize(
+        self,
+        run: FinalizableRun,
+        result: ExecutionResult,
+        /,
+    ) -> RealRecordReceipt:
+        return self.delegate.finalize(run, result)
+
+    def load(self, record_dir: Path, /) -> RunRecord:
+        return self.delegate.load(record_dir)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1670,32 +1714,54 @@ def test_measurements_describe_the_attempt_the_engine_observed(
 
 @requires_macos
 def test_concurrent_calls_keep_their_attempts_fully_separate(
-    harness: Harness,
+    harness: Harness, tmp_path: Path
 ) -> None:
-    """One store, many threads: distinct records, scratch, and outputs."""
+    """All children overlap while records, scratch, and outputs stay distinct."""
     call_count = 8
-    completions: list[CompletedExecution] = []
-    lock = threading.Lock()
-
-    def run_one(index: int, /) -> None:
-        completed = harness.run(
-            python_command(
-                f"import os, sys\nsys.stdout.write('{index}:' + os.getcwd())\n"
-            )
-        )
-        with lock:
-            completions.append(completed)
-
-    threads = [
-        threading.Thread(target=run_one, args=(index,))
+    callers_ready = threading.Barrier(call_count + 1)
+    arrivals = tuple(
+        Gate.create(tmp_path, f"arrival-{index}")
         for index in range(call_count)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    )
+    releases = tuple(
+        Gate.create(tmp_path, f"release-{index}")
+        for index in range(call_count)
+    )
 
-    assert len(completions) == call_count
+    def run_one(index: int, /) -> CompletedExecution:
+        callers_ready.wait()
+        return harness.run(
+            python_command(
+                "import os, sys\n"
+                f"with open({str(arrivals[index].path)!r}, 'w') as gate:\n"
+                f"    gate.write('command-{index}')\n"
+                f"open({str(releases[index].path)!r}).read()\n"
+                f"sys.stdout.write('command-{index}:' + os.getcwd())\n"
+            ),
+            budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+        )
+
+    calls = start_threaded_calls(
+        tuple(
+            lambda index=index: run_one(index) for index in range(call_count)
+        )
+    )
+    try:
+        callers_ready.wait()
+        assert tuple(gate.receive() for gate in arrivals) == tuple(
+            f"command-{index}" for index in range(call_count)
+        )
+    finally:
+        for gate in releases:
+            gate.release()
+        completions = finish_threaded_calls(calls)
+
+    for index, completed in enumerate(completions):
+        assert completed.result.outcome == ExitedOutcome(exit_code=0)
+        assert completed.result.attribution.owner is FailureOwner.NONE
+        assert completed.result.payload_outputs.stdout.head.startswith(
+            f"command-{index}:".encode()
+        )
     outputs = {
         completed.result.payload_outputs.stdout.head
         for completed in completions
