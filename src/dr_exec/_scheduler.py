@@ -262,13 +262,23 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             )
 
     def shutdown(self) -> None:
-        """Release worker threads and drop undelivered state.
+        """Release worker threads and drop any undelivered state.
 
         Called once the owning surface is finished with the scheduler.
         Workers exit when intake is closed and nothing is left to run, so
         this joins rather than interrupts: a worker inside `Executor.run`
         is completing teardown, and abandoning it would be exactly the
         orphaned child the lifecycle claim exists to prevent.
+
+        Completions still buffered at this point are dropped, and that is
+        a real limit worth stating rather than a detail. Closing means the
+        surface has stopped delivering: a drained stream has already
+        delivered everything, but an aborted one may have finished calls
+        whose results no consumer will ever read. Those runs are not
+        lost -- each finished its own record before its worker returned --
+        but their in-memory completions do not survive the close, so a
+        consumer that needs every result closes by draining, not by
+        aborting.
         """
         with self._condition:
             self._intake_closed = True

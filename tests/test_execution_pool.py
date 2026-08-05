@@ -527,36 +527,77 @@ def test_abort_cancels_admitted_work_no_worker_has_started() -> None:
     assert second.job_id not in responder.started
 
 
-def test_a_cancelled_call_reaches_the_consumer_as_completion_data() -> None:
-    """Cancellation is an outcome, not a lost submission.
+def test_a_cancelled_call_is_delivered_as_completion_data() -> None:
+    """Cancellation is an outcome the consumer receives, not a lost job.
 
-    Abort cancels the in-flight call while the consumer is still reading,
-    and what the consumer receives is a completion carrying a cancelled
-    outcome -- one delivery per admitted submission, as for any other
-    outcome.
+    A call that returns a cancelled outcome is a completion like any
+    other, and the scheduler delivers it as one. The stream is consumed to
+    exhaustion, so nothing about the delivery depends on how the pool is
+    later closed.
+    """
+    batch = jobs(2)
+    cancelled_job, plain_job = batch
+
+    def respond(
+        job: ExecutionJob, _token: CancelToken | None, /
+    ) -> CompletedExecution:
+        completed = completion_for(job.job_id)
+        if job.job_id != cancelled_job.job_id:
+            return completed
+        return CompletedExecution(
+            result=completed.result.model_copy(
+                update={"outcome": CancelledOutcome()}
+            ),
+            record_receipt=completed.record_receipt,
+        )
+
+    pool = fixed_pool(FakeExecutor(responder=respond), 2)
+    collected: list[CompletedExecution] = []
+
+    async def drain_all() -> None:
+        async with pool:
+            async for completion in pool.run_stream(submissions_of(batch)):
+                collected.append(completion.completed_execution)
+
+    asyncio.run(drain_all())
+
+    outcomes = {
+        one.result.execution_id.job_id: one.result.outcome for one in collected
+    }
+    assert outcomes[cancelled_job.job_id] == CancelledOutcome()
+    assert outcomes[plain_job.job_id] != CancelledOutcome()
+
+
+def test_abort_does_not_promise_delivery_of_what_it_tore_down() -> None:
+    """Closing stops delivery; the durable half is what survives.
+
+    Abort exists to stop work and await teardown, not to flush results,
+    so a completion finished during an abort may never reach a consumer
+    that is no longer reading. What is guaranteed is the part that
+    matters: the call ran to its own end -- with a cancelled outcome and,
+    in production, its record -- before the pool closed. A consumer that
+    needs every result drains instead of aborting, which
+    `test_drain_to_empty_delivers_every_admitted_submission` pins.
     """
     executor, responder = gated_executor()
     batch = jobs(1)
     only = batch[0]
     pool = fixed_pool(executor, 1)
-    collected: list[CompletedExecution] = []
 
-    async def abort_while_reading() -> None:
-        stream = pool.run_stream(submissions_of(batch))
-
-        async def read() -> None:
-            async for completion in stream:
-                collected.append(completion.completed_execution)
-
+    async def abort_mid_flight() -> None:
         async with pool:
-            reader = asyncio.create_task(read())
+            reader = asyncio.create_task(
+                consume(pool.run_stream(submissions_of(batch)))
+            )
             await asyncio.to_thread(responder.await_arrival, only.job_id)
             await pool.abort()
-            await asyncio.wait_for(reader, WATCHDOG_SECONDS)
+            reader.cancel()
 
-    asyncio.run(abort_while_reading())
+    asyncio.run(abort_mid_flight())
 
-    assert [one.result.outcome for one in collected] == [CancelledOutcome()]
+    assert only.job_id in responder.cancelled
+    assert responder.finished_gate(only.job_id).is_set()
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_drain_lets_admitted_work_finish_uncancelled() -> None:
