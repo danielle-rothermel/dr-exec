@@ -4,7 +4,7 @@ Contract-driven local process execution.
 
 ## Status
 
-The package defines the canonical v1 API and implements its substrates:
+The complete v1 surface is implemented:
 
 - identity and serialization — canonical secret-safe projections, the strict
   bounded read path, and role-specific versioned identities;
@@ -14,10 +14,23 @@ The package defines the canonical v1 API and implements its substrates:
   prelude/output/completion state machine, and finite executor self-budgets;
 - durable recording — `DirectoryRunStore` over the pinned Document
   Directory, with typed lifecycle handles, receipts, and strict load
-  validation.
+  validation;
+- the single-run engine behind `ProcessExecutor.run` — spawn through
+  teardown for trusted-command, untrusted-command, and untrusted-Python
+  targets, with budget enforcement, best-effort attribution, and the
+  mandatory record lifecycle;
+- `FakeExecutor`, which enforces the same declaration rules and carries an
+  explicit fake receipt, plus the shared behavioral conformance suite both
+  executors pass;
+- the bounded execution pool — one scheduler core behind
+  `ProcessExecutor.run_many`, `ProcessExecutor.open_pool`, and
+  `ExecutionPool.run_stream`, with one shared resident bound over running
+  and completed-but-undelivered submissions, completion-order delivery,
+  backpressure on intake, cancellation, drain, and abort.
 
-The engine remains intentionally unimplemented: `ProcessExecutor.run`,
-`run_many`, and `open_pool`; `ExecutionPool` scheduling; and `FakeExecutor`.
+Execution runs on macOS; the engine refuses other platforms at the
+declaration boundary, and the tests that need real process semantics are
+marked accordingly.
 
 - Exact public API: [`src/dr_exec/__init__.py`](src/dr_exec/__init__.py)
 - Stable capability boundaries:

@@ -10,7 +10,7 @@ drain are the scheduler's, once.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator
 from dataclasses import dataclass, field
 
 from dr_exec._scheduler import _ExecutionScheduler
@@ -108,7 +108,7 @@ def _run_batch(
     /,
     *,
     capacity: int,
-) -> Iterator[CompletedExecution]:
+) -> Generator[CompletedExecution]:
     """Drive the scheduler core synchronously over a finite iterable.
 
     This is the same loop `ExecutionPool.run_stream` runs, with the async
@@ -118,10 +118,12 @@ def _run_batch(
     admission, ordering, and backpressure are the scheduler's, so the two
     surfaces cannot drift apart.
 
-    The `finally` is load-bearing. A caller who stops consuming leaves
-    admitted calls in flight, and closing the generator must still let
-    them finish their own teardown before the scheduler's workers are
-    released.
+    Being a generator is part of the contract, not an implementation
+    detail: the `finally` is where a caller who stops consuming still gets
+    a drain. Closing the generator -- explicitly or by dropping it -- runs
+    that cleanup, so admitted calls finish their own teardown before the
+    scheduler's workers are released, and no executor call is ever left
+    running behind the batch's back.
     """
     scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
         executor=executor, capacity=capacity

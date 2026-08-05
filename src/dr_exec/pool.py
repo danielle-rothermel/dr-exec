@@ -36,7 +36,11 @@ from typing import Generic, TypeVar, cast
 from pydantic import PositiveInt
 
 from dr_exec._model import ContractModel
-from dr_exec._scheduler import _ExecutionScheduler, usable_cpu_count
+from dr_exec._scheduler import (
+    SchedulerBroken,
+    _ExecutionScheduler,
+    usable_cpu_count,
+)
 from dr_exec.declare import ExecutionJob
 from dr_exec.errors import ExecutorFailure
 from dr_exec.kinds import (
@@ -255,8 +259,14 @@ class ExecutionPool:
                     completed_execution=completion.completed_execution,
                     context=cast("ContextT", completion.context),
                 )
-        except BaseException:
-            self._state = ExecutionPoolState.BROKEN
+        except SchedulerBroken:
+            # Only a scheduler-wide failure breaks the pool. A consumer
+            # that stops iterating, a cancelled task, or a source that
+            # raises all end this stream without saying anything about
+            # whether the scheduler can still produce trustworthy
+            # completions -- and a pool already closed stays closed.
+            if self._state is ExecutionPoolState.RUNNING:
+                self._state = ExecutionPoolState.BROKEN
             raise
 
     async def drain(self) -> None:

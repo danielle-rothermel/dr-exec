@@ -6,9 +6,9 @@ validation, prepare, spawn, outcome, and a finalized record plus receipt,
 returning one ``CompletedExecution`` for a trusted command, an untrusted
 command, and an untrusted Python target against a real directory store.
 
-The PR 3 surface -- ``run_many``, ``open_pool``, and the pool scheduler --
-stays stubbed, and one case pins that it still raises rather than
-half-working.
+Scheduling is not in scope here: ``run_many`` and ``open_pool`` are the
+same executor under the pool's scheduler core, qualified in
+``test_execution_pool.py`` and ``test_pool_real_engine.py``.
 
 Synchronization is on terminal outcomes and committed store state; every
 case carries a watchdog so a hung child cannot hang the suite.
