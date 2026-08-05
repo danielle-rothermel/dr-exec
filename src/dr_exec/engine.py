@@ -155,11 +155,6 @@ _DRAIN_CHUNK_BYTES: Final = 65536
 # promise, and no elapsed time here is ever evidence about the child.
 _REAP_POLL_SECONDS: Final = 0.05
 
-# The watchdog on joining a released pump before its descriptors are
-# closed. It bounds cleanup, never proves anything: the join budget is
-# what decides whether a result is trustworthy.
-_TRANSPORT_CLOSE_WATCHDOG_SECONDS: Final = 5.0
-
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedTarget:
@@ -541,6 +536,11 @@ class _AttemptObservation:
     ``state`` is what separates the two completions. It exists exactly
     when the payload was reached, so a ``None`` here means the attempt
     stopped at a setup failure that ``setup_failure`` names.
+
+    ``recording_failures`` carries the post-start publications that did
+    not land. An attempt continues through those, so they would otherwise
+    be invisible: they are what makes the caller's receipt degraded even
+    when the finalize that follows succeeds.
     """
 
     prepared: PreparedRun
@@ -549,6 +549,7 @@ class _AttemptObservation:
     state: _DrainState | None = None
     stop: _StopReason | None = None
     running: FinalizableRun | None = None
+    recording_failures: tuple[RecordingFailure, ...] = ()
 
     def reached_payload(self) -> _DrainState | None:
         """The drain state of an attempt whose payload actually ran."""
@@ -574,10 +575,11 @@ def _await_child(
 
     ``None`` means the child exited on its own. Otherwise the returned
     reason names what the engine acted on; the caller performs the
-    teardown. Waiting is bounded by the wall-time deadline when one is
-    declared and otherwise polls on a fixed watchdog cadence -- an
-    unbudgeted time axis makes no bounded-return promise, and elapsed
-    time is never treated as evidence about the child.
+    teardown. Each wait lasts one watchdog poll, shortened to what remains
+    of the wall-time deadline when one is declared, so a declared budget
+    is acted on at the deadline rather than a poll late -- an unbudgeted
+    time axis makes no bounded-return promise, and elapsed time is never
+    treated as evidence about the child.
     """
     while True:
         if process.poll() is not None:
@@ -586,10 +588,14 @@ def _await_child(
             return _StopReason(axis=BudgetAxis.PAYLOAD_OUTPUT, cancelled=False)
         if cancellation is not None and cancellation.cancelled:
             return _StopReason(axis=None, cancelled=True)
-        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
-            return _StopReason(axis=BudgetAxis.WALL_TIME, cancelled=False)
+        timeout = _REAP_POLL_SECONDS
+        if deadline_ns is not None:
+            remaining_ns = deadline_ns - time.monotonic_ns()
+            if remaining_ns <= 0:
+                return _StopReason(axis=BudgetAxis.WALL_TIME, cancelled=False)
+            timeout = min(timeout, remaining_ns / 1e9)
         with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=_REAP_POLL_SECONDS)
+            process.wait(timeout=timeout)
 
 
 def _tear_down(
@@ -759,13 +765,17 @@ class _Transports:
     def join(self, self_budgets: ExecutorSelfBudgets, /) -> None:
         """Join the transport threads, or refuse to invent a result.
 
+        This only waits and raises: releasing the pump and closing the
+        parent ends belong to ``close``, which ``_run_spawned``'s
+        ``finally: transports.close()`` runs on every exit path, this
+        raise included.
+
         After group teardown the inherited pipes should reach EOF. If a
         finite join budget expires first, output and measurements are no
-        longer trustworthy: the pump is released, the parent ends are
-        closed, and the call raises rather than reporting numbers it
-        cannot stand behind. With no declared join budget there is no
-        deadline, so an escaped descriptor holder can hold the call --
-        which is exactly what an unbudgeted join axis promises.
+        longer trustworthy, so the call raises rather than reporting
+        numbers it cannot stand behind. With no declared join budget there
+        is no deadline, so an escaped descriptor holder can hold the call
+        -- which is exactly what an unbudgeted join axis promises.
         """
         join_ns = _finite_ns(self_budgets.join_time)
         deadline = None if join_ns is None else time.monotonic_ns() + join_ns
@@ -782,9 +792,18 @@ class _Transports:
             )
 
     def close(self) -> None:
+        """Release the pump, wait for its threads, then free every end.
+
+        The wait carries no deadline of its own: ``join_time`` is the one
+        axis that decides how long transports may hold the call, and a
+        second finite limit here would be one no declaration can spell.
+        Waiting is what makes the closes below safe -- a thread still
+        reading a descriptor this frame closed would be reading one the
+        kernel may have already handed to something else.
+        """
         self.release()
         for thread in self.threads:
-            thread.join(_TRANSPORT_CLOSE_WATCHDOG_SECONDS)
+            thread.join()
         _close_descriptors(
             descriptor
             for descriptor in (
@@ -911,6 +930,8 @@ def _degraded_from(
     store: RunStore,
     result: ExecutionResult,
     /,
+    *,
+    prior_failures: tuple[RecordingFailure, ...] = (),
 ) -> RealRecordReceipt:
     """Finalize, absorbing a machinery failure into a degraded receipt.
 
@@ -919,16 +940,38 @@ def _degraded_from(
     finalization raises at all still must not replace the execution
     outcome, so the raise becomes degradation rather than the call's
     result.
+
+    ``prior_failures`` are the post-start publications that already
+    degraded before this finalize. They are carried into the receipt
+    whether or not the finalize itself succeeds, because a record that
+    reached ``finalized`` by way of a publication that never landed is
+    still a degraded record, and the caller can only know that from here.
     """
     try:
-        return store.finalize(run, result)
+        receipt = store.finalize(run, result)
     except ExecutorFailure:
-        return _degraded_receipt(run, "finalize")
+        return _degraded_receipt(run, "finalize", prior_failures)
+    if not prior_failures:
+        return receipt
+    return DegradedRecordReceipt(
+        execution_id=receipt.execution_id,
+        record_dir=receipt.record_dir,
+        latest_state=receipt.latest_state,
+        failures=(
+            *prior_failures,
+            *(
+                receipt.failures
+                if isinstance(receipt, DegradedRecordReceipt)
+                else ()
+            ),
+        ),
+    )
 
 
 def _degraded_receipt(
     run: FinalizableRun,
     operation: str,
+    prior_failures: tuple[RecordingFailure, ...] = (),
     /,
 ) -> RealRecordReceipt:
     """Name the latest state the handle proves, without touching disk.
@@ -944,6 +987,7 @@ def _degraded_receipt(
         if isinstance(run, PreparedRun)
         else RecordState.RUNNING,
         failures=(
+            *prior_failures,
             RecordingFailure(
                 operation=operation,
                 errno=None,
@@ -1188,7 +1232,9 @@ class _EngineCall:
         the payload has not been reached, so nothing downstream can
         confuse a setup failure with a payload that exited immediately.
         A setup failure still tears down and reaps -- the helper is a
-        real child either way.
+        real child either way -- and joins the transports through the
+        declared ``join_time`` before it completes, so that axis is the
+        only thing that ever bounds a transport wait.
         """
         observation = _AttemptObservation(prepared=prepared)
         try:
@@ -1208,6 +1254,7 @@ class _EngineCall:
                 self.self_budgets,
                 leads_group=observation.leads_group,
             )
+        transports.join(self.self_budgets)
         setup_failure = observation.setup_failure
         if setup_failure is not None:
             return self._complete(
@@ -1221,7 +1268,6 @@ class _EngineCall:
                 input_bytes=0,
                 protocol_bytes_received=0,
             )
-        transports.join(self.self_budgets)
         state = observation.reached_payload()
         if state is None:  # pragma: no cover - a raise already left the call
             raise ExecutorFailure("the attempt produced no drain state")
@@ -1240,6 +1286,7 @@ class _EngineCall:
             protocol_bytes_received=(
                 0 if protocol is None else protocol.bytes_received
             ),
+            recording_failures=observation.recording_failures,
         )
 
     def _observe_attempt(
@@ -1287,9 +1334,7 @@ class _EngineCall:
         # in the kernel and charges that stall to the payload's wall-clock
         # budget. ``mark_running`` in particular is a durable publish.
         self._start_transports(target, transports, state)
-        observation.running = self._mark_running(
-            observation.prepared, process, started_at
-        )
+        self._mark_running(observation, process, started_at)
         observation.stop = _await_child(
             process,
             state,
@@ -1300,24 +1345,34 @@ class _EngineCall:
 
     def _mark_running(
         self,
-        prepared: PreparedRun,
+        observation: _AttemptObservation,
         process: subprocess.Popen[bytes],
         started_at: datetime,
         /,
-    ) -> FinalizableRun:
+    ) -> None:
         """Publish the ``running`` manifest, degrading rather than failing.
 
         This is a post-start publication: its failure is recording
         degradation, so the attempt continues from the prepared handle,
-        which remains the latest valid state on disk.
+        which remains the latest valid state on disk. Continuing is not
+        forgetting -- the failure is accumulated on the observation so the
+        caller's receipt names it, because a degradation the caller cannot
+        read is one that did not happen as far as the caller knows.
         """
         try:
-            return self.run_store.mark_running(
-                prepared,
+            observation.running = self.run_store.mark_running(
+                observation.prepared,
                 ProcessRecord(pid=process.pid, started_at=started_at),
             )
-        except ExecutorFailure:
-            return prepared
+        except ExecutorFailure as error:
+            observation.recording_failures = (
+                *observation.recording_failures,
+                RecordingFailure(
+                    operation="mark_running",
+                    errno=None,
+                    detail=type(error).__name__,
+                ),
+            )
 
     def _start_transports(
         self,
@@ -1453,11 +1508,14 @@ class _EngineCall:
         teardown_duration_ns: int,
         input_bytes: int,
         protocol_bytes_received: int,
+        recording_failures: tuple[RecordingFailure, ...] = (),
     ) -> CompletedExecution:
         """Assemble the result and finalize the record exactly once.
 
         Duration spans the spawn through the reap on the monotonic clock,
-        with parent setup excluded and teardown measured separately.
+        with parent setup excluded and teardown measured separately. Any
+        post-start recording degradation the attempt already absorbed is
+        carried into the receipt alongside whatever the finalize reports.
         """
         result = ExecutionResult(
             execution_id=run.execution_id,
@@ -1476,7 +1534,12 @@ class _EngineCall:
         )
         return CompletedExecution(
             result=result,
-            record_receipt=_degraded_from(run, self.run_store, result),
+            record_receipt=_degraded_from(
+                run,
+                self.run_store,
+                result,
+                prior_failures=recording_failures,
+            ),
         )
 
 

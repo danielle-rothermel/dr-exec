@@ -1483,10 +1483,16 @@ class _UnmarkableStore(DirectoryRunStore):
 
 
 @requires_macos
-def test_a_failed_running_publication_leaves_prepared_as_the_latest_state(
+def test_a_failed_running_publication_degrades_the_receipt_by_name(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Post-start degradation, so the attempt continues and finalizes."""
+    """Post-start degradation, so the attempt continues and finalizes.
+
+    The finalize that follows succeeds, so the record on disk reaches
+    ``finalized`` -- but the caller is still told the ``running``
+    publication never landed, by name, rather than being handed a
+    complete receipt that hides it.
+    """
     root = tmp_path / "unmarkable"
     root.mkdir()
     store = _UnmarkableStore(root=root)
@@ -1504,6 +1510,11 @@ def test_a_failed_running_publication_leaves_prepared_as_the_latest_state(
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
     (record_dir,) = sorted(root.iterdir())
     assert store.load(record_dir).state is RecordState.FINALIZED
+    receipt = degraded_receipt_of(completed)
+    assert [failure.operation for failure in receipt.failures] == [
+        "mark_running"
+    ]
+    assert receipt.latest_state is RecordState.FINALIZED
 
 
 class _UnpreparableStore(DirectoryRunStore):
