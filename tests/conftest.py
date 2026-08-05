@@ -16,6 +16,8 @@ from dr_exec import (
     JobId,
 )
 
+pytest_plugins = ("support.process",)
+
 TEST_REQUEST_SCHEMA = "dr_exec.test_request"
 JOB_UUID = UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70")
 ATTEMPT_UUID = UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f71")

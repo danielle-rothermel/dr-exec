@@ -915,13 +915,14 @@ def _raw_nested_stream(digest: Sha256Digest, payload_depth: int, /) -> bytes:
     )
 
 
-# Literal compatibility boundary: the frame object and document object sit
-# above the payload, so payload depth 98 is frame depth 100.
-_DEEPEST_ACCEPTED_PAYLOAD = 98
+# The frame object and the document object sit above the nested payload,
+# so the deepest payload the structural ceiling admits is two levels
+# shallower than the ceiling itself.
+_DEEPEST_ACCEPTED_PAYLOAD = STRUCTURAL_DEPTH_CEILING - 2
 
 
-def test_the_structural_depth_compatibility_boundary_is_100() -> None:
-    assert STRUCTURAL_DEPTH_CEILING == 100
+def test_the_structural_depth_compatibility_boundary_is_200() -> None:
+    assert STRUCTURAL_DEPTH_CEILING == 200
 
 
 def test_an_unbudgeted_depth_axis_reaches_the_structural_ceiling() -> None:
@@ -936,15 +937,15 @@ def test_an_unbudgeted_depth_axis_reaches_the_structural_ceiling() -> None:
     assert len(result.outputs) == 1
 
 
-def test_literal_frame_depth_100_is_accepted_at_an_exact_finite_budget() -> (
+def test_literal_frame_depth_200_is_accepted_at_an_exact_finite_budget() -> (
     None
 ):
     digest = Sha256Digest("a" * 64)
     result = _read(
-        _raw_nested_stream(digest, 98),
+        _raw_nested_stream(digest, 198),
         request_id_sha256=digest,
         self_budgets=ExecutorSelfBudgets(
-            json_depth=FiniteCountLimit(max_count=100)
+            json_depth=FiniteCountLimit(max_count=200)
         ),
     )
 

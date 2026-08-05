@@ -33,7 +33,7 @@ Implement:
 - isolated-host interpreter probe with runtime `prepare()` and `describe()`;
 - nominal SHA-256 usage at every digest boundary;
 - `DirectoryRunStore` per the design's durable recording sections, composed
-  over the pinned `dr_store.docdir` Document Directory (`prefix="run"`,
+  over the pinned `dr_store.DocumentDirectory` (`prefix="run"`,
   `manifest_name="record.json"`): dr-exec owns the manifest model, typed
   lifecycle handles, secret-safe projection, complete and degraded
   receipts, and strict load validation wrapping the primitive's typed

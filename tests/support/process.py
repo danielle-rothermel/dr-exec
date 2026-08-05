@@ -23,7 +23,7 @@ _PID_EXIT_WATCHDOG_SECONDS = 5.0
 _PID_POLL_SECONDS = 0.01
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def process_watchdog() -> Iterator[object]:
     """Fail a hung process case without treating time as success evidence."""
     timer = threading.Timer(

@@ -496,7 +496,7 @@ framing, configured-limit, identity, duplicate-key, and incomplete-stream case.
 ```
 
 - One collision-free directory per run, realized by the pinned
-  `dr_store.docdir` Document Directory with `prefix="run"` and
+  public `dr_store.DocumentDirectory` with `prefix="run"` and
   `manifest_name="record.json"`.
 - `record.json`: versioned canonical JSON manifest.
 - Sidecars: retained payload evidence; recording representation only.
@@ -591,7 +591,7 @@ Excludes:
   - failure is observability degradation, not payload failure.
 - Canonicalization: pinned shared path. dr-exec owns the manifest model,
   safe projection, lifecycle validation, and receipt semantics; the pinned
-  `dr_store.docdir` primitive owns allocation, atomic durable publish,
+  `dr_store.DocumentDirectory` owns allocation, atomic durable publish,
   sidecar streaming/truncation/digests, and verified byte-level reads.
 - Load boundary: malformed bytes, invalid lifecycle models, unsafe paths, and
   sidecar length/digest mismatches raise `RecordLoadError`; the original shared

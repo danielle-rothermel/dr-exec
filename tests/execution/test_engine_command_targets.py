@@ -103,6 +103,7 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.subprocess,
     pytest.mark.platform_macos,
+    pytest.mark.usefixtures("process_watchdog"),
 ]
 
 # Watchdog only. It bounds a case that would otherwise hang the suite; no
@@ -1594,29 +1595,18 @@ def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
     manifest before starting the transports, the child would be stalled for
     the whole publish and charged for it against its own wall-clock budget.
 
-    The two gates pin the ordering with no timing at all: the publish waits
-    on `proceed`, and `proceed` is released only after the child announces
-    on `written`, which it can only reach once the full oversized write has
-    completed. Under the wrong order the two waits are a deadlock the
-    case's watchdog reports; under the right order the child streams
+    The gate pins the ordering with no timing at all: the publish waits on
+    `written`, which the child opens only after the full oversized write has
+    completed. Under the wrong order the two processes deadlock and the
+    case's watchdog reports it; under the right order the child streams
     through and exits cleanly with every byte retained.
     """
     produced_bytes = 200_000
     assert produced_bytes > 64 * 1024
     root = tmp_path / "gated"
     root.mkdir()
-    proceed = Gate.create(tmp_path, "proceed")
     written = Gate.create(tmp_path, "written")
-    store = _GatedMarkingStore(root=root, gate=proceed)
-
-    def release_after_the_oversized_write() -> None:
-        written.receive()
-        proceed.release()
-
-    watcher = threading.Thread(
-        target=release_after_the_oversized_write, daemon=True
-    )
-    watcher.start()
+    store = _GatedMarkingStore(root=root, gate=written)
     completed = Harness(
         store=store,
         root=root,
@@ -1636,8 +1626,6 @@ def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
             budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
         ),
     )
-    watcher.join()
-
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
     assert completed.result.attribution.owner is FailureOwner.NONE
     stdout = completed.result.payload_outputs.stdout
@@ -1662,16 +1650,8 @@ def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
     stdin_bytes = b"y" * 200_000
     root = tmp_path / "gated-stdin"
     root.mkdir()
-    proceed = Gate.create(tmp_path, "proceed")
     echoed = Gate.create(tmp_path, "echoed")
-    store = _GatedMarkingStore(root=root, gate=proceed)
-
-    def release_after_the_full_read() -> None:
-        echoed.receive()
-        proceed.release()
-
-    watcher = threading.Thread(target=release_after_the_full_read, daemon=True)
-    watcher.start()
+    store = _GatedMarkingStore(root=root, gate=echoed)
     completed = Harness(
         store=store,
         root=root,
@@ -1692,8 +1672,6 @@ def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
             budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
         ),
     )
-    watcher.join()
-
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
     assert completed.result.payload_outputs.stdout.head == (
         str(len(stdin_bytes)).encode()

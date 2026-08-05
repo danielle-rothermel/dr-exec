@@ -77,6 +77,7 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.subprocess,
     pytest.mark.platform_macos,
+    pytest.mark.usefixtures("process_watchdog"),
 ]
 
 # Watchdog only. It bounds a case that would otherwise hang the suite; no
