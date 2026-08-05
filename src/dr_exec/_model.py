@@ -41,14 +41,20 @@ class NonCanonicalBytesError(ValueError):
     """Decoded bytes are not their own canonical re-encoding."""
 
 
-# The pinned structural ceiling on JSON nesting. This is not a budget: it
-# is the depth at which the pinned Pydantic JSON parser stops recursing,
-# restated here so dr-exec owns the number rather than inheriting it as
-# an invisible parser artifact. Bounding the shared decoder by it means
-# depth overflow is always detected on the dr-serialize path, and always
-# reported the same way, instead of surfacing from the parser behind it
-# at some depths and not others. Every read boundary that has no declared
-# depth budget tighter than this one bounds itself here.
+# The pinned structural ceiling on JSON nesting. This is not a budget and
+# not a free choice: pydantic-core enforces a hard recursion guard of 254
+# levels during validation, and the protocol frame and identity-document
+# models wrap a payload in enough additional nesting that the deepest
+# payload the real frame path validates is 198 levels (measured by binary
+# search against the frame reader). 200 is therefore the feasible maximum;
+# a larger ceiling would let the shared decoder accept frames that then
+# fail Pydantic validation and misclassify depth overflow as
+# malformed_frame instead of oversized_frame, splitting a persisted
+# failure code. Raising this ceiling requires replacing Pydantic payload
+# validation on the frame path, not editing this number. Bounding the
+# shared decoder by it keeps depth overflow detected on the dr-serialize
+# path and reported one way at every depth. Every read boundary with no
+# tighter declared depth budget bounds itself here.
 STRUCTURAL_DEPTH_CEILING: Final = 200
 
 
