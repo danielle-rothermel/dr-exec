@@ -639,11 +639,17 @@ def test_an_unsupported_platform_is_refused_before_anything_durable(
     assert list(harness.root.iterdir()) == []
 
 
-def test_the_untrusted_python_target_is_refused_by_this_engine(
+@requires_macos
+def test_every_declared_target_kind_runs_through_the_one_engine_path(
     harness: Harness,
 ) -> None:
-    """v1's Python target lands separately; until then it never spawns."""
-    job = ExecutionJob(
+    """All three target kinds reach a completion through the same path.
+
+    The Python target's own behavior is qualified separately; what this
+    pins is that the engine's target dispatch is total over the declared
+    union, so no declared kind is left refused.
+    """
+    python_job = ExecutionJob(
         job_id=JobId(uuid4()),
         target=UntrustedPythonTarget(
             driver_source="def dr_exec_main(request, emit): pass",
@@ -657,11 +663,15 @@ def test_the_untrusted_python_target_is_refused_by_this_engine(
         env=EnvGrant.none(),
         budgets=Budgets.unbudgeted(),
     )
+    completions = [
+        harness.run(python_command("pass")),
+        harness.run(python_command("pass"), untrusted=True),
+        harness.execute(python_job),
+    ]
 
-    with pytest.raises(DeclarationError, match="untrusted Python"):
-        harness.execute(job)
-
-    assert list(harness.root.iterdir()) == []
+    for completed in completions:
+        assert completed.result.outcome == ExitedOutcome(exit_code=0)
+        assert isinstance(completed.record_receipt, CompleteRecordReceipt)
 
 
 @requires_macos
