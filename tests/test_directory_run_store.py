@@ -850,7 +850,7 @@ def test_the_manifest_byte_ceiling_is_exactly_pinned() -> None:
     bounds this read; only this constant does. Pinning it here is what
     makes the bound auditable rather than incidental.
     """
-    assert STRUCTURAL_MANIFEST_BYTE_CEILING == 64 * 1024 * 1024
+    assert STRUCTURAL_MANIFEST_BYTE_CEILING == 256 * 1024 * 1024
 
 
 def test_load_rejects_a_manifest_past_the_byte_ceiling_before_reading_it(

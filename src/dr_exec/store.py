@@ -94,7 +94,7 @@ _RUN_RECORD_ADAPTER: TypeAdapter[RunRecord] = TypeAdapter(RunRecord)
 # That is the structural limit of reading a manifest into memory at all,
 # made explicit and refused before the read rather than left to surface
 # as memory exhaustion.
-STRUCTURAL_MANIFEST_BYTE_CEILING: Final = 64 * 1024 * 1024
+STRUCTURAL_MANIFEST_BYTE_CEILING: Final = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
