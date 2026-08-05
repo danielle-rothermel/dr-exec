@@ -165,6 +165,14 @@ class EnvGrant:
 
     def __post_init__(self) -> None:
         names = tuple(variable.name for variable in self.variables)
+        if self.kind == EnvGrantKind.NONE and names:
+            raise ValueError(
+                "none environment grants must not contain variables"
+            )
+        if self.kind != EnvGrantKind.OVERLAY and self.excluded_var_names:
+            raise ValueError(
+                "only overlay environment grants may exclude variables"
+            )
         if len(set(names)) != len(names):
             raise ValueError("environment variable names must be unique")
         for name in self.excluded_var_names:
@@ -227,6 +235,14 @@ class EnvGrantRecord(ContractModel):
 
     @model_validator(mode="after")
     def names_must_be_canonical_and_disjoint(self) -> EnvGrantRecord:
+        if self.kind == EnvGrantKind.NONE and self.var_names:
+            raise ValueError(
+                "none environment grants must not contain variables"
+            )
+        if self.kind != EnvGrantKind.OVERLAY and self.excluded_var_names:
+            raise ValueError(
+                "only overlay environment grants may exclude variables"
+            )
         for name in (*self.var_names, *self.excluded_var_names):
             _validate_env_var_name(name)
         if self.var_names != tuple(sorted(set(self.var_names))):
