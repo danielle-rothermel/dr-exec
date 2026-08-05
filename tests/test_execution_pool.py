@@ -200,7 +200,9 @@ def test_automatic_capacity_resolves_once_from_the_usable_cpu_count() -> None:
     assert usable_cpu_count() >= 1
 
 
-def test_state_reports_each_lifecycle_stage_through_the_public_surface() -> None:
+def test_state_reports_each_lifecycle_stage_through_the_public_surface() -> (
+    None
+):
     """`state` snapshots the lifecycle: created, running, closed.
 
     The property is observational: each read here happens after the
