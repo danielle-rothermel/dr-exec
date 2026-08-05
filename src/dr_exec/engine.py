@@ -56,6 +56,11 @@ from uuid import uuid4
 
 from dr_serialize import IdentityDocument, Sha256Digest
 
+from dr_exec._declaration import (
+    granted_environment,
+    validate_command_resolvability,
+    validate_input_budget,
+)
 from dr_exec._identity import (
     _build_env_grant_record,
     _build_executor_config_identity,
@@ -86,10 +91,8 @@ from dr_exec._spawn import (
 )
 from dr_exec.cancel import CancelToken
 from dr_exec.declare import (
-    EnvGrant,
     ExecutionJob,
     ExecutorSelfBudgets,
-    FiniteByteLimit,
     FiniteDurationLimit,
     FiniteOutput,
     TrustedCommandTarget,
@@ -180,25 +183,11 @@ def _finite_ns(budget: object, /) -> int | None:
     return budget.max_ns if isinstance(budget, FiniteDurationLimit) else None
 
 
-def _finite_bytes(budget: object, /) -> int | None:
-    return budget.max_bytes if isinstance(budget, FiniteByteLimit) else None
-
-
 def _validate_platform() -> None:
     if sys.platform != SUPPORTED_PLATFORM:
         raise DeclarationError(
             f"dr-exec v1 executes only on {SUPPORTED_PLATFORM}"
         )
-
-
-def _granted_environment(grant: EnvGrant, /) -> dict[str, str]:
-    """Materialize the exact environment the child receives.
-
-    Values were snapshotted when the grant was constructed, so nothing
-    here consults the parent's live environment: the grant is the whole
-    inherited state.
-    """
-    return {variable.name: variable.value for variable in grant.variables}
 
 
 def _resolve_executable(
@@ -208,33 +197,19 @@ def _resolve_executable(
 ) -> str:
     """Resolve argv[0] against the granted ``PATH``, and only it.
 
-    Absent a granted ``PATH``, only an absolute executable resolves; a
-    relative executable with no granted ``PATH`` has no defensible
-    meaning and is a pre-spawn declaration error rather than a spawn
-    attempt that would consult the parent's ambient search path. A
-    granted ``PATH`` resolves only through absolute entries, because the
-    child changes to its scratch directory before ``exec``: a relative
-    hit would name nothing the search found, and reading it against the
-    parent's location is the ambient cwd this engine never consults. An
-    empty entry is the same case spelled shorter, since it means the
-    current directory. A name that resolves nowhere is left to the spawn,
-    which reports absence as an outcome rather than raising.
+    Which relative executables have a defensible meaning is a declaration
+    rule shared with the fake, so it is applied there: a relative name
+    needs a granted ``PATH``, and that ``PATH`` resolves only through
+    absolute entries. What remains here is the production-only search
+    that turns an accepted declaration into a concrete executable. A name
+    that resolves nowhere is left to the spawn, which reports absence as
+    an outcome rather than raising.
     """
     name = argv[0]
     if Path(name).is_absolute():
         return name
-    granted_path = environment.get("PATH")
-    if granted_path is None:
-        raise DeclarationError(
-            "a relative executable requires a granted PATH: " + name
-        )
-    for entry in granted_path.split(os.pathsep):
-        if not Path(entry).is_absolute():
-            raise DeclarationError(
-                "a granted PATH resolves only through absolute entries: "
-                + entry
-            )
-    resolved = shutil.which(name, path=granted_path)
+    validate_command_resolvability(argv, environment)
+    resolved = shutil.which(name, path=environment["PATH"])
     return resolved if resolved is not None else name
 
 
@@ -294,20 +269,6 @@ def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
                 request_id_sha256=request_identity_digest(prepared.request),
                 wants_protocol=True,
             )
-
-
-def _validate_input_budget(job: ExecutionJob, stdin_bytes: bytes, /) -> None:
-    """Compare declared input length with the budget before any spawn.
-
-    Input bounds are the one workload axis checked before a child exists,
-    so an over-budget input never costs a spawn.
-    """
-    limit = _finite_bytes(job.budgets.input_bytes)
-    if limit is not None and len(stdin_bytes) > limit:
-        raise DeclarationError(
-            f"declared input of {len(stdin_bytes)} bytes exceeds the "
-            f"{limit}-byte input budget"
-        )
 
 
 @contextmanager
@@ -1101,8 +1062,8 @@ class _EngineCall:
         """
         _validate_platform()
         target = _target_of(job, self.runtime)
-        _validate_input_budget(job, target.stdin_bytes)
-        environment = _granted_environment(job.env)
+        validate_input_budget(job, target.stdin_bytes)
+        environment = granted_environment(job.env)
         executable = _resolve_executable(target.argv, environment)
 
         execution_id = ExecutionId(
