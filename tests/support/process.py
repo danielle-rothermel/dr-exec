@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 
 
 WATCHDOG_SECONDS = 30.0
+_PID_EXIT_WATCHDOG_SECONDS = 5.0
+_PID_POLL_SECONDS = 0.01
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +61,50 @@ class Gate:
         """Unblock a peer waiting on this gate."""
         with self.path.open("w") as writer:
             writer.write(message)
+
+
+def exact_pid_exists(pid: int, /) -> bool:
+    """Probe only the exact process identifier supplied by a test case."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _kill_and_await_exact_pid(pid: int, /) -> None:
+    """Kill one registered PID and require its kernel identity to disappear."""
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+    try:
+        waited, _ = os.waitpid(pid, 0)
+    except ChildProcessError:
+        waited = 0
+    if waited == pid:
+        return
+
+    deadline = monotonic() + _PID_EXIT_WATCHDOG_SECONDS
+    poll_gate = threading.Event()
+    while exact_pid_exists(pid):
+        if monotonic() >= deadline:
+            pytest.fail(f"exact PID {pid} survived test cleanup")
+        # The state probe above is the evidence; this wait only avoids a
+        # busy loop while the system reaps an orphaned descendant.
+        poll_gate.wait(_PID_POLL_SECONDS)
+
+
+@contextmanager
+def cleanup_exact_pids() -> Iterator[list[int]]:
+    """Unconditionally kill only the exact PIDs registered by one case."""
+    registered: list[int] = []
+    try:
+        yield registered
+    finally:
+        for pid in registered:
+            _kill_and_await_exact_pid(pid)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +168,8 @@ def finish_threaded_calls[T](
 __all__ = [
     "Gate",
     "ThreadedCall",
+    "cleanup_exact_pids",
+    "exact_pid_exists",
     "finish_threaded_calls",
     "process_watchdog",
     "start_threaded_calls",

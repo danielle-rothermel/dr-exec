@@ -23,7 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +33,8 @@ import pytest
 from dr_serialize import build_identity_document
 from support.process import (
     Gate,
+    cleanup_exact_pids,
+    exact_pid_exists,
     finish_threaded_calls,
     start_threaded_calls,
 )
@@ -1082,6 +1084,151 @@ def test_a_clean_exit_still_tears_down_the_group_it_led(
 
 
 @requires_macos
+def test_exact_pid_cleanup_runs_when_the_case_body_fails() -> None:
+    """A failing assertion cannot orphan a PID already registered by a test."""
+
+    class _ForcedFailure(Exception):
+        pass
+
+    process = subprocess.Popen(
+        (
+            sys.executable,
+            "-I",
+            "-c",
+            "import signal; signal.pause()",
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    pid = process.pid
+
+    with pytest.raises(_ForcedFailure), cleanup_exact_pids() as cleanup:
+        cleanup.append(pid)
+        assert exact_pid_exists(pid)
+        raise _ForcedFailure("forced after PID registration")
+
+    assert not exact_pid_exists(pid)
+    process.wait()
+
+
+@requires_macos
+def test_finite_termination_budget_allows_a_cooperative_term_exit(
+    harness: Harness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready child handles TERM and exits without escalation."""
+    ready = Gate.create(tmp_path, "cooperative-ready")
+    handled = tmp_path / "term-handled"
+    token = CancelToken()
+    group_signals: list[int] = []
+    original_signal_group = dr_exec.execution.engine.signal_process_group
+
+    def record_group_signal(pid: int, number: int, /) -> bool:
+        group_signals.append(number)
+        return original_signal_group(pid, number)
+
+    monkeypatch.setattr(
+        dr_exec.execution.engine,
+        "signal_process_group",
+        record_group_signal,
+    )
+
+    def cancel_ready_child() -> int:
+        pid = int(ready.receive())
+        token.cancel()
+        return pid
+
+    (canceller,) = start_threaded_calls((cancel_ready_child,))
+    try:
+        completed = harness.run(
+            python_command(
+                "import os, signal\n"
+                "def handle_term(_number, _frame):\n"
+                f"    with open({str(handled)!r}, 'w') as marker:\n"
+                "        marker.write(str(os.getpid()))\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, handle_term)\n"
+                f"with open({str(ready.path)!r}, 'w') as gate:\n"
+                "    gate.write(str(os.getpid()))\n"
+                "signal.pause()\n"
+            ),
+            budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+            self_budgets=ExecutorSelfBudgets(
+                termination_time=FiniteDurationLimit(max_ns=1_000_000_000)
+            ),
+            cancellation=token,
+        )
+    finally:
+        (child_pid,) = finish_threaded_calls((canceller,))
+
+    assert completed.result.outcome == CancelledOutcome()
+    assert handled.read_text() == str(child_pid)
+    assert [
+        number
+        for number in group_signals
+        if number in {signal.SIGTERM, signal.SIGKILL}
+    ] == [signal.SIGTERM]
+
+
+@requires_macos
+def test_finite_termination_budget_escalates_a_term_ignoring_child(
+    harness: Harness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready child that ignores TERM is killed and reaped."""
+    ready = Gate.create(tmp_path, "ignoring-ready")
+    token = CancelToken()
+    group_signals: list[int] = []
+    original_signal_group = dr_exec.execution.engine.signal_process_group
+
+    def record_group_signal(pid: int, number: int, /) -> bool:
+        group_signals.append(number)
+        return original_signal_group(pid, number)
+
+    monkeypatch.setattr(
+        dr_exec.execution.engine,
+        "signal_process_group",
+        record_group_signal,
+    )
+
+    def cancel_ready_child() -> int:
+        pid = int(ready.receive())
+        token.cancel()
+        return pid
+
+    (canceller,) = start_threaded_calls((cancel_ready_child,))
+    try:
+        completed = harness.run(
+            python_command(
+                "import os, signal\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"with open({str(ready.path)!r}, 'w') as gate:\n"
+                "    gate.write(str(os.getpid()))\n"
+                "signal.pause()\n"
+            ),
+            budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+            self_budgets=ExecutorSelfBudgets(
+                termination_time=FiniteDurationLimit(max_ns=100_000_000)
+            ),
+            cancellation=token,
+        )
+    finally:
+        (child_pid,) = finish_threaded_calls((canceller,))
+
+    assert completed.result.outcome == CancelledOutcome()
+    assert not exact_pid_exists(child_pid)
+    assert [
+        number
+        for number in group_signals
+        if number in {signal.SIGTERM, signal.SIGKILL}
+    ] == [signal.SIGTERM, signal.SIGKILL]
+
+
+@requires_macos
 def test_a_descendant_that_leaves_the_session_escapes_the_claim(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1092,44 +1239,37 @@ def test_a_descendant_that_leaves_the_session_escapes_the_claim(
     leaving the latest lifecycle state incomplete on disk.
     """
     gate = Gate.create(tmp_path, "escapee")
-    escapee_pids: list[int] = []
-    collector = threading.Thread(
-        target=lambda: escapee_pids.append(int(gate.receive())),
-        daemon=True,
-    )
-    collector.start()
-    escapee_was_alive = False
-    try:
-        with pytest.raises(ExecutorFailure, match="join budget"):
-            harness.run(
-                python_command(
-                    "import os, time\n"
-                    "if os.fork() == 0:\n"
-                    "    os.setsid()\n"
-                    f"    gate = open({str(gate.path)!r}, 'w')\n"
-                    "    gate.write(str(os.getpid()))\n"
-                    "    gate.close()\n"
-                    "    while True:\n"
-                    "        time.sleep(3600)\n"
-                    "while True:\n"
-                    "    time.sleep(3600)\n"
-                ),
-                budgets=Budgets(
-                    wall_time=FiniteDurationLimit(max_ns=500_000_000)
-                ),
-                self_budgets=ExecutorSelfBudgets(join_time=ESCAPEE_JOIN_TIME),
-            )
-    finally:
-        collector.join()
-        for escapee in escapee_pids:
-            with suppress(ProcessLookupError):
-                os.kill(escapee, 0)
-                escapee_was_alive = True
-            with suppress(ProcessLookupError):
-                os.kill(escapee, signal.SIGKILL)
+    (collector,) = start_threaded_calls((lambda: int(gate.receive()),))
+    escapee_pid: int | None = None
+    with cleanup_exact_pids() as cleanup:
+        try:
+            with pytest.raises(ExecutorFailure, match="join budget"):
+                harness.run(
+                    python_command(
+                        "import os, time\n"
+                        "if os.fork() == 0:\n"
+                        "    os.setsid()\n"
+                        f"    gate = open({str(gate.path)!r}, 'w')\n"
+                        "    gate.write(str(os.getpid()))\n"
+                        "    gate.close()\n"
+                        "    while True:\n"
+                        "        time.sleep(3600)\n"
+                        "while True:\n"
+                        "    time.sleep(3600)\n"
+                    ),
+                    budgets=Budgets(
+                        wall_time=FiniteDurationLimit(max_ns=500_000_000)
+                    ),
+                    self_budgets=ExecutorSelfBudgets(
+                        join_time=ESCAPEE_JOIN_TIME
+                    ),
+                )
+        finally:
+            (escapee_pid,) = finish_threaded_calls((collector,))
+            cleanup.append(escapee_pid)
+        assert exact_pid_exists(escapee_pid)
 
-    assert len(escapee_pids) == 1
-    assert escapee_was_alive
+    assert not exact_pid_exists(escapee_pid)
 
     record = harness.store.load(harness.only_record_dir())
     assert record.state is RecordState.RUNNING
@@ -1150,45 +1290,38 @@ def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
     own -- reached them all and returned.
     """
     gate = Gate.create(tmp_path, "escapee")
-    escapee_pids: list[int] = []
-    collector = threading.Thread(
-        target=lambda: escapee_pids.append(int(gate.receive())),
-        daemon=True,
-    )
-    collector.start()
-    escapee_was_alive = False
-    try:
-        with pytest.raises(ExecutorFailure, match="join budget"):
-            harness.run(
-                python_command(
-                    "import os, time\n"
-                    "if os.fork() == 0:\n"
-                    "    os.setsid()\n"
-                    f"    gate = open({str(gate.path)!r}, 'w')\n"
-                    "    gate.write(str(os.getpid()))\n"
-                    "    gate.close()\n"
-                    "    while True:\n"
-                    "        time.sleep(3600)\n"
-                    "while True:\n"
-                    "    time.sleep(3600)\n"
-                ),
-                stdin=b"x" * UNREADABLE_STDIN_BYTES,
-                budgets=Budgets(
-                    wall_time=FiniteDurationLimit(max_ns=500_000_000)
-                ),
-                self_budgets=ExecutorSelfBudgets(join_time=ESCAPEE_JOIN_TIME),
-            )
-    finally:
-        collector.join()
-        for escapee in escapee_pids:
-            with suppress(ProcessLookupError):
-                os.kill(escapee, 0)
-                escapee_was_alive = True
-            with suppress(ProcessLookupError):
-                os.kill(escapee, signal.SIGKILL)
+    (collector,) = start_threaded_calls((lambda: int(gate.receive()),))
+    escapee_pid: int | None = None
+    with cleanup_exact_pids() as cleanup:
+        try:
+            with pytest.raises(ExecutorFailure, match="join budget"):
+                harness.run(
+                    python_command(
+                        "import os, time\n"
+                        "if os.fork() == 0:\n"
+                        "    os.setsid()\n"
+                        f"    gate = open({str(gate.path)!r}, 'w')\n"
+                        "    gate.write(str(os.getpid()))\n"
+                        "    gate.close()\n"
+                        "    while True:\n"
+                        "        time.sleep(3600)\n"
+                        "while True:\n"
+                        "    time.sleep(3600)\n"
+                    ),
+                    stdin=b"x" * UNREADABLE_STDIN_BYTES,
+                    budgets=Budgets(
+                        wall_time=FiniteDurationLimit(max_ns=500_000_000)
+                    ),
+                    self_budgets=ExecutorSelfBudgets(
+                        join_time=ESCAPEE_JOIN_TIME
+                    ),
+                )
+        finally:
+            (escapee_pid,) = finish_threaded_calls((collector,))
+            cleanup.append(escapee_pid)
+        assert exact_pid_exists(escapee_pid)
 
-    assert len(escapee_pids) == 1
-    assert escapee_was_alive
+    assert not exact_pid_exists(escapee_pid)
 
     record = harness.store.load(harness.only_record_dir())
     assert record.state is RecordState.RUNNING
