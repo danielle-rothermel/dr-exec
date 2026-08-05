@@ -49,7 +49,7 @@ class NonCanonicalBytesError(ValueError):
 # reported the same way, instead of surfacing from the parser behind it
 # at some depths and not others. Every read boundary that has no declared
 # depth budget tighter than this one bounds itself here.
-STRUCTURAL_DEPTH_CEILING: Final = 240
+STRUCTURAL_DEPTH_CEILING: Final = 200
 
 
 def canonical_model_bytes(model: ContractModel, /) -> bytes:
