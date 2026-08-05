@@ -761,7 +761,7 @@ def test_a_failing_executor_call_breaks_the_pool() -> None:
         async with pool:
             await consume(pool.run_stream(submissions_of(jobs(2))))
 
-    with pytest.raises(SchedulerBroken, match="the execution pool broke") as e:
+    with pytest.raises(ExecutorFailure, match="the execution pool broke") as e:
         asyncio.run(stream())
 
     assert isinstance(e.value.__cause__, ExecutorFailure)
@@ -789,7 +789,7 @@ def test_a_break_survives_the_close_that_follows_it() -> None:
         async with pool:
             await consume(pool.run_stream(submissions_of(jobs(1))))
 
-    with pytest.raises(SchedulerBroken):
+    with pytest.raises(ExecutorFailure, match="the execution pool broke"):
         asyncio.run(stream())
 
     assert pool._state is ExecutionPoolState.BROKEN
