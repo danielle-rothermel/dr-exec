@@ -277,8 +277,15 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         are cancelled: a submission cancelled before its worker starts it
         reaches `Executor.run` with an already-cancelled token, which the
         executor boundary answers with a recorded cancelled outcome and
-        no child. Cancellation is therefore delivered as completion data
-        for every admitted submission, never as a dropped submission.
+        no child. Cancellation therefore reaches every submission that is
+        started as completion data rather than as a vanished call.
+
+        It is not a delivery promise. Two paths end without handing that
+        data to a consumer: a break drops the queue behind the failing
+        call, so submissions cancelled there are never dispatched at all,
+        and `shutdown` drops whatever the consumer stopped reading. Both
+        record what actually ran; neither guarantees the consumer sees
+        it, which is why a consumer that needs every result drains.
 
         Only current residents are held, so this walks the bound rather
         than the scheduler's history: an abort after a hundred thousand
@@ -364,10 +371,12 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
     def _take_admitted(self) -> _Admitted[ContextT] | None:
         """The next submission to run, or None when the worker should stop.
 
-        A broken scheduler dispatches nothing: `_finish` has already
-        dropped the queue at the moment of the break, and this guard
-        keeps a worker that was mid-wait from starting a submission
-        admitted in the same window.
+        A broken scheduler dispatches nothing further: `_finish` drops
+        the queue at the moment of the break, and this guard keeps a
+        worker that was mid-wait from starting a submission admitted in
+        the same window. It bounds dispatch, not flight -- a submission
+        this method already returned is inside `Executor.run` by the time
+        a concurrent break lands, and finishes there.
         """
         with self._condition:
             self._condition.wait_for(
@@ -418,15 +427,27 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         delivery, because a broken scheduler delivers nothing: the ticket
         would otherwise stay resident for the pool's remaining life.
 
-        Breaking also drops the work queued behind the failing call
-        instead of starting it. A broken scheduler delivers nothing --
-        `take_completion` raises before it inspects the ready queue -- so
-        running that queue would spawn children, write durable records,
-        and consume the very capacity the scheduler exists to bound, all
-        for results no consumer can ever receive. The queued submissions
-        were never started, so nothing is dropped mid-flight and no
-        teardown is skipped; their tokens are cancelled and discarded
-        with them.
+        Breaking also stops further dispatch: every submission still
+        queued here is cancelled and dropped with the queue rather than
+        started. A broken scheduler delivers nothing -- `take_completion`
+        raises before it inspects the ready queue -- so starting that
+        queue would spawn children, write durable records, and consume
+        the very capacity the scheduler exists to bound, all for results
+        no consumer can ever receive. Those submissions were never
+        started, so nothing is dropped mid-flight and no teardown is
+        skipped.
+
+        What breaking does *not* do is stop a call another worker already
+        entered. With capacity above one, a second worker can take a
+        submission out of the queue and be inside `Executor.run` before
+        the failing call reaches this point. That call is left alone: it
+        runs to its own end, so its teardown completes and its record is
+        written, and only its in-memory result is discarded, because
+        delivery raises. Cancelling it instead would trade a wasted
+        result for a torn-down child on a path that is already failing,
+        which is the worse teardown story. The guarantee is that a break
+        dispatches nothing more, not that nothing is in flight when it
+        lands.
         """
         with self._condition:
             self._running -= 1

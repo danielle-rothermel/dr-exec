@@ -141,8 +141,15 @@ class ExecutionPool:
     two concurrent streams would each deliver whatever finished first --
     including each other's completions, carrying each other's caller
     contexts. A second concurrent stream is refused rather than served
-    wrongly; a consumer that wants two independent streams opens two
-    pools, which is also the only way to get two independent bounds.
+    wrongly. A consumer with several sources merges them into the one
+    stream this pool serves, which is the ordinary shape: many source
+    loops, one host bound.
+
+    A second pool is not the remedy for that -- it is a separate
+    host-capacity decision. Capacity here is host-level, so two pools
+    must be given explicit non-overlapping fixed capacity; two automatic
+    pools would each resolve to the full usable CPU count and together
+    claim the host twice.
     """
 
     _executor: Executor

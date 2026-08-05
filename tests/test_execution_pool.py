@@ -228,35 +228,52 @@ def test_effective_capacity_is_unavailable_before_the_pool_opens() -> None:
 def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
     """The bound is shared: completion alone does not admit replacement.
 
-    Two slots, three jobs, every call gated. Once both slots are occupied
-    the third job must not start. The evidence is not a delay: the first
-    call is released and *observed to have returned*, which is the exact
-    moment a separate active bound would have admitted the third -- and
-    the assertion is that it did not, because the completed-but-undelivered
-    result still holds the slot.
+    Two slots, three jobs, every call gated. The case drives the scheduler
+    directly because delivery is exactly what must not happen: no
+    completion is taken while the assertion is made, so the first call's
+    finished result provably still occupies its slot rather than merely
+    not having been delivered yet.
+
+    That construction is what makes the evidence a held gate instead of a
+    won race. `can_admit` is the one predicate every surface's intake is
+    gated on, and it is read at a point where a separate active bound
+    would already have freed the first slot -- the first call is released
+    and *observed to have returned*. Only afterwards is the completion
+    taken, and only then does the third job become admissible, which pins
+    delivery rather than completion as the moment the slot frees.
     """
     executor, responder = gated_executor()
     batch = jobs(3)
     first, second, third = batch
-    delivered: list[JobId] = []
+    scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
+        executor=executor, capacity=2
+    )
+    try:
+        assert scheduler.admit(first, None)
+        assert scheduler.admit(second, None)
+        responder.await_arrival_count(2)
+        assert set(responder.started) == {first.job_id, second.job_id}
+        assert not scheduler.can_admit()
 
-    def run() -> None:
-        for completed in batch_of(executor, batch, slots=2):
-            delivered.append(completed.result.execution_id.job_id)
+        responder.release(first.job_id)
+        responder.await_finish(first.job_id)
+        assert not scheduler.can_admit()
+        assert third.job_id not in responder.started
 
-    consumer = in_thread(run)
+        completion = scheduler.take_completion()
+        assert completion is not None
+        assert completion.completed_execution.result.execution_id.job_id == (
+            first.job_id
+        )
+        assert scheduler.can_admit()
 
-    responder.await_arrival_count(2)
-    assert set(responder.started) == {first.job_id, second.job_id}
-
-    responder.release(first.job_id)
-    responder.await_finish(first.job_id)
-    assert third.job_id not in responder.started
-
-    responder.release_all(batch)
-    join(consumer)
-
-    assert set(delivered) == {job.job_id for job in batch}
+        assert scheduler.admit(third, None)
+        responder.await_arrival(third.job_id)
+    finally:
+        responder.release_all(batch)
+        scheduler.close_intake()
+        scheduler.wait_for_quiescence()
+        scheduler.shutdown()
 
 
 def test_intake_advances_only_while_the_resident_bound_has_room() -> None:
@@ -732,41 +749,61 @@ def test_a_break_survives_the_close_that_follows_it() -> None:
 def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
     """A broken scheduler stops dispatching, it does not drain the queue.
 
-    Two slots and two jobs, so both are admitted and the second is
-    genuinely queued when the first call raises. Its completion could
-    never reach the consumer -- delivery raises before it inspects the
-    ready queue -- so starting it would spawn a child and write a record
-    for a result guaranteed to be discarded.
+    What a break bounds is dispatch, not flight. A call another worker
+    already entered runs to its own end -- it is cancelled, but its
+    teardown completes and its result is discarded. So the behavior under
+    test is only observable on a submission that is *genuinely queued*,
+    and this case constructs that rather than hoping for it: one slot
+    means the scheduler caps itself at one worker, so the second
+    submission provably sits in the queue while the only worker is inside
+    the failing call. There is no second worker that could race it into
+    flight.
 
-    The evidence is a state, not a delay: the pool is driven to its
-    terminal break and fully closed, which means every worker has been
-    joined, before the responder's arrival record is read. Any dispatch
-    that was going to happen has necessarily already happened by then.
+    Reaching the scheduler directly is what allows the second admission
+    at all -- a surface's intake is gated on `can_admit`, which a full
+    bound refuses -- and that is the point: the queue is loaded before
+    the break lands, which is the state a break must not drain. The
+    queued submission's completion could never reach a consumer, because
+    delivery raises before it inspects the ready queue, so starting it
+    would spawn a child and write a record for a result guaranteed to be
+    discarded.
+
+    The evidence is a state, not a delay: the scheduler is driven to its
+    terminal break and fully shut down, which joins every worker, before
+    the arrival record is read. Any dispatch that was going to happen has
+    necessarily already happened by then.
     """
     started: list[JobId] = []
     first_arrived = threading.Event()
+    release_first = threading.Event()
 
     def explode_on_first(
         job: ExecutionJob, _token: CancelToken | None, /
     ) -> CompletedExecution:
         started.append(job.job_id)
-        if not first_arrived.is_set():
+        if job.job_id == first.job_id:
             first_arrived.set()
+            wait_for(release_first, what="the failing call to be released")
             raise ExecutorFailure("machinery failed")
         return completion_for(job.job_id)
 
-    batch = jobs(2)
-    pool = fixed_pool(FakeExecutor(responder=explode_on_first), 2)
+    first, queued = jobs(2)
+    scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
+        executor=FakeExecutor(responder=explode_on_first), capacity=1
+    )
+    try:
+        assert scheduler.admit(first, None)
+        wait_for(first_arrived, what="the failing call to start")
+        assert scheduler.admit(queued, None)
 
-    async def stream() -> None:
-        async with pool:
-            await consume(pool.run_stream(submissions_of(batch)))
+        release_first.set()
+        with pytest.raises(SchedulerBroken):
+            scheduler.take_completion()
+    finally:
+        release_first.set()
+        scheduler.shutdown()
 
-    with pytest.raises(SchedulerBroken):
-        asyncio.run(stream())
-
-    assert pool._closed
-    assert started == [batch[0].job_id]
+    assert started == [first.job_id]
 
 
 # --- Requested close during intake ---------------------------------------
