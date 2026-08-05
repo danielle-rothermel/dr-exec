@@ -1,17 +1,12 @@
 # dr-exec
 
+[![CI](https://github.com/danielle-rothermel/dr-exec/actions/workflows/ci.yaml/badge.svg)](https://github.com/danielle-rothermel/dr-exec/actions/workflows/ci.yaml)
+[![PyPI](https://img.shields.io/pypi/v/dr-exec.svg)](https://pypi.org/project/dr-exec/)
+
 Contract-driven local process execution.
 
-## At a Glance
-
-- [Terms and contracts reference](https://danielle-rothermel.github.io/dr-exec/)
-- First-party dependencies:
-  - [dr-serialize](https://github.com/danielle-rothermel/dr-serialize) —
-    `0.1.1`, for canonical serialization, hashing, and identity documents
-  - [dr-store](https://github.com/danielle-rothermel/dr-store) — `0.1.1`,
-    for durable manifests and binary sidecars
-
-## High-Level Design
+| [dr-serialize v0.1.1](https://github.com/danielle-rothermel/dr-serialize) | [dr-store v0.1.1](https://github.com/danielle-rothermel/dr-store) | [Repo Definitions](https://danielle-rothermel.github.io/dr-exec/) |
+| --- | --- | --- |
 
 dr-exec provides one contract-driven boundary for running local processes.
 Production execution currently targets macOS and is organized into these
