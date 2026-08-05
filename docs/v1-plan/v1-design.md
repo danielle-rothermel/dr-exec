@@ -6,7 +6,16 @@
 
 ## Status and authority
 
-- **Planning status:** accepted; implementation and qualification pending.
+- **Planning and contract status:** complete in open dr-exec PR #9.
+- **API scaffold status:** complete in PR #9; behavioral operations remain
+  intentional stubs.
+- **Dr-serialize status:** required capabilities merged in
+  [dr-serialize PR #9](https://github.com/danielle-rothermel/dr-serialize/pull/9);
+  capability release and dr-exec pin cutover remain pending.
+- **Behavioral implementation status:** PRs 1–6 not started; see the
+  [implementation plan](implementation-plan.md).
+- **Qualification status:** pending the behavioral implementation and released
+  dependency pin.
 - **Primary platform:** macOS.
 - **Primary workload:** high-volume HumanEval-style local evaluation.
 - **API authority:** pinned releases of the
@@ -88,8 +97,8 @@ public claim. The implementation path to a verified runtime remains
   and canonicalized by dr-exec.
 - Required shared additions and qualification:
   [dr-serialize additions](dr-serialize-additions.md).
-- Release and pin the shared additions before dr-exec codec or record code uses
-  them.
+- Use an explicit local source while implementing against the merged additions;
+  release and pin them before repository qualification.
 
 ## Validated serialization paths
 
@@ -152,19 +161,23 @@ bounded bytes acquired by dr-exec
 - **Bulk domain formats:** outside generic JSON lane; adapter records media
   type, size, digest, and schema identity as required.
 
-### Implementation order
+### Implementation order and progress
 
-1. Add and adversarially qualify shared `dr-serialize` capabilities; preserve
-   existing canonical text and digest results.
-2. Release `dr-serialize`; pin it and Pydantic in dr-exec.
-3. Implement boundary models, safe projections, scalar goldens, role-specific
-   identities.
-4. Implement and qualify request transport, protected protocol codec, and
-   state machine.
-5. Implement and qualify lifecycle manifest, sidecars, and directory-store
-   transaction protocol.
-6. Run end-to-end conformance across canonical bytes, protocol failures,
-   partial outputs, crash-consistent records, and adapter completeness.
+1. **Complete:** add, adversarially qualify, and merge the shared
+   `dr-serialize` capabilities while preserving canonical text and digest
+   results.
+2. **Pending before repository qualification:** release `dr-serialize` and pin
+   it with Pydantic in dr-exec; local implementation may use dr-serialize
+   `main` first.
+3. **Not started:** implement boundary models, safe projections, scalar
+   goldens, and role-specific identities.
+4. **Not started:** implement and qualify request transport, protected protocol
+   codec, and state machine.
+5. **Not started:** implement and qualify lifecycle manifests, sidecars, and
+   the directory-store transaction protocol.
+6. **Not started:** run end-to-end conformance across canonical bytes, protocol
+   failures, partial outputs, crash-consistent records, and adapter
+   completeness.
 
 ## Scalar wire spellings
 

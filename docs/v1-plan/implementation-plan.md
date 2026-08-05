@@ -15,9 +15,11 @@
 | Work item | Status | Current state |
 | --- | --- | --- |
 | High-level planning | **Finished** | Merged in PR #3; this document is committed on `main`. |
-| Canonical API scaffold | **Finished** | Published and green in open PR #9. |
-| Dr-serialize prerequisite | **In progress** | Isolated implementation worktree exists; scope alignment and publication remain. |
-| Dr-exec PRs 1–6 | **Not started** | Begin after the dr-serialize prerequisite is published. |
+| Planned v1 contract set | **Finished** | Consolidated and reviewed in open dr-exec PR #9; activation waits for implementation and repository qualification. |
+| Canonical API scaffold | **Finished** | Published and green in open dr-exec PR #9; behavioral operations remain intentional stubs. |
+| Dr-serialize implementation | **Merged** | The scoped capabilities merged in [dr-serialize PR #9](https://github.com/danielle-rothermel/dr-serialize/pull/9). |
+| Dr-serialize release and pin | **Pending** | The capabilities remain unreleased; dr-exec still pins published `0.1.0`. |
+| Dr-exec PRs 1–6 | **Not started** | Begin after dr-exec PR #9 merges; PR 1 may use local dr-serialize `main` until the released-pin cutover. |
 | Representative performance measurement | **Deferred** | Run after release during the first domain integration; not a v1 package PR and not a contract-activation gate. |
 
 ## Explicitly excluded from this stack
@@ -64,9 +66,11 @@
   authority beyond the agreed scope.
 - Maintain one open implementation stack.
 
-## Prerequisite: dr-serialize — in progress
+## Prerequisite: dr-serialize — implementation merged; release pending
 
-Implement and release only the capabilities specified in
+The scoped implementation is merged on dr-serialize `main` in
+[PR #9](https://github.com/danielle-rothermel/dr-serialize/pull/9). It provides
+only the capabilities specified in
 [dr-serialize additions](dr-serialize-additions.md):
 
 1. **Canonical byte access**
@@ -97,8 +101,10 @@ Non-goals:
 - schema registries;
 - bulk data formats.
 
-Release the completed capabilities; then replace dr-exec's temporary local
-dependency with the released pin before declaring v1 complete.
+The remaining prerequisite delivery work is to release the merged capabilities
+and replace dr-exec's temporary local dependency with that released pin before
+repository qualification. The merged local checkout is sufficient to begin PR
+1 after this planning PR merges.
 
 ## Dr-exec implementation stack
 
@@ -106,7 +112,8 @@ dependency with the released pin before declaring v1 complete.
 
 Implement:
 
-- pin/local-source integration for the completed dr-serialize capabilities;
+- local-source integration for the merged dr-serialize capabilities, followed
+  by the released-pin cutover before repository qualification;
 - canonical safe model projections;
 - declaration, environment, executor, executor-config, and runtime identity
   construction;
@@ -287,16 +294,21 @@ Verify with deterministic gates:
 
 ## Delivery sequence
 
-1. Publish dr-serialize prerequisite PR; obtain review.
-2. Use that worktree as dr-exec's temporary local source.
-3. Build the dr-exec PRs in order; keep reviews non-blocking while stacking.
-4. Run adversarial review per PR and exact-tip validation at stack completion.
-5. Release dr-serialize; replace local source with released pin.
-6. Run repository qualification at the pre-release tip and activate the v1
-   contract set.
-7. Release dr-exec.
-8. Integrate consumers only through the released pin; measure throughput in the
-   first representative domain integration and report optimization or
+1. **Complete:** implement, review, and merge the scoped dr-serialize
+   capabilities in dr-serialize PR #9.
+2. **In progress:** merge the consolidated contracts and canonical API scaffold
+   in dr-exec PR #9.
+3. **Not started:** use local dr-serialize `main` while building dr-exec PRs
+   1–6 in order; keep reviews non-blocking while stacking.
+4. **Not started:** run adversarial review per PR and exact-tip validation at
+   stack completion.
+5. **Pending release:** release dr-serialize and replace the local source with
+   the released pin.
+6. **Not started:** run repository qualification at the pre-release tip and
+   activate the v1 contract set.
+7. **Not started:** release dr-exec.
+8. **Deferred until the first domain integration:** adopt dr-exec through its
+   released pin, measure representative throughput, and report optimization or
    hardening recommendations separately.
 
 ## Review checkpoints
