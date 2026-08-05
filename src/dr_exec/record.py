@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
+from dr_serialize import Sha256Digest
 from pydantic import (
     Field,
     NonNegativeInt,
@@ -19,7 +20,6 @@ from dr_exec._model import (
     ContractModel,
     IdentityDocumentField,
     UtcDatetime,
-    _validate_sha256_digest,
 )
 from dr_exec.declare import Budgets, EnvGrantRecord
 from dr_exec.kinds import (
@@ -54,37 +54,25 @@ class TrustedCommandTargetRecord(ContractModel):
     kind: Literal[ExecutionTargetKind.TRUSTED_COMMAND] = (
         ExecutionTargetKind.TRUSTED_COMMAND
     )
-    canonical_declaration_sha256: str
-
-    _validated_canonical_declaration_sha256 = field_validator(
-        "canonical_declaration_sha256"
-    )(_validate_sha256_digest)
+    canonical_declaration_sha256: Sha256Digest
 
 
 class UntrustedCommandTargetRecord(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_COMMAND] = (
         ExecutionTargetKind.UNTRUSTED_COMMAND
     )
-    canonical_declaration_sha256: str
+    canonical_declaration_sha256: Sha256Digest
     containment_profile: ContainmentProfile
-
-    _validated_canonical_declaration_sha256 = field_validator(
-        "canonical_declaration_sha256"
-    )(_validate_sha256_digest)
 
 
 class UntrustedPythonTargetRecord(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = (
         ExecutionTargetKind.UNTRUSTED_PYTHON
     )
-    canonical_declaration_sha256: str
-    request_id_sha256: str
+    canonical_declaration_sha256: Sha256Digest
+    request_id_sha256: Sha256Digest
     containment_profile: ContainmentProfile
     runtime: RuntimeRecord
-
-    _validated_digests = field_validator(
-        "canonical_declaration_sha256", "request_id_sha256"
-    )(_validate_sha256_digest)
 
 
 type ExecutionTargetRecord = Annotated[
@@ -110,9 +98,7 @@ class ProcessRecord(ContractModel):
 class OutputArtifactRecord(ContractModel):
     relative_path: Path
     size_bytes: NonNegativeInt
-    sha256: str
-
-    _validated_sha256 = field_validator("sha256")(_validate_sha256_digest)
+    sha256: Sha256Digest
 
     @field_validator("relative_path", mode="before")
     @classmethod

@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
-from dr_serialize import IdentityDocument, validate_identity_document
+from dr_serialize import (
+    IdentityDocument,
+    Jsonable,
+    canonical_json_bytes,
+    decode_strict_json_bytes,
+    validate_identity_document,
+)
 from pydantic import (
     AfterValidator,
     AwareDatetime,
@@ -12,8 +18,6 @@ from pydantic import (
     ConfigDict,
     PlainSerializer,
 )
-
-_LOWERCASE_HEXADECIMAL = frozenset("0123456789abcdef")
 
 
 class ContractModel(BaseModel):
@@ -29,14 +33,45 @@ class ContractModel(BaseModel):
     )
 
 
-def _validate_sha256_digest(value: str) -> str:
-    if len(value) != 64 or any(
-        character not in _LOWERCASE_HEXADECIMAL for character in value
-    ):
-        raise ValueError(
-            "SHA-256 digest must be exactly 64 lowercase hexadecimal characters"
+class NonCanonicalBytesError(ValueError):
+    """Decoded bytes are not their own canonical re-encoding."""
+
+
+def canonical_model_bytes(model: ContractModel, /) -> bytes:
+    """Project a boundary model and return its canonical JSON bytes.
+
+    The explicit Pydantic JSON-mode projection is the secret-safe wire
+    value; dr-serialize owns the final canonical bytes. Pydantic's own
+    ``model_dump_json`` is never the persisted form.
+    """
+    projection: Jsonable = model.model_dump(mode="json")
+    return canonical_json_bytes(projection)
+
+
+def validate_canonical_model_bytes[ContractModelT: ContractModel](
+    model_type: type[ContractModelT],
+    data: bytes,
+    /,
+    *,
+    max_bytes: int,
+    max_depth: int,
+) -> ContractModelT:
+    """Validate bounded canonical bytes into a boundary model.
+
+    Bounded strict decode, canonical re-encode with a byte-for-byte
+    equality check, then strict Pydantic JSON-mode validation of those
+    same original bytes. The decoded ``Jsonable`` never reaches Pydantic.
+    """
+    decoded = decode_strict_json_bytes(
+        data,
+        max_bytes=max_bytes,
+        max_depth=max_depth,
+    )
+    if canonical_json_bytes(decoded) != data:
+        raise NonCanonicalBytesError(
+            "input bytes are not canonical JSON bytes"
         )
-    return value
+    return model_type.model_validate_json(data, strict=True)
 
 
 def require_utc(value: datetime) -> datetime:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Annotated, Literal, Self
 
+from dr_serialize import Sha256Digest
 from pydantic import (
     Field,
     NonNegativeInt,
@@ -14,11 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from dr_exec._model import (
-    ContractModel,
-    IdentityDocumentField,
-    _validate_sha256_digest,
-)
+from dr_exec._model import ContractModel, IdentityDocumentField
 from dr_exec.kinds import (
     ContainmentProfile,
     EnvGrantKind,
@@ -230,11 +227,7 @@ class EnvGrantRecord(ContractModel):
     kind: EnvGrantKind
     var_names: tuple[str, ...]
     excluded_var_names: tuple[str, ...]
-    canonical_values_sha256: str
-
-    _validated_canonical_values_sha256 = field_validator(
-        "canonical_values_sha256"
-    )(_validate_sha256_digest)
+    canonical_values_sha256: Sha256Digest
 
     @model_validator(mode="after")
     def names_must_be_canonical_and_disjoint(self) -> EnvGrantRecord:
