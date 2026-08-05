@@ -185,9 +185,9 @@ presentation strings and never satisfy the full-digest type.
 
 This addition does not make dr-serialize responsible for deciding what bytes a
 digest covers. Dr-exec still owns declaration, environment, executor, runtime,
-manifest, and sidecar digest payloads. `DirectoryRunStore` continues to hash
-raw sidecar bytes with a streaming standard-library SHA-256 implementation; a
-generic file-hashing wrapper is not required.
+manifest, and sidecar digest payloads. `DirectoryRunStore` obtains sidecar
+digests from the pinned Document Directory's `SidecarSummary`; a generic
+file-hashing wrapper is not required.
 
 Verification covers exact valid boundaries, every non-hexadecimal class,
 uppercase input, lengths 63 and 65, display-prefix rejection, and round trips

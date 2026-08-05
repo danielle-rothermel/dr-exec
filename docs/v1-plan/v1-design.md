@@ -82,6 +82,8 @@ public claim. The implementation path to a verified runtime remains
   identity behavior.
 - Pin Pydantic; its JSON-mode conversion contributes to bytes later validated
   and canonicalized by dr-exec.
+- Pin released `dr-store` (`>=0.1.1`) for the Document Directory; do not
+  reimplement its allocation, atomic publish, or sidecar mechanics.
 - Required shared additions and qualification:
   [dr-serialize additions](dr-serialize-additions.md).
 
@@ -141,8 +143,9 @@ bounded bytes acquired by dr-exec
   payload define the boundary.
 - **Record manifest:** closed, versioned dr-exec model; canonical-byte path;
   lifecycle validation after strict JSON-mode model validation.
-- **Payload stdout/stderr:** raw bytes; direct sidecar writes; exact lengths;
-  streaming SHA-256; no JSON normalization.
+- **Payload stdout/stderr:** raw bytes; streamed to Document Directory
+  Sidecars; exact lengths and digests from the finalized summary; no JSON
+  normalization.
 - **Bulk domain formats:** outside generic JSON lane; adapter records media
   type, size, digest, and schema identity as required.
 
