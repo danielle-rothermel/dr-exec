@@ -13,7 +13,9 @@
   [public package surface](../../src/dr_exec/__init__.py) and
   [stable capability boundaries](../../src/dr_exec/protocols.py).
 - **Planned behavioral authority:** [v1 contracts](contracts.toml), activated
-  only after the complete implementation passes qualification.
+  only after the complete implementation passes repository qualification at the
+  pre-release tip. The post-release first domain-integration throughput
+  measurement does not gate activation.
 - **Dependency plan:** [dr-serialize additions](dr-serialize-additions.md).
 - **Future runtime:**
   [verified uv-provisioned Python runtime](../future-plans/verified-python-runtime.md).
@@ -65,8 +67,11 @@ public claim. The implementation path to a verified runtime remains
 
 - The bootstrap creates the fresh session and process group before payload
   execution.
-- The engine completes configured process-group teardown and reaps the direct
-  child before returning a completed result.
+- Every post-spawn exit path, including a completed-result return and a raise
+  caused by machinery failure, performs configured teardown of the original
+  process group and reaps the direct child before the executor call exits.
+- Descendants that create a new session may escape the original process group
+  and this teardown claim.
 - Finite termination and join limits control escalation and return deadlines.
 - **Finite join exhaustion:** after group teardown, if inherited pipes still do
   not reach EOF, close the parent ends and raise `ExecutorFailure`; output and
@@ -194,8 +199,9 @@ frame, identity, and record model under exact pinned dependency releases.
   8. tear down and reap;
   9. finalize record;
   10. return result.
-- A cancellation observed before spawn finalizes without launching a child; one
-  observed after spawn enters the same teardown step.
+- A cancellation observed before spawn records `CancelledOutcome` and finalizes
+  without launching a child; one observed after spawn enters the same teardown
+  step.
 
 ### Outcomes and exceptions
 
@@ -253,8 +259,8 @@ frame, identity, and record model under exact pinned dependency releases.
     the first bootstrap `exec`.
 
 This deliberately favors a small Python bootstrap over a native macOS spawn
-extension. It adds one fixed helper interpreter startup per job; the throughput
-qualification measures that cost before v1 acceptance.
+extension. It adds one fixed helper interpreter startup per job; the post-release
+first domain integration measures that cost without gating contract activation.
 
 ### Python request
 
@@ -427,14 +433,20 @@ framing, configured-limit, identity, duplicate-key, and incomplete-stream case.
 
 - `DirectoryRunStore.prepare()` allocates one run directory, publishes the
   complete `prepared` manifest, and returns a prepared handle.
-- `mark_running()` publishes the process-bearing `running` manifest and returns
-  a running handle.
-- `finalize()` accepts either lifecycle handle, flushes retained-output
-  sidecars, publishes the `finalized` manifest, and returns the record receipt.
+- Every successfully published lifecycle state is valid.
+- `mark_running()` follows only a successful spawn, publishes the process-bearing
+  `running` manifest, and returns a running handle.
+- `finalize()` accepts either lifecycle handle. On successful publication it
+  flushes retained-output sidecars and publishes the `finalized` manifest; its
+  receipt reflects finalization or degradation and the latest valid lifecycle
+  state.
+- A recognized pre-child outcome may finalize directly from the `prepared`
+  handle.
 - Distinct lifecycle handles make invalid transitions unrepresentable through
   one ambiguous handle.
-- Prepare failure prevents spawn; post-start publication failure returns
-  structured degradation without replacing the execution outcome.
+- Prepare failure prevents spawn; finalization or post-start publication failure
+  is reflected in the receipt and latest valid lifecycle state without replacing
+  the execution outcome.
 - `load()` validates the canonical manifest, lifecycle state, safe relative
   paths, sidecar lengths, and sidecar digests.
 
@@ -514,7 +526,7 @@ Excludes:
 | --- | --- | --- |
 | `prepared` | Before spawn; complete declaration recorded. | Spawn completion unknown. |
 | `running` | After successful spawn. | Child started; no trustworthy final outcome. |
-| `finalized` | After teardown and sidecar finalization. | Complete run. |
+| `finalized` | After any required teardown and sidecar finalization. | Complete run. |
 
 - Recognized pre-child outcome: finalize directly from `prepared`.
 - Recovery: report incomplete state as incomplete; never infer success from
@@ -557,7 +569,7 @@ Excludes:
 - Receipt includes:
   - run identity;
   - allocated record location, if any;
-  - latest known state;
+  - latest valid lifecycle state;
   - completion/degradation status;
   - structured recording failures.
 - Narration:
@@ -618,8 +630,9 @@ Synchronization rules:
   - sequential outer sample stream;
   - full-sweep materialization before progress;
   - consumer must rebuild admission/concurrency control.
-- **Performance qualification:** measure the representative workload in its
-  first domain integration; report optimization or hardening recommendations
+- **Deferred performance measurement:** measure the representative workload in
+  the first domain integration after release; this measurement does not gate
+  contract activation. Report optimization or hardening recommendations
   separately instead of adding a package benchmark to v1.
 
 ### Execution job
@@ -628,8 +641,9 @@ Synchronization rules:
 - Admission assigns one capacity slot and one fresh child to the submission.
 - The child retains the protected protocol handle and emits complete validated
   outputs incrementally while its domain work may remain sequential.
-- Completion pairs the same caller context with the one completed execution;
-  accepted outputs survive a later protocol or child failure.
+- Every completion pairs exactly the caller context from its submission with the
+  one completed execution and never serializes that context; accepted outputs
+  survive a later protocol or child failure.
 
 ### Pool capacity and admission
 
@@ -655,8 +669,8 @@ Synchronization rules:
   never exceeds active capacity.
 - A completed result continues to occupy that bound until delivered; completion
   does not admit replacement work when the bound is full.
-- Caller context: travels with submission/completion; never serialized by
-  dr-exec.
+- Caller context: every completion carries exactly the context paired with its
+  submission; dr-exec never serializes it.
 
 ### Completion and lifecycle
 

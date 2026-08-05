@@ -18,12 +18,12 @@
 | Canonical API scaffold | **Finished** | Published and green in open PR #9. |
 | Dr-serialize prerequisite | **In progress** | Isolated implementation worktree exists; scope alignment and publication remain. |
 | Dr-exec PRs 1–6 | **Not started** | Begin after the dr-serialize prerequisite is published. |
-| Representative performance measurement | **Deferred** | Run during the first domain integration; not a v1 package PR. |
+| Representative performance measurement | **Deferred** | Run after release during the first domain integration; not a v1 package PR and not a contract-activation gate. |
 
 ## Explicitly excluded from this stack
 
 - Package-level throughput benchmark; measure the first representative domain
-  integration instead.
+  integration after release instead, without gating contract activation.
 - Pool prefetch; source intake and resident work are bounded by active capacity.
 - Automatic numerical-library thread environment policy; callers own it through
   explicit environment grants.
@@ -194,7 +194,8 @@ Implement one private execution path for every target:
 - finite supported workload budgets;
 - reject finite memory, CPU, process, file-size, open-file, and disk budgets;
 - best-effort attribution with documented limits;
-- group-targeted teardown and direct-child reaping;
+- configured original-process-group teardown and direct-child reaping on every
+  post-spawn exit path;
 - scratch cleanup;
 - mandatory run-store lifecycle;
 - `ProcessExecutor.run()` cutover.
@@ -209,7 +210,8 @@ Verify:
 - output/deadline/exit attribution races;
 - process-group termination and re-session escape non-claim;
 - cleanup and recording degradation;
-- no returned result before required teardown/reap completes.
+- no post-spawn return or machinery-failure raise exits the call before required
+  original-process-group teardown and direct-child reaping complete.
 - finite join exhaustion raises without manufacturing a trustworthy result.
 
 ### PR 5: fake executor and conformance — not started
@@ -263,10 +265,11 @@ Required behavior:
   boundary;
 - abort stops intake, cancels active tokens, and waits for executor teardown;
 - pre-spawn cancellation records a `CancelledOutcome` without spawning;
-- post-spawn cancellation performs group-targeted teardown and direct-child
-  reaping before returning `CancelledOutcome`;
+- post-spawn cancellation performs configured original-process-group teardown
+  and direct-child reaping before returning `CancelledOutcome`;
 - closed-pool finality;
-- caller context preserved in memory only;
+- every completion carries exactly its submission's caller context, in memory
+  only and never serialized;
 - no automatic numeric-library environment policy.
 
 Verify with deterministic gates:
@@ -289,7 +292,8 @@ Verify with deterministic gates:
 3. Build the dr-exec PRs in order; keep reviews non-blocking while stacking.
 4. Run adversarial review per PR and exact-tip validation at stack completion.
 5. Release dr-serialize; replace local source with released pin.
-6. Run full dr-exec qualification.
+6. Run repository qualification at the pre-release tip and activate the v1
+   contract set.
 7. Release dr-exec.
 8. Integrate consumers only through the released pin; measure throughput in the
    first representative domain integration and report optimization or

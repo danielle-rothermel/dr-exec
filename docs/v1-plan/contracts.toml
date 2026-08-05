@@ -3,7 +3,9 @@ schema_version = 1
 status = "planned"
 activation = """\
 Replaces the active repository contracts only after the complete v1 \
-implementation passes every design qualification obligation.\
+implementation passes repository qualification at the pre-release tip. \
+Activation explicitly excludes the first domain-integration throughput \
+measurement, which occurs after release and does not gate this contract set.\
 """
 replacement_target = ".defs/contracts.toml"
 
@@ -11,10 +13,10 @@ replacement_target = ".defs/contracts.toml"
 key = "one_canonical_local_engine"
 title = "One canonical local engine owns execution"
 statement = """
-Every v1 public execution path invokes a machine-local child through one private \
-engine that owns direct argv spawn, I/O, lifecycle, budget enforcement, \
-attribution, and recording. V1 invokes no shell, remote executor, in-process \
-evaluator, or alternate spawn path.
+Every production v1 execution path that invokes a machine-local child does so \
+through one private engine that owns direct argv spawn, I/O, lifecycle, budget \
+enforcement, attribution, and recording. V1 production execution invokes no \
+shell, remote executor, in-process evaluator, or alternate spawn path.
 """
 rationale = """
 A single internal path keeps target variants, direct calls, and pool scheduling \
@@ -24,10 +26,10 @@ quietly rebuilding foundational execution machinery.
 date = "2026-08-04"
 enforcement_modes = ["validation_rejection", "constructed_invariant", "governance"]
 enforcement = """
-Targets reject empty or NUL-bearing argv, every supported implementation \
-constructs a direct local process invocation, public entry points delegate to \
-`dr_exec.engine`, and review rejects consumer imports of the private engine or \
-additional spawn and lifecycle implementations.
+Targets reject empty or NUL-bearing argv, every supported production \
+implementation constructs a direct local process invocation, production public \
+entry points delegate to `dr_exec.engine`, and review rejects consumer imports \
+of the private engine or additional spawn and lifecycle implementations.
 """
 
 [[contracts]]
@@ -166,11 +168,13 @@ the pinned precedence.
 key = "truthful_lifecycle_and_cancellation"
 title = "Lifecycle and cancellation guarantees are truthful"
 statement = """
-Each spawned attempt owns a fresh session and process group. Before returning a \
-completed run, the executor finishes its configured group-targeted teardown and \
-reaps the direct child. A descendant that creates a new session can escape this \
-claim. Direct cancellation and pool abort use a one-shot call-scoped token and \
-await the same teardown; unbudgeted termination and join axes provide no bounded \
+Each spawned attempt owns a fresh session and process group. Every post-spawn \
+exit path, including returns and raises caused by machinery failures, performs \
+configured teardown of the original process group and reaps the direct child \
+before the call exits. A descendant that creates a new session can escape this \
+claim. Pre-spawn cancellation records `CancelledOutcome` and launches no child. \
+Direct cancellation and pool abort use a one-shot call-scoped token and await \
+the same teardown; unbudgeted termination and join axes provide no bounded \
 return guarantee.
 """
 rationale = """
@@ -183,8 +187,10 @@ enforcement_modes = ["runtime_guarantee", "modeled_outcome", "scope_exclusion"]
 enforcement = """
 The engine concurrently feeds input and drains every output channel, observes \
 the child through exit, applies configured group signaling and escalation, \
-reaps the direct child, returns `CancelledOutcome` only after teardown, and \
-raises `ExecutorFailure` when join exhaustion prevents a trustworthy result.
+records pre-spawn cancellation without spawning, and performs original-group \
+teardown and direct-child reaping before any post-spawn return or raise exits \
+the call. It returns `CancelledOutcome` only after the applicable lifecycle work \
+and raises `ExecutorFailure` when join exhaustion prevents a trustworthy result.
 """
 
 [[contracts]]
@@ -343,10 +349,12 @@ bearing field changes require a schema-version revision.
 key = "mandatory_execution_local_records"
 title = "Real runs have mandatory execution-local records"
 statement = """
-Every real v1 attempt writes one collision-free execution-local directory \
-through `DirectoryRunStore` and publishes valid `prepared`, `running`, and \
-`finalized` canonical manifests with digest-verified retained-output sidecars. \
-Recording is mandatory for production execution; engine tests use temporary \
+Every real v1 attempt uses one collision-free execution-local directory through \
+`DirectoryRunStore`; recording is mandatory for production execution. Every \
+successfully published lifecycle state is valid, `running` follows only a \
+successful spawn, and recognized pre-child outcomes may finalize directly from \
+`prepared`. Finalization or post-start recording degradation is reflected in \
+the receipt and latest valid lifecycle state. Engine tests use temporary \
 test-owned stores or buffers only for pure serialization units. Fake calls use \
 an explicit fake receipt and never manufacture a production record. The \
 manifest retains secret-safe invocation evidence, grant identity, containment, \
@@ -363,12 +371,15 @@ production no-record escape hatch.
 date = "2026-08-04"
 enforcement_modes = ["runtime_guarantee", "modeled_outcome", "governance"]
 enforcement = """
-`ProcessExecutor` requires a `RunStore`, prepares before spawn, marks successful \
-spawn, flushes sidecars before atomic manifest finalization on qualified local \
-storage, reports post-start degradation without replacing the execution outcome, \
-strictly validates loaded manifests and sidecars, and qualifies lifecycle and \
-crash behavior using explicit state synchronization. Exact record keys and \
-literals have golden coverage; narration failure is observability degradation.
+`ProcessExecutor` requires a `RunStore`, prepares before spawn, marks `running` \
+only after successful spawn, and permits recognized pre-child outcomes to \
+finalize from `prepared`. It flushes sidecars before successful atomic manifest \
+finalization on qualified local storage, reports finalization or other \
+post-start degradation with the latest valid lifecycle state without replacing \
+the execution outcome, strictly validates loaded manifests and sidecars, and \
+qualifies lifecycle and crash behavior using explicit state synchronization. \
+Exact record keys and literals have golden coverage; narration failure is \
+observability degradation.
 """
 
 [[contracts]]
@@ -451,10 +462,11 @@ statement = """
 resolves once from usable CPUs; fixed capacity is positive. Running and \
 completed-but-undelivered submissions share one resident bound equal to \
 capacity, input is pulled only when capacity exists, and results are delivered \
-in completion order. `run_many`, `run_stream`, and `open_pool` use the same \
-scheduler and create no child, thread, future, or queue entry per unadmitted \
-job. V1 has no pool prefetch, package benchmark, or automatic numerical-library \
-thread policy.
+in completion order. Every completion carries exactly the caller context paired \
+with its submission, and dr-exec never serializes that context. `run_many`, \
+`run_stream`, and `open_pool` use the same scheduler and create no child, thread, \
+future, or queue entry per unadmitted job. V1 has no pool prefetch, package \
+benchmark, or automatic numerical-library thread policy.
 """
 rationale = """
 One scheduler supports large finite and streaming workloads without unbounded \
@@ -468,9 +480,11 @@ All pool entry points delegate to one scheduler, one job consumes one slot, \
 source advancement requires resident capacity, completed results retain their \
 slot until delivery, per-job failures remain completion data, normal close \
 drains active work, and abort stops intake, cancels active calls, and awaits \
-their teardown before closing. The first domain integration measures \
-representative throughput, and environment grants remain the only caller-owned \
-path for numerical-library thread settings.
+their teardown before closing. Completion preserves the exact submission context \
+in memory without serializing it. The post-release first domain integration \
+measures representative throughput without gating contract activation, and \
+environment grants remain the only caller-owned path for numerical-library \
+thread settings.
 """
 
 [[contracts]]
