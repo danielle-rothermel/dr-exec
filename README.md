@@ -6,7 +6,7 @@
 | [Repo Definitions](https://danielle-rothermel.github.io/dr-exec/) | [dr-serialize v0.1.1](https://github.com/danielle-rothermel/dr-serialize) | [dr-store v0.1.1](https://github.com/danielle-rothermel/dr-store) |
 | --- | --- | --- |
 
-dr-exec runs local processes through explicit, typed contracts.
+**dr-exec runs local processes through explicit, typed contracts.**
 Production execution currently targets macOS and is organized into these
 functional areas:
 
