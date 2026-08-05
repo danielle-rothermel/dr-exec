@@ -54,7 +54,12 @@ from dr_exec._identity import (
     _build_executor_identity,
     _canonical_declaration_digest,
 )
-from dr_exec._protocol import ProtocolStreamResult, read_protocol_stream
+from dr_exec._protocol import (
+    ProtocolStreamResult,
+    read_protocol_stream,
+    request_identity_digest,
+    request_transport_bytes,
+)
 from dr_exec._provenance import _executor_source_snapshot
 from dr_exec._retention import PayloadRetention, StreamRetention
 from dr_exec._spawn import (
@@ -87,6 +92,7 @@ from dr_exec.kinds import (
     BudgetAxis,
     FailureOwner,
     OutputOverflowPolicy,
+    ProtocolFailureCode,
     RecordState,
 )
 from dr_exec.names import AttemptId, ExecutionId
@@ -116,6 +122,7 @@ from dr_exec.record import (
     SpawnFailedOutcome,
     TrustedCommandTargetRecord,
     UntrustedCommandTargetRecord,
+    UntrustedPythonTargetRecord,
 )
 from dr_exec.store import FinalizableRun, PreparedRun
 
@@ -216,12 +223,19 @@ def _resolve_executable(
     return resolved if resolved is not None else name
 
 
-def _target_of(job: ExecutionJob, /) -> _ResolvedTarget:
+def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
     """Reduce one declared target to its spawn and record evidence.
 
     The declaration itself carries argv, stdin, source, and the request
     payload, so only its digest reaches durable evidence; the live values
     stay here.
+
+    The Python target is the one kind whose invocation the engine does not
+    compose: the runtime owns the fixed ``-I -c <wrapper>`` command and the
+    wrapper that embeds the declared ``driver_source`` as data, and the
+    engine only maps its transports. Its stdin is the canonical request
+    document rather than declared raw bytes, and it is the one target that
+    inherits the protected descriptor.
     """
     digest = _canonical_declaration_digest(job.target)
     match job.target:
@@ -249,8 +263,21 @@ def _target_of(job: ExecutionJob, /) -> _ResolvedTarget:
                 wants_protocol=False,
             )
         case UntrustedPythonTarget():
-            raise DeclarationError(
-                "the untrusted Python target is not implemented"
+            prepared = runtime.prepare(job.target)
+            return _ResolvedTarget(
+                executable=prepared.argv[0],
+                argv=prepared.argv,
+                stdin_bytes=request_transport_bytes(prepared.request),
+                record=UntrustedPythonTargetRecord(
+                    canonical_declaration_sha256=digest,
+                    request_id_sha256=request_identity_digest(
+                        prepared.request
+                    ),
+                    containment_profile=job.target.containment_profile,
+                    runtime=prepared.runtime_record,
+                ),
+                request_id_sha256=request_identity_digest(prepared.request),
+                wants_protocol=True,
             )
 
 
@@ -731,8 +758,18 @@ def _attribute(outcome: ExecutionOutcome, /) -> ExecutionAttribution:
                 detail=f"the payload exceeded its {outcome.axis} budget",
             )
         case ProtocolFailedOutcome():
+            # An oversized frame is the executor's own finite self-budget
+            # stopping the stream, so it is attributed to the executor
+            # rather than to the payload: an executor limit must not
+            # masquerade as a payload crash. Every other protocol code
+            # describes a stream the payload actually emitted -- bad
+            # bytes, a frame out of position, a mismatched identity, a
+            # repeated sequence, or a stream that simply stopped -- and
+            # stays with the payload that produced it.
             return ExecutionAttribution(
-                owner=FailureOwner.PAYLOAD,
+                owner=FailureOwner.EXECUTOR
+                if outcome.failure_code is ProtocolFailureCode.OVERSIZED_FRAME
+                else FailureOwner.PAYLOAD,
                 detail=outcome.failure_detail,
             )
         case CancelledOutcome():
@@ -829,7 +866,7 @@ class _EngineCall:
         tears down the group and reaps the child.
         """
         _validate_platform()
-        target = _target_of(job)
+        target = _target_of(job, self.runtime)
         _validate_input_budget(job, target.stdin_bytes)
         environment = _granted_environment(job.env)
         executable = _resolve_executable(target.argv, environment)
