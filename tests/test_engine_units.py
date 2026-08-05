@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import errno
 import json
+import os
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import pytest
@@ -48,7 +50,12 @@ from dr_exec._spawn import (
     parse_setup_status,
     spawn_bootstrap_source,
 )
-from dr_exec.engine import _attribute, _spawn_outcome
+from dr_exec.engine import (
+    _attribute,
+    _DrainState,
+    _OutputPump,
+    _spawn_outcome,
+)
 
 if TYPE_CHECKING:
     from dr_exec.declare import OutputBudget
@@ -377,3 +384,53 @@ def test_every_recognized_outcome_gets_one_evidence_based_owner(
     stronger evidence exists, not because the payload was proven at fault.
     """
     assert _attribute(outcome).owner is owner
+
+
+def test_a_pump_that_cannot_register_still_closes_what_it_owns() -> None:
+    """The forward write end has no second closer, so the pump must free it.
+
+    Closing that end is what gives the protocol reader its EOF. A
+    registration that raises before the pump's own cleanup would leave the
+    end open in the parent forever, stranding the reader on an EOF that can
+    never arrive -- so registration belongs inside the block that owns
+    cleanup, which this pins.
+
+    A closed descriptor is the reachable trigger, and `os.fstat` on the
+    forward end afterwards is the exact terminal state: it raises `EBADF`
+    only if the pump released it.
+    """
+    forward_read, forward_write = os.pipe()
+    release_read, release_write = os.pipe()
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    for descriptor in (
+        forward_read,
+        release_write,
+        stdout_write,
+        stderr_write,
+    ):
+        os.close(descriptor)
+    # A descriptor closed out from under the pump makes registration fail
+    # the way an already-invalid one would.
+    os.close(stderr_read)
+
+    pump = _OutputPump(
+        state=_DrainState(
+            retention=PayloadRetention.for_budget(UnbudgetedOutput())
+        ),
+        stdout_descriptor=stdout_read,
+        stderr_descriptor=stderr_read,
+        protocol_descriptor=None,
+        protocol_forward=forward_write,
+        release_descriptor=release_read,
+    )
+    with pytest.raises(OSError):
+        pump.run()
+
+    with pytest.raises(OSError) as raised:
+        os.fstat(forward_write)
+    assert raised.value.errno == errno.EBADF
+
+    for descriptor in (stdout_read, release_read):
+        with suppress(OSError):
+            os.close(descriptor)

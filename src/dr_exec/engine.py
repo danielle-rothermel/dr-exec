@@ -69,6 +69,7 @@ from dr_exec._spawn import (
     PAYLOAD_STDIN_DESCRIPTOR,
     PAYLOAD_STDOUT_DESCRIPTOR,
     SETUP_STAGE_EXEC,
+    SETUP_STAGE_SESSION,
     TERMINATION_SIGNAL,
     SetupFailure,
     launch_bootstrap,
@@ -374,16 +375,16 @@ class _OutputPump:
             self.stdout_descriptor: self.state.retention.stdout,
             self.stderr_descriptor: self.state.retention.stderr,
         }
-        for descriptor in (
-            self.stdout_descriptor,
-            self.stderr_descriptor,
-            self.protocol_descriptor,
-            self.release_descriptor,
-        ):
-            if descriptor is not None:
-                os.set_blocking(descriptor, False)
-                selector.register(descriptor, selectors.EVENT_READ)
         try:
+            for descriptor in (
+                self.stdout_descriptor,
+                self.stderr_descriptor,
+                self.protocol_descriptor,
+                self.release_descriptor,
+            ):
+                if descriptor is not None:
+                    os.set_blocking(descriptor, False)
+                    selector.register(descriptor, selectors.EVENT_READ)
             self._pump(selector, live)
         finally:
             selector.close()
@@ -460,17 +461,43 @@ def _read_protocol(
         )
 
 
-def _read_to_eof(descriptor: int, /) -> bytes:
-    """Read one descriptor through EOF without taking ownership of it."""
+def _read_setup_status(descriptor: int, startup_ns: int | None, /) -> bytes:
+    """Read the setup status through EOF within the startup budget.
+
+    The status pipe reaching EOF is what says the payload was reached, so
+    this read gates the whole attempt: nothing downstream may run until
+    the helper either reports a setup failure or execs. A finite startup
+    budget is the executor's own deadline on that gate -- a helper that
+    stalls before exec cannot hold the call open past it. With no declared
+    startup budget there is no deadline, which is exactly what an
+    unbudgeted axis promises.
+
+    Ownership stays with the caller: the descriptor is neither closed nor
+    left non-blocking here, and expiry raises rather than returning a
+    truncated status that would be parsed as a payload that started.
+    """
+    deadline = None if startup_ns is None else time.monotonic_ns() + startup_ns
     collected = bytearray()
-    while True:
-        try:
-            chunk = os.read(descriptor, _DRAIN_CHUNK_BYTES)
-        except OSError:
-            return bytes(collected)
-        if not chunk:
-            return bytes(collected)
-        collected.extend(chunk)
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(descriptor, selectors.EVENT_READ)
+        while True:
+            if deadline is not None:
+                remaining = (deadline - time.monotonic_ns()) / 1e9
+                if remaining <= 0 or not selector.select(remaining):
+                    raise ExecutorFailure(
+                        "the execution bootstrap did not reach the payload "
+                        "within the startup budget"
+                    )
+            try:
+                chunk = os.read(descriptor, _DRAIN_CHUNK_BYTES)
+            except OSError:
+                return bytes(collected)
+            if not chunk:
+                return bytes(collected)
+            collected.extend(chunk)
+    finally:
+        selector.close()
 
 
 def _close_descriptors(descriptors: Iterable[int], /) -> None:
@@ -492,6 +519,38 @@ class _StopReason:
 
     axis: BudgetAxis | None
     cancelled: bool
+
+
+@dataclass(slots=True)
+class _AttemptObservation:
+    """What the engine learned about a live child, as it learned it.
+
+    Observation accumulates here rather than being returned, because the
+    frame that owns teardown must be able to act on a partial observation:
+    a machinery failure part way through still has to know whether the
+    helper leads a process group before it signals one.
+
+    ``state`` is what separates the two completions. It exists exactly
+    when the payload was reached, so a ``None`` here means the attempt
+    stopped at a setup failure that ``setup_failure`` names.
+    """
+
+    prepared: PreparedRun
+    setup_failure: SetupFailure | None = None
+    leads_group: bool = True
+    state: _DrainState | None = None
+    stop: _StopReason | None = None
+    running: FinalizableRun | None = None
+
+    def reached_payload(self) -> _DrainState | None:
+        """The drain state of an attempt whose payload actually ran."""
+        return None if self.setup_failure is not None else self.state
+
+    def latest_run(self) -> FinalizableRun:
+        """The latest handle published, which is the prepared one until
+        ``mark_running`` succeeds.
+        """
+        return self.prepared if self.running is None else self.running
 
 
 def _await_child(
@@ -529,6 +588,8 @@ def _tear_down(
     process: subprocess.Popen[bytes],
     self_budgets: ExecutorSelfBudgets,
     /,
+    *,
+    leads_group: bool = True,
 ) -> int:
     """Signal the original process group, escalate, and reap the child.
 
@@ -536,6 +597,14 @@ def _tear_down(
     descendants go with the leader; a descendant that made its own
     session escapes, which the containment claim already says. The direct
     child is always reaped, so no attempt leaves a zombie behind.
+
+    ``leads_group`` is false on the one path where the helper is known not
+    to lead a group of its own: its ``setsid`` failed, so it never left
+    the parent's group and its pid is not a group id. Signalling by that
+    number would target whatever unrelated group happens to hold it, so
+    this path reaps the direct child and signals nothing -- there is no
+    original group to tear down, and the helper died before reaching the
+    payload, so it has no descendants to contain.
 
     The group is signalled on every post-spawn path, including one where
     the direct child already exited on its own. A leader's exit says
@@ -556,6 +625,19 @@ def _tear_down(
     period is a wait with no end.
     """
     started_ns = time.monotonic_ns()
+    if not leads_group:
+        # The same graceful-then-escalate policy, aimed at the one process
+        # this path can name: there is no group, so there is nothing else
+        # to reach.
+        with suppress(OSError):
+            process.send_signal(TERMINATION_SIGNAL)
+        if not _reaped_within(
+            process, _finite_ns(self_budgets.termination_time)
+        ):
+            with suppress(OSError):
+                process.send_signal(ESCALATION_SIGNAL)
+        process.wait()
+        return time.monotonic_ns() - started_ns
     signal_process_group(process.pid, TERMINATION_SIGNAL)
     if not _reaped_within(process, _finite_ns(self_budgets.termination_time)):
         signal_process_group(process.pid, ESCALATION_SIGNAL)
@@ -607,7 +689,14 @@ class _Transports:
 
     Every descriptor here belongs to this attempt, and ``close`` is what
     guarantees none outlives it: the pump is released first so nothing is
-    reading a descriptor at the moment it goes away.
+    reading a descriptor at the moment it goes away. A descriptor handed
+    to a thread that closes it is taken out of this frame first, so a
+    handoff that never happened -- because a thread never started -- still
+    leaves the descriptor here for ``close`` to release.
+
+    ``adopt`` is what keeps that true of threads too: a started thread is
+    registered before the next one is started, so a start that raises
+    still leaves every already-started thread joinable and releasable.
     """
 
     stdin_write: int | None
@@ -618,6 +707,7 @@ class _Transports:
     release_read: int
     release_write: int
     protocol_forward_read: int | None
+    protocol_forward_write: int | None
     threads: tuple[Thread, ...] = ()
 
     def take_stdin(self) -> int:
@@ -635,6 +725,23 @@ class _Transports:
             raise ExecutorFailure("the protocol transport was already taken")
         self.protocol_forward_read = None
         return descriptor
+
+    def take_protocol_forward_write(self) -> int | None:
+        """Hand the forward pipe's write end to the pump that closes it.
+
+        Closing this end is what gives the protocol reader its EOF, and
+        the pump is the only component that can close it at the right
+        moment -- after the last forwarded byte. Until the pump holds it
+        this frame does, so a pump that never ran cannot strand the
+        reader on a write end nobody closes.
+        """
+        descriptor = self.protocol_forward_write
+        self.protocol_forward_write = None
+        return descriptor
+
+    def adopt(self, thread: Thread, /) -> None:
+        """Register one started thread as this frame's to join and release."""
+        self.threads = (*self.threads, thread)
 
     def release(self) -> None:
         """Wake the pump so it stops reading and lets its thread end."""
@@ -681,6 +788,7 @@ class _Transports:
                 self.release_read,
                 self.release_write,
                 self.protocol_forward_read,
+                self.protocol_forward_write,
             )
             if descriptor is not None
         )
@@ -1003,6 +1111,7 @@ class _EngineCall:
             release_read=release_read,
             release_write=release_write,
             protocol_forward_read=forward_read,
+            protocol_forward_write=forward_write,
         )
         started_at = _now()
         started_ns = time.monotonic_ns()
@@ -1020,8 +1129,6 @@ class _EngineCall:
             # doing is releasing every descriptor this frame owns, both
             # ends included, before the machinery failure leaves.
             _close_descriptors(child_ends)
-            if forward_write is not None:
-                _close_descriptors((forward_write,))
             transports.close()
             raise ExecutorFailure(
                 "could not start the execution bootstrap"
@@ -1036,7 +1143,6 @@ class _EngineCall:
                 prepared,
                 process=process,
                 transports=transports,
-                forward_write=forward_write,
                 started_at=started_at,
                 started_ns=started_ns,
                 cancellation=cancellation,
@@ -1053,12 +1159,20 @@ class _EngineCall:
         *,
         process: subprocess.Popen[bytes],
         transports: _Transports,
-        forward_write: int | None,
         started_at: datetime,
         started_ns: int,
         cancellation: CancelToken | None,
     ) -> CompletedExecution:
         """Everything between a live child and a finalized record.
+
+        The whole body is inside the ``try`` whose ``finally`` tears down
+        and reaps, because a live child exists from the moment this is
+        entered: a machinery failure anywhere here -- a store that raises
+        an unexpected type, a thread that cannot start, a startup budget
+        that expires -- leaves through the same lifecycle work an ordinary
+        return does. Teardown is what the ``finally`` owns and nothing
+        else does; the descriptors are owned one frame out, by
+        ``_run_spawned``'s ``finally: transports.close()``.
 
         The setup status is read first: until the status pipe reaches EOF
         the payload has not been reached, so nothing downstream can
@@ -1066,13 +1180,26 @@ class _EngineCall:
         A setup failure still tears down and reaps -- the helper is a
         real child either way.
         """
-        setup_failure = parse_setup_status(
-            _read_to_eof(transports.status_read)
-        )
+        observation = _AttemptObservation(prepared=prepared)
+        try:
+            self._observe_attempt(
+                job,
+                target,
+                observation,
+                process=process,
+                transports=transports,
+                started_at=started_at,
+                started_ns=started_ns,
+                cancellation=cancellation,
+            )
+        finally:
+            teardown_ns = _tear_down(
+                process,
+                self.self_budgets,
+                leads_group=observation.leads_group,
+            )
+        setup_failure = observation.setup_failure
         if setup_failure is not None:
-            if forward_write is not None:
-                _close_descriptors((forward_write,))
-            teardown_ns = _tear_down(process, self.self_budgets)
             return self._complete(
                 prepared,
                 outcome=_spawn_outcome(setup_failure, target.executable),
@@ -1084,32 +1211,16 @@ class _EngineCall:
                 input_bytes=0,
                 protocol_bytes_received=0,
             )
-        running = self._mark_running(prepared, process, started_at)
-        state = _DrainState(
-            retention=PayloadRetention.for_budget(job.budgets.payload_output)
-        )
-        self._start_transports(
-            target,
-            transports,
-            state,
-            forward_write=forward_write,
-        )
-        stop: _StopReason | None = None
-        try:
-            stop = _await_child(
-                process,
-                state,
-                deadline_ns=self._deadline_ns(job, started_ns),
-                fail_on_overflow=_fails_on_overflow(job),
-                cancellation=cancellation,
-            )
-        finally:
-            teardown_ns = _tear_down(process, self.self_budgets)
         transports.join(self.self_budgets)
+        state = observation.reached_payload()
+        if state is None:  # pragma: no cover - a raise already left the call
+            raise ExecutorFailure("the attempt produced no drain state")
         protocol = state.protocol_result
         return self._complete(
-            running,
-            outcome=self._outcome_of(process, state, stop, protocol),
+            observation.latest_run(),
+            outcome=self._outcome_of(
+                process, state, observation.stop, protocol
+            ),
             protocol_outputs=() if protocol is None else protocol.outputs,
             payload_outputs=state.retention.snapshot(),
             started_at=started_at,
@@ -1119,6 +1230,56 @@ class _EngineCall:
             protocol_bytes_received=(
                 0 if protocol is None else protocol.bytes_received
             ),
+        )
+
+    def _observe_attempt(
+        self,
+        job: ExecutionJob,
+        target: _ResolvedTarget,
+        observation: _AttemptObservation,
+        /,
+        *,
+        process: subprocess.Popen[bytes],
+        transports: _Transports,
+        started_at: datetime,
+        started_ns: int,
+        cancellation: CancelToken | None,
+    ) -> None:
+        """Record what the live child did, into the caller's observation.
+
+        Nothing is returned, because the caller must be able to tear down
+        and complete from a partial observation: whatever this reached
+        before a machinery failure is already recorded where the caller
+        can see it.
+        """
+        setup_failure = parse_setup_status(
+            _read_setup_status(
+                transports.status_read,
+                _finite_ns(self.self_budgets.startup_time),
+            )
+        )
+        if setup_failure is not None:
+            observation.setup_failure = setup_failure
+            # A helper whose ``setsid`` failed never left the parent's
+            # group, so its pid is not a group id to signal.
+            observation.leads_group = (
+                setup_failure.stage != SETUP_STAGE_SESSION
+            )
+            return
+        observation.running = self._mark_running(
+            observation.prepared, process, started_at
+        )
+        state = _DrainState(
+            retention=PayloadRetention.for_budget(job.budgets.payload_output)
+        )
+        observation.state = state
+        self._start_transports(target, transports, state)
+        observation.stop = _await_child(
+            process,
+            state,
+            deadline_ns=self._deadline_ns(job, started_ns),
+            fail_on_overflow=_fails_on_overflow(job),
+            cancellation=cancellation,
         )
 
     def _mark_running(
@@ -1148,50 +1309,82 @@ class _EngineCall:
         transports: _Transports,
         state: _DrainState,
         /,
-        *,
-        forward_write: int | None,
     ) -> None:
         """Feed input and drain every output channel concurrently.
 
         Sequential handling of these pipes deadlocks as soon as one fills,
         so the input feed and the output pump run at once and neither
-        waits on the other. The pump takes ownership of the stdin write
-        end only in the sense that the feed thread closes it: everything
-        else is closed once, by ``_Transports.close``.
+        waits on the other. A thread that closes the descriptor it was
+        handed takes it out of ``transports`` first; everything else is
+        closed once, by ``_Transports.close``.
+
+        Starting a thread is the one step here that can fail on its own --
+        a parent that cannot allocate another OS thread raises -- so each
+        start is published before the next is attempted, and a descriptor
+        is handed over only once its thread is running. A partial start
+        therefore leaves every started thread joinable and every
+        descriptor owned by exactly one closer.
         """
         payload = target.stdin_bytes
         # The feed thread takes the stdin write end, because closing it
         # is what gives the child its EOF; handing ownership over is what
         # keeps that close from also happening in ``close``.
-        stdin_write = transports.take_stdin()
-        threads = [
-            _started_thread(
-                lambda: _feed_stdin(stdin_write, payload),
-                "dr-exec-stdin",
-            ),
-            _started_thread(
-                _OutputPump(
-                    state=state,
-                    stdout_descriptor=transports.stdout_read,
-                    stderr_descriptor=transports.stderr_read,
-                    protocol_descriptor=transports.protocol_read,
-                    protocol_forward=forward_write,
-                    release_descriptor=transports.release_read,
-                ).run,
-                "dr-exec-output",
-            ),
-        ]
+        self._adopt_started(
+            transports,
+            lambda descriptor: _feed_stdin(descriptor, payload),
+            "dr-exec-stdin",
+            take=transports.take_stdin,
+        )
+        # The pump closes the forward pipe's write end when it stops, which
+        # is what gives the protocol reader its EOF.
+        self._adopt_started(
+            transports,
+            lambda descriptor: _OutputPump(
+                state=state,
+                stdout_descriptor=transports.stdout_read,
+                stderr_descriptor=transports.stderr_read,
+                protocol_descriptor=transports.protocol_read,
+                protocol_forward=descriptor,
+                release_descriptor=transports.release_read,
+            ).run(),
+            "dr-exec-output",
+            take=transports.take_protocol_forward_write,
+        )
         digest = target.request_id_sha256
         if transports.protocol_forward_read is not None and digest is not None:
-            reader = transports.take_protocol_reader()
             budgets = self.self_budgets
-            threads.append(
-                _started_thread(
-                    lambda: _read_protocol(reader, state, digest, budgets),
-                    "dr-exec-protocol",
-                )
+            self._adopt_started(
+                transports,
+                lambda descriptor: _read_protocol(
+                    descriptor, state, digest, budgets
+                ),
+                "dr-exec-protocol",
+                take=transports.take_protocol_reader,
             )
-        transports.threads = tuple(threads)
+
+    @staticmethod
+    def _adopt_started[DescriptorT: (int, int | None)](
+        transports: _Transports,
+        body: Callable[[DescriptorT], None],
+        name: str,
+        /,
+        *,
+        take: Callable[[], DescriptorT],
+    ) -> None:
+        """Start one transport thread and register it before returning.
+
+        The descriptor is taken before the start, because the thread body
+        needs it, and released here if the start fails: an unstarted
+        thread closes nothing, and the descriptor is already out of
+        ``transports``, so this is the only remaining closer.
+        """
+        descriptor = take()
+        try:
+            transports.adopt(_started_thread(lambda: body(descriptor), name))
+        except RuntimeError:
+            if descriptor is not None:
+                _close_descriptors((descriptor,))
+            raise
 
     def _deadline_ns(
         self, job: ExecutionJob, started_ns: int, /

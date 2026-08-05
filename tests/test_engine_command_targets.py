@@ -19,6 +19,7 @@ from __future__ import annotations
 import errno
 import os
 import signal
+import subprocess
 import sys
 import threading
 from contextlib import contextmanager
@@ -73,12 +74,16 @@ from dr_exec import (
     UntrustedCommandTargetRecord,
     UntrustedPythonTarget,
 )
-from dr_exec._spawn import SETUP_STAGE_CHDIR
+from dr_exec._spawn import (
+    SETUP_STAGE_CHDIR,
+    SETUP_STAGE_SESSION,
+    SetupFailure,
+)
 from dr_exec.engine import SCRATCH_DIRECTORY_PREFIX, run_execution
 from dr_exec.store import FinalizableRun, PreparedRun, RunningRun
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from dr_exec.record import CompletedExecution
 
@@ -1493,3 +1498,288 @@ def test_every_call_gets_a_fresh_child_and_a_distinct_attempt_id(
         first.result.payload_outputs.stdout.head
         != second.result.payload_outputs.stdout.head
     )
+
+
+# --- Post-spawn machinery failure ----------------------------------------
+
+
+@requires_macos
+def test_a_store_failure_after_the_spawn_still_reaps_the_direct_child(
+    harness: Harness,
+) -> None:
+    """A live child exists from the spawn on, so every raise reaps it.
+
+    `mark_running` is the first thing that runs against a live child, and
+    a store that raises an unexpected type is a machinery failure rather
+    than the recording degradation the engine absorbs. The raise must
+    still leave through teardown: `ECHILD` is the kernel's own statement
+    that nothing this parent spawned is left unreaped.
+    """
+
+    class ExplodingStore(DirectoryRunStore):
+        def mark_running(
+            self, prepared: PreparedRun, process: ProcessRecord, /
+        ) -> RunningRun:
+            raise RuntimeError("the store failed in an unexpected way")
+
+    job = ExecutionJob(
+        job_id=JobId(uuid4()),
+        target=TrustedCommandTarget(argv=python_command("pass")),
+        env=EnvGrant.none(),
+        budgets=Budgets.unbudgeted(),
+    )
+    with pytest.raises(RuntimeError, match="unexpected way"):
+        harness.execute(job, store=ExplodingStore(root=harness.root))
+
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
+
+
+@requires_macos
+def test_a_thread_that_cannot_start_still_tears_down_the_group(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thread exhaustion mid-start leaves no survivor and no zombie.
+
+    The child forks a descendant that would outlive it, then blocks on a
+    gate it never receives, so the descendant is provably alive when the
+    engine's own machinery fails. The protocol reader is the last thread
+    started, so failing that start exercises the window where earlier
+    threads are already running against descriptors the frame still owns.
+    """
+    started: list[str] = []
+    original = dr_exec.engine._started_thread
+
+    def failing_start(
+        target: Callable[[], None], name: str, /
+    ) -> threading.Thread:
+        started.append(name)
+        if name == "dr-exec-output":
+            raise RuntimeError("can't start new thread")
+        return original(target, name)
+
+    monkeypatch.setattr(dr_exec.engine, "_started_thread", failing_start)
+
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        harness.run(
+            python_command(
+                "import os, time\n"
+                "if os.fork() == 0:\n"
+                "    while True:\n"
+                "        time.sleep(3600)\n"
+                "while True:\n"
+                "    time.sleep(3600)\n"
+            )
+        )
+
+    assert started == ["dr-exec-stdin", "dr-exec-output"]
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
+
+
+@requires_macos
+def test_a_partial_transport_start_leaks_no_descriptor(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every descriptor the attempt opened is closed on the failing path.
+
+    A protocol target is what makes this the interesting case: it opens
+    the forward pipe whose write end the pump would have taken and whose
+    read end the reader would have taken, and the failing start is the
+    reader's, so neither handoff completes. The count of this process's
+    own open descriptors is taken after one attempt has warmed every lazy
+    allocation and again after several more; a write end nobody owned, a
+    taken read end nobody closed, or an unclosed selector would each show
+    as a positive delta.
+    """
+    original = dr_exec.engine._started_thread
+
+    def failing_start(
+        target: Callable[[], None], name: str, /
+    ) -> threading.Thread:
+        if name == "dr-exec-protocol":
+            raise RuntimeError("can't start new thread")
+        return original(target, name)
+
+    monkeypatch.setattr(dr_exec.engine, "_started_thread", failing_start)
+
+    def attempt() -> None:
+        job = ExecutionJob(
+            job_id=JobId(uuid4()),
+            target=UntrustedPythonTarget(
+                driver_source="",
+                request=build_identity_document(
+                    schema="dr_exec.test_request",
+                    schema_version=1,
+                    payload={"a": 1},
+                ),
+                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+            ),
+            env=EnvGrant.none(),
+            budgets=Budgets.unbudgeted(),
+        )
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            harness.execute(job)
+
+    attempt()
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(8):
+        attempt()
+
+    assert len(os.listdir("/dev/fd")) == before
+
+
+# --- Executor self-budgets ------------------------------------------------
+
+
+@requires_macos
+def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A helper that never reaches the payload cannot hold the call open.
+
+    The status pipe reaching EOF is what says the payload was reached, so
+    a helper stalled before `exec` gates the whole attempt. The stall here
+    is a real one -- an extra open copy of the status write end that no
+    payload will ever close -- rather than a slow child, so the budget is
+    what ends the wait and nothing else can.
+
+    The failure is `ExecutorFailure` rather than a budget outcome: this is
+    the executor's own limit on its own machinery, and a payload that
+    never ran cannot own it.
+    """
+    stalls: list[int] = []
+    original = dr_exec.engine.launch_bootstrap
+
+    def stalling_launch(
+        *,
+        executable: str,
+        argv: tuple[str, ...],
+        environment: dict[str, str],
+        scratch_directory: str,
+        descriptor_map: tuple[tuple[int, int], ...],
+        status_write: int,
+    ) -> subprocess.Popen[bytes]:
+        # A duplicate the payload's `exec` cannot close-on-exec, so the
+        # parent's read never sees EOF no matter what the child does.
+        stalls.append(os.dup(status_write))
+        return original(
+            executable=executable,
+            argv=argv,
+            environment=environment,
+            scratch_directory=scratch_directory,
+            descriptor_map=descriptor_map,
+            status_write=status_write,
+        )
+
+    monkeypatch.setattr(dr_exec.engine, "launch_bootstrap", stalling_launch)
+
+    try:
+        with pytest.raises(ExecutorFailure, match="startup budget"):
+            harness.run(
+                python_command("pass"),
+                self_budgets=ExecutorSelfBudgets(
+                    startup_time=FiniteDurationLimit(max_ns=500_000_000)
+                ),
+            )
+    finally:
+        for descriptor in stalls:
+            os.close(descriptor)
+
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
+
+
+@requires_macos
+def test_an_unbudgeted_startup_axis_installs_no_deadline(
+    harness: Harness,
+) -> None:
+    """The default budget adds no limit, so an ordinary run is unaffected."""
+    completed = harness.run(
+        python_command("pass"),
+        self_budgets=ExecutorSelfBudgets.unbudgeted(),
+    )
+
+    assert completed.result.outcome == ExitedOutcome(exit_code=0)
+
+
+# --- Teardown when the helper leads no group ------------------------------
+
+
+@requires_macos
+def test_a_setup_failure_before_setsid_signals_no_process_group(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A helper whose `setsid` failed has no group to tear down.
+
+    Before `setsid` succeeds the helper is still in the parent's own
+    process group, so its pid is not a group id. Signalling by that number
+    would target whatever unrelated group happens to hold it, so this path
+    reaps the direct child and signals nothing.
+
+    The failure is injected at the status pipe rather than by making a real
+    `setsid` fail, because the engine's decision is made on the reported
+    stage: that is the input this pins. The child is reaped either way,
+    which the `ECHILD` check is what proves.
+    """
+    signalled: list[tuple[int, int]] = []
+
+    def recording_signal(pid: int, number: int, /) -> bool:
+        signalled.append((pid, number))
+        return False
+
+    monkeypatch.setattr(
+        dr_exec.engine, "signal_process_group", recording_signal
+    )
+    monkeypatch.setattr(
+        dr_exec.engine,
+        "parse_setup_status",
+        lambda line: SetupFailure(
+            stage=SETUP_STAGE_SESSION, errno=errno.EPERM
+        ),
+    )
+
+    completed = harness.run(python_command("pass"))
+
+    assert signalled == []
+    outcome = completed.result.outcome
+    assert isinstance(outcome, SpawnFailedOutcome)
+    assert outcome.error_message == SETUP_STAGE_SESSION
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
+
+
+@requires_macos
+def test_a_setup_failure_after_setsid_still_tears_down_the_group(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every other setup stage is past `setsid`, so the group is real."""
+    signalled: list[tuple[int, int]] = []
+    original = dr_exec.engine.signal_process_group
+
+    def recording_signal(pid: int, number: int, /) -> bool:
+        signalled.append((pid, number))
+        return original(pid, number)
+
+    monkeypatch.setattr(
+        dr_exec.engine, "signal_process_group", recording_signal
+    )
+
+    original_scratch = dr_exec.engine._scratch_workspace
+
+    @contextmanager
+    def vanishing_scratch() -> Iterator[Path]:
+        with original_scratch() as directory:
+            directory.rmdir()
+            yield directory
+
+    monkeypatch.setattr(
+        dr_exec.engine, "_scratch_workspace", vanishing_scratch
+    )
+
+    completed = harness.run(python_command("pass"))
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, SpawnFailedOutcome)
+    assert outcome.error_message == SETUP_STAGE_CHDIR
+    assert [number for _, number in signalled][:1] == [signal.SIGTERM]
