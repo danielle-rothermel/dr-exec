@@ -1,20 +1,38 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from dr_serialize import IdentityDocument
+from dr_serialize import (
+    IdentityDocument,
+    Jsonable,
+    Sha256Digest,
+    build_identity_document,
+    canonical_json_bytes,
+)
 from pydantic import StringConstraints, field_validator, model_validator
 
-from dr_exec._model import ContractModel
+from dr_exec._model import ContractModel, canonical_model_bytes
+from dr_exec._provenance import ExecutorSourceSnapshot
 from dr_exec.declare import (
     ByteBudget,
     CountBudget,
     DurationBudget,
+    EnvGrant,
+    EnvGrantRecord,
+    ExecutionTarget,
     ExecutorSelfBudgets,
 )
+
+# Persisted identity schema names and version. These are wire literals
+# pinned by golden vectors; never derive them from module or class names.
+EXECUTOR_IDENTITY_SCHEMA = "dr_exec.executor"
+EXECUTOR_CONFIG_IDENTITY_SCHEMA = "dr_exec.executor_config"
+ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA = "dr_exec.isolated_host_python_runtime"
+IDENTITY_SCHEMA_VERSION = 1
 
 _EXECUTOR_CONFIG_IDENTITY_KEYS = frozenset(
     {
@@ -92,7 +110,7 @@ def _validate_normalized_absolute_posix_path(value: str) -> str:
 
 
 class _ExecutorIdentityPayload(ContractModel):
-    kind: Literal["process_executor"]
+    kind: Literal["process_executor"] = "process_executor"
     package_version: _NonemptyString
     source_commit: str | None
     source_state: Literal["clean", "dirty", "unknown"]
@@ -132,7 +150,7 @@ class _ExecutorConfigIdentityPayload(ContractModel):
 
 
 class _IsolatedHostRuntimeIdentityPayload(ContractModel):
-    kind: Literal["isolated_host_python"]
+    kind: Literal["isolated_host_python"] = "isolated_host_python"
     resolved_executable: str
     implementation: _NonemptyString
     python_version: _NonemptyString
@@ -152,8 +170,10 @@ def _require_identity_role(
 ) -> Mapping[str, object]:
     if document.schema != schema:
         raise ValueError(f"identity must use schema {schema}")
-    if document.schema_version != 1:
-        raise ValueError("identity must use schema version 1")
+    if document.schema_version != IDENTITY_SCHEMA_VERSION:
+        raise ValueError(
+            f"identity must use schema version {IDENTITY_SCHEMA_VERSION}"
+        )
     if not isinstance(document.payload, Mapping):
         raise ValueError(  # noqa: TRY004 - Pydantic validation error
             "identity payload must be a mapping"
@@ -168,7 +188,7 @@ def _validate_executor_identity(
 ) -> IdentityDocument:
     payload = _require_identity_role(
         document,
-        schema="dr_exec.executor",
+        schema=EXECUTOR_IDENTITY_SCHEMA,
         payload_keys=_EXECUTOR_IDENTITY_KEYS,
     )
     _ExecutorIdentityPayload.model_validate(payload)
@@ -180,7 +200,7 @@ def _validate_executor_config_identity(
 ) -> IdentityDocument:
     payload = _require_identity_role(
         document,
-        schema="dr_exec.executor_config",
+        schema=EXECUTOR_CONFIG_IDENTITY_SCHEMA,
         payload_keys=_EXECUTOR_CONFIG_IDENTITY_KEYS,
     )
     _ExecutorConfigIdentityPayload.model_validate(payload)
@@ -193,7 +213,7 @@ def _isolated_host_runtime_identity_payload(
 ) -> _IsolatedHostRuntimeIdentityPayload:
     payload = _require_identity_role(
         document,
-        schema="dr_exec.isolated_host_python_runtime",
+        schema=ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA,
         payload_keys=_ISOLATED_HOST_RUNTIME_IDENTITY_KEYS,
     )
     return _IsolatedHostRuntimeIdentityPayload.model_validate(payload)
@@ -204,3 +224,83 @@ def _validate_isolated_host_runtime_identity(
 ) -> IdentityDocument:
     _isolated_host_runtime_identity_payload(document)
     return document
+
+
+def _identity_payload(model: ContractModel, /) -> Jsonable:
+    """Project a validated payload model into its identity payload."""
+    return cast("Jsonable", model.model_dump(mode="json"))
+
+
+def _build_executor_identity(
+    snapshot: ExecutorSourceSnapshot,
+    /,
+) -> IdentityDocument:
+    """Build the executor identity from one executor source snapshot."""
+    payload = _ExecutorIdentityPayload(
+        package_version=snapshot.package_version,
+        source_commit=snapshot.source_commit,
+        source_state=snapshot.source_state,
+        session_id=snapshot.session_id,
+    )
+    return build_identity_document(
+        schema=EXECUTOR_IDENTITY_SCHEMA,
+        schema_version=IDENTITY_SCHEMA_VERSION,
+        payload=_identity_payload(payload),
+    )
+
+
+def _build_executor_config_identity(
+    self_budgets: ExecutorSelfBudgets,
+    /,
+) -> IdentityDocument:
+    """Build the executor-config identity from effective self-budgets."""
+    return build_identity_document(
+        schema=EXECUTOR_CONFIG_IDENTITY_SCHEMA,
+        schema_version=IDENTITY_SCHEMA_VERSION,
+        payload=_identity_payload(self_budgets),
+    )
+
+
+def _build_isolated_host_runtime_identity(
+    payload: _IsolatedHostRuntimeIdentityPayload,
+    /,
+) -> IdentityDocument:
+    return build_identity_document(
+        schema=ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA,
+        schema_version=IDENTITY_SCHEMA_VERSION,
+        payload=_identity_payload(payload),
+    )
+
+
+def _canonical_declaration_digest(target: ExecutionTarget, /) -> Sha256Digest:
+    """Digest the canonical bytes of a complete target declaration.
+
+    The declaration itself carries argv, source, stdin, and the request
+    payload, so only this digest reaches durable evidence.
+    """
+    return Sha256Digest(
+        hashlib.sha256(canonical_model_bytes(target)).hexdigest()
+    )
+
+
+def _canonical_env_values_digest(grant: EnvGrant, /) -> Sha256Digest:
+    """Digest the canonical name/value payload of an environment grant.
+
+    Values feed only this digest; they are never persisted or returned.
+    """
+    payload: Jsonable = {
+        variable.name: variable.value for variable in grant.variables
+    }
+    return Sha256Digest(
+        hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    )
+
+
+def _build_env_grant_record(grant: EnvGrant, /) -> EnvGrantRecord:
+    """Project a live environment grant into secret-free durable evidence."""
+    return EnvGrantRecord(
+        kind=grant.kind,
+        var_names=tuple(sorted(variable.name for variable in grant.variables)),
+        excluded_var_names=tuple(sorted(grant.excluded_var_names)),
+        canonical_values_sha256=_canonical_env_values_digest(grant),
+    )

@@ -4,9 +4,12 @@ Contract-driven local process execution.
 
 ## Status
 
-The package currently defines the canonical v1 API and validation scaffold.
-Concrete execution, runtime preparation, scheduling, recording, and fake
-behavior remain intentionally unimplemented.
+The package defines the canonical v1 API and implements its identity and
+serialization substrate: canonical secret-safe projections, the strict
+bounded read path, role-specific versioned identities, and the isolated-host
+Python runtime with its fixed `-I` probe. Concrete execution, the protected
+protocol, scheduling, recording, and fake behavior remain intentionally
+unimplemented.
 
 - Exact public API: [`src/dr_exec/__init__.py`](src/dr_exec/__init__.py)
 - Stable capability boundaries:
