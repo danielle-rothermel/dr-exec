@@ -326,7 +326,9 @@ class _DrainState:
     protocol_result: ProtocolStreamResult | None = None
 
 
-def _feed_stdin(descriptor: int, payload: bytes, /) -> None:
+def _feed_stdin(
+    descriptor: int, payload: bytes, release_descriptor: int, /
+) -> None:
     """Write the declared input and close, so the child reads to EOF.
 
     A child that exits without reading its input closes the pipe first,
@@ -334,16 +336,45 @@ def _feed_stdin(descriptor: int, payload: bytes, /) -> None:
     broken pipe is absorbed here. Writing to the raw descriptor keeps
     every transport on the same footing: no buffered object's internal
     lock stands between a blocked write and the descriptor behind it.
+
+    The feed is interruptible for the same reason the output pump is: a
+    payload larger than the pipe buffer only drains as fast as the child
+    reads it, and a descriptor holder that survived group teardown never
+    reads. Selecting on the release gate alongside the pipe means this
+    thread always returns to a point where it can observe the release, so
+    it abandons the rest of the payload rather than pinning the transport
+    join to a reader that will never arrive.
     """
+    selector = selectors.DefaultSelector()
     try:
-        offset = 0
-        while offset < len(payload):
-            offset += os.write(descriptor, payload[offset:])
+        os.set_blocking(descriptor, False)
+        selector.register(descriptor, selectors.EVENT_WRITE)
+        selector.register(release_descriptor, selectors.EVENT_READ)
+        _feed(selector, descriptor, payload, release_descriptor)
     except OSError:
         pass
     finally:
+        selector.close()
         with suppress(OSError):
             os.close(descriptor)
+
+
+def _feed(
+    selector: selectors.BaseSelector,
+    descriptor: int,
+    payload: bytes,
+    release_descriptor: int,
+    /,
+) -> None:
+    """Write the payload through, or stop the moment release is signalled."""
+    offset = 0
+    while offset < len(payload):
+        ready = {int(key.fd) for key, _ in selector.select()}
+        if release_descriptor in ready:
+            return
+        if descriptor in ready:
+            with suppress(BlockingIOError):
+                offset += os.write(descriptor, payload[offset:])
 
 
 @dataclass(slots=True)
@@ -758,7 +789,12 @@ class _Transports:
         self.threads = (*self.threads, thread)
 
     def release(self) -> None:
-        """Wake the pump so it stops reading and lets its thread end."""
+        """Wake every transport thread that can block on a descriptor.
+
+        One byte is enough for all of them: nothing reads this end, so the
+        readiness it creates is permanent and every selector watching it
+        sees it, whether it is already selecting or has yet to arrive.
+        """
         with suppress(OSError):
             os.write(self.release_write, b"\0")
 
@@ -792,14 +828,18 @@ class _Transports:
             )
 
     def close(self) -> None:
-        """Release the pump, wait for its threads, then free every end.
+        """Release every transport thread, wait for them, then free the ends.
 
         The wait carries no deadline of its own: ``join_time`` is the one
         axis that decides how long transports may hold the call, and a
         second finite limit here would be one no declaration can spell.
-        Waiting is what makes the closes below safe -- a thread still
-        reading a descriptor this frame closed would be reading one the
-        kernel may have already handed to something else.
+        That is only sound because release reaches every thread that can
+        block on a descriptor -- the feed and the pump both select on the
+        release gate, and the protocol reader ends when the pump closes
+        the forward pipe -- so this join terminates by construction rather
+        than by a timeout. Waiting is what makes the closes below safe: a
+        thread still holding a descriptor this frame closed would be
+        holding one the kernel may have already handed to something else.
         """
         self.release()
         for thread in self.threads:
@@ -1402,7 +1442,9 @@ class _EngineCall:
         # keeps that close from also happening in ``close``.
         self._adopt_started(
             transports,
-            lambda descriptor: _feed_stdin(descriptor, payload),
+            lambda descriptor: _feed_stdin(
+                descriptor, payload, transports.release_read
+            ),
             "dr-exec-stdin",
             take=transports.take_stdin,
         )

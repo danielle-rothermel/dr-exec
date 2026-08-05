@@ -102,6 +102,10 @@ WATCHDOG_SECONDS = 30.0
 WATCHDOG_WALL_TIME = FiniteDurationLimit(max_ns=5_000_000_000)
 WATCHDOG_JOIN_TIME = FiniteDurationLimit(max_ns=5_000_000_000)
 
+# An input far past any pipe buffer a kernel offers, so a child that never
+# reads it leaves the feed mid-payload rather than absorbing it all.
+UNREADABLE_STDIN_BYTES = 8 * 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class Harness:
@@ -1092,6 +1096,56 @@ def test_a_descendant_that_leaves_the_session_escapes_the_claim(
                 "while True:\n"
                 "    time.sleep(3600)\n"
             ),
+            budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=500_000_000)),
+            self_budgets=ExecutorSelfBudgets(join_time=WATCHDOG_JOIN_TIME),
+        )
+
+    collector.join()
+    (escapee,) = escapee_pids
+    os.kill(escapee, 0)
+    os.kill(escapee, signal.SIGKILL)
+
+    record = harness.store.load(harness.only_record_dir())
+    assert record.state is RecordState.RUNNING
+
+
+@requires_macos
+def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The escapee cannot pin the call to a payload it will never read.
+
+    An input larger than the pipe buffer only drains as fast as the child
+    reads it, and this child's escaped descendant holds the read end
+    without ever reading. The feed thread is therefore still mid-payload
+    when the join budget expires, and the raise below is what says it was
+    released rather than waited on: the failure can only surface if
+    ``close`` -- which joins the transport threads with no deadline of its
+    own -- reached them all and returned.
+    """
+    gate = Gate.create(tmp_path, "escapee")
+    escapee_pids: list[int] = []
+    collector = threading.Thread(
+        target=lambda: escapee_pids.append(int(gate.receive())),
+        daemon=True,
+    )
+    collector.start()
+
+    with pytest.raises(ExecutorFailure, match="join budget"):
+        harness.run(
+            python_command(
+                "import os, time\n"
+                "if os.fork() == 0:\n"
+                "    os.setsid()\n"
+                f"    gate = open({str(gate.path)!r}, 'w')\n"
+                "    gate.write(str(os.getpid()))\n"
+                "    gate.close()\n"
+                "    while True:\n"
+                "        time.sleep(3600)\n"
+                "while True:\n"
+                "    time.sleep(3600)\n"
+            ),
+            stdin=b"x" * UNREADABLE_STDIN_BYTES,
             budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=500_000_000)),
             self_budgets=ExecutorSelfBudgets(join_time=WATCHDOG_JOIN_TIME),
         )
