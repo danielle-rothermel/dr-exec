@@ -466,7 +466,9 @@ framing, configured-limit, identity, duplicate-key, and incomplete-stream case.
     stderr.bin
 ```
 
-- One collision-free directory per run.
+- One collision-free directory per run, realized by the pinned
+  `dr_store.docdir` Document Directory with `prefix="run"` and
+  `manifest_name="record.json"`.
 - `record.json`: versioned canonical JSON manifest.
 - Sidecars: retained payload evidence; recording representation only.
 - Truncated sidecar layout: head then tail.
@@ -517,19 +519,17 @@ Excludes:
 
 ### Crash consistency
 
-- Every transition:
-  1. write complete temporary manifest in run directory;
-  2. flush manifest;
-  3. atomically replace `record.json` on same local filesystem.
+- Every transition publishes through the pinned Document Directory's
+  atomic durable replace: complete temporary manifest in the run
+  directory, flushed, atomically renamed onto `record.json`, directory
+  entry flushed.
 - Normal finalization:
-  1. flush retained sidecars;
+  1. flush retained sidecars (finalized `SidecarWriter` summaries);
   2. publish manifest with final digests.
-- macOS durability:
-  - use
-    [`F_FULLFSYNC`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html)
-    where available;
-  - use
-    [same-filesystem atomic replacement](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/rename.2.html).
+- macOS durability is the pinned primitive's claim:
+  [`F_FULLFSYNC`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html)
+  where available with `os.fsync` fallback, and
+  [same-filesystem atomic replacement](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/rename.2.html).
 - Qualified storage: supported local macOS filesystems.
 - Outside claim: network mounts, cloud-synchronized directories, filesystems
   without required flush/replace behavior.
@@ -560,8 +560,10 @@ Excludes:
   - verbose by default;
   - not required as a fourth durable artifact;
   - failure is observability degradation, not payload failure.
-- Canonicalization: pinned shared path; dr-exec owns manifest model, safe
-  projection, lifecycle validation, and transaction semantics.
+- Canonicalization: pinned shared path. dr-exec owns the manifest model,
+  safe projection, lifecycle validation, and receipt semantics; the pinned
+  `dr_store.docdir` primitive owns allocation, atomic durable publish,
+  sidecar streaming/truncation/digests, and verified byte-level reads.
 - Load boundary: malformed bytes, invalid lifecycle models, unsafe paths, and
   sidecar length/digest mismatches raise `RecordLoadError`; the original shared
   decoding or validation exception remains the cause.

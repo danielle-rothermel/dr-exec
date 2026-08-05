@@ -11,6 +11,10 @@ PR.
 Prerequisite dr-serialize capabilities are specified in
 [dr-serialize additions](dr-serialize-additions.md); their released pin
 replaces the local source dependency before repository qualification.
+Durable-directory mechanics come from the released `dr-store` pin
+(`>=0.1.1`): its Document Directory component owns collision-free
+allocation, atomic durable Manifest publish, streamed truncating
+digest-finalized Sidecars, and verified byte-level reads.
 
 ## PR 1: serialization, identities, and runtime preparation
 
@@ -31,13 +35,18 @@ import and model validation.
 
 ## PR 2: directory run store
 
-Implement `DirectoryRunStore` per the design's durable recording sections:
-collision-free run directories, typed lifecycle handles, canonical manifests
-with atomic same-filesystem replacement, retained-output sidecars with
-streaming digests, complete and degraded receipts, and strict load validation.
+Implement `DirectoryRunStore` per the design's durable recording sections,
+composed over the pinned `dr_store.docdir` Document Directory
+(`prefix="run"`, `manifest_name="record.json"`): dr-exec owns the manifest
+model, typed lifecycle handles, secret-safe projection, complete and
+degraded receipts, and strict load validation wrapping the primitive's
+typed errors into `RecordingFailure` entries and `RecordLoadError`; the
+primitive owns directory allocation, atomic durable replacement, sidecar
+streaming, truncation, and digests.
 
 Qualify: the design's directory-store qualification list under its
-synchronization rules.
+synchronization rules, against the pinned primitive — filesystem
+durability mechanics are qualified in dr-store and are not re-proven here.
 
 ## PR 3: protected Python request and protocol
 
