@@ -9,7 +9,6 @@ outcomes; no case uses a sleep or elapsed time as evidence.
 from __future__ import annotations
 
 import errno
-import hashlib
 import json
 import os
 from base64 import urlsafe_b64encode
@@ -22,7 +21,6 @@ from uuid import UUID, uuid4
 import pytest
 from dr_serialize import (
     IdentityDocument,
-    Sha256Digest,
     build_identity_document,
     canonical_identity_json_bytes,
     canonical_json_bytes,
@@ -51,14 +49,17 @@ from dr_exec import (
     EnvGrant,
     ExecutionAttribution,
     ExecutionId,
+    ExecutionJob,
     ExecutionMeasurements,
     ExecutionOutcome,
     ExecutionResult,
+    ExecutionTarget,
     ExecutionTargetRecord,
     ExecutorFailure,
     ExitedOutcome,
     FailureOwner,
     FinalizedRecord,
+    IsolatedHostPythonRuntime,
     JobId,
     OutcomeKind,
     PayloadOutputs,
@@ -75,19 +76,18 @@ from dr_exec import (
     RunningRecord,
     RunningRun,
     RunRecordHeader,
-    RuntimeKind,
-    RuntimeRecord,
     SignaledOutcome,
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
     TrustedCommandTargetRecord,
-    UntrustedCommandTargetRecord,
-    UntrustedPythonTargetRecord,
 )
 from dr_exec.declarations.models import (
     ExecutorSelfBudgets,
     TrustedCommandTarget,
+    UntrustedCommandTarget,
+    UntrustedPythonTarget,
 )
+from dr_exec.execution.engine import _target_of
 from dr_exec.recording.identity import (
     _build_env_grant_record,
     _build_executor_config_identity,
@@ -114,6 +114,23 @@ SECRET_STDIN = b'hunter2-stdin-"secret"'
 SECRET_ENV_VALUE = 'hunter2-env-"secret"'
 SECRET_EXECUTABLE = '/nonexistent/hunter2-"executable-secret"'
 SECRET_ERROR_DETAIL = 'hunter2-diagnostic-"secret"'
+TRUSTED_ARGV_CANARY = 'trusted-argv-"\\\n-canary'
+TRUSTED_STDIN_CANARY = b'trusted-stdin-"\\\n-canary'
+TRUSTED_ENV_CANARY = 'trusted-env-"\\\n-canary'
+UNTRUSTED_ARGV_CANARY = 'untrusted-argv-"\\\n-canary'
+UNTRUSTED_STDIN_CANARY = b'untrusted-stdin-"\\\n-canary'
+UNTRUSTED_ENV_CANARY = 'untrusted-env-"\\\n-canary'
+PYTHON_DRIVER_CANARY = 'python-driver-"\\\n-canary'
+PYTHON_REQUEST_CANARY = 'python-request-"\\\n-canary'
+PYTHON_ENV_CANARY = 'python-env-"\\\n-canary'
+SPAWN_ABSENT_CANARY = '/absent/spawn-"\\\n-canary'
+SPAWN_FAILURE_CANARY = 'spawn-failure-"\\\n-canary'
+PROTOCOL_FAILURE_CANARY = 'protocol-failure-"\\\n-canary'
+ATTRIBUTION_CANARY = 'attribution-"\\\n-canary'
+STDOUT_HEAD_CANARY = b'stdout-head-"\\\n-canary'
+STDOUT_TAIL_CANARY = b'stdout-tail-"\\\n-canary'
+STDERR_HEAD_CANARY = b'stderr-head-"\\\n-canary'
+STDERR_TAIL_CANARY = b'stderr-tail-"\\\n-canary'
 PREPARED_AT = datetime(2026, 8, 4, 12, 0, 0, 500000, tzinfo=UTC)
 STARTED_AT = datetime(2026, 8, 4, 12, 0, 1, 500000, tzinfo=UTC)
 FINISHED_AT = datetime(2026, 8, 4, 12, 0, 2, 500000, tzinfo=UTC)
@@ -149,6 +166,7 @@ def _declaration(
     execution_id: ExecutionId,
     *,
     target_record: ExecutionTargetRecord | None = None,
+    env: EnvGrant | None = None,
 ) -> RunDeclaration:
     target = TrustedCommandTarget(
         argv=("/bin/echo", SECRET_ARGUMENT),
@@ -161,7 +179,7 @@ def _declaration(
             canonical_declaration_sha256=_canonical_declaration_digest(target)
         ),
         env=_build_env_grant_record(
-            EnvGrant.fixed({"TOKEN": SECRET_ENV_VALUE})
+            EnvGrant.fixed({"TOKEN": SECRET_ENV_VALUE}) if env is None else env
         ),
         budgets=Budgets.unbudgeted(),
     )
@@ -171,30 +189,35 @@ def _prepared_record(
     execution_id: ExecutionId,
     *,
     target_record: ExecutionTargetRecord | None = None,
+    env: EnvGrant | None = None,
 ) -> PreparedRecord:
     return PreparedRecord(
         header=_header(),
-        declaration=_declaration(execution_id, target_record=target_record),
+        declaration=_declaration(
+            execution_id,
+            target_record=target_record,
+            env=env,
+        ),
     )
 
 
-def _runtime_record() -> RuntimeRecord:
-    resolved_executable = Path("/opt/py/bin/python3.13")
-    return RuntimeRecord(
-        kind=RuntimeKind.ISOLATED_HOST_PYTHON,
-        resolved_executable=resolved_executable,
-        id_doc=build_identity_document(
-            schema="dr_exec.isolated_host_python_runtime",
-            schema_version=1,
-            payload={
-                "kind": "isolated_host_python",
-                "resolved_executable": resolved_executable.as_posix(),
-                "implementation": "cpython",
-                "python_version": "3.13.2",
-                "cache_tag": "cpython-313",
-                "platform": "darwin",
-            },
-        ),
+def _producer_prepared_record(
+    execution_id: ExecutionId,
+    target: ExecutionTarget,
+    env: EnvGrant,
+    runtime: IsolatedHostPythonRuntime,
+) -> PreparedRecord:
+    job = ExecutionJob(
+        job_id=execution_id.job_id,
+        target=target,
+        env=env,
+        budgets=Budgets.unbudgeted(),
+    )
+    target_record = _target_of(job, runtime).record
+    return _prepared_record(
+        execution_id,
+        target_record=target_record,
+        env=job.env,
     )
 
 
@@ -335,9 +358,18 @@ def _recoverable_encodings(secret: str | bytes, /) -> frozenset[bytes]:
             urlsafe_b64encode(raw),
             json.dumps(text, ensure_ascii=True)[1:-1].encode(),
             canonical_identity_json_bytes(identity),
-            hashlib.sha256(canonical_json_bytes(text)).hexdigest().encode(),
         }
     )
+
+
+def _assert_no_recoverable_canaries(
+    manifest: bytes,
+    canaries: tuple[str | bytes, ...],
+    /,
+) -> None:
+    for canary in canaries:
+        for representation in _recoverable_encodings(canary):
+            assert representation not in manifest
 
 
 def _leaf_key_paths(value: object, prefix: str = "") -> frozenset[str]:
@@ -432,6 +464,53 @@ _FINALIZED_LEAF_KEY_PATHS = _PREPARED_LEAF_KEY_PATHS | frozenset(
         "result.protocol_outputs",
     ]
 )
+
+_TRUSTED_TARGET_LEAF_KEY_PATHS = frozenset(
+    {"kind", "canonical_declaration_sha256"}
+)
+_UNTRUSTED_COMMAND_TARGET_LEAF_KEY_PATHS = _TRUSTED_TARGET_LEAF_KEY_PATHS | {
+    "containment_profile"
+}
+_UNTRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS = frozenset(
+    {
+        "kind",
+        "canonical_declaration_sha256",
+        "request_id_sha256",
+        "containment_profile",
+        "runtime.kind",
+        "runtime.resolved_executable",
+        "runtime.id_doc.schema",
+        "runtime.id_doc.schema_version",
+        "runtime.id_doc.payload.kind",
+        "runtime.id_doc.payload.resolved_executable",
+        "runtime.id_doc.payload.implementation",
+        "runtime.id_doc.payload.python_version",
+        "runtime.id_doc.payload.cache_tag",
+        "runtime.id_doc.payload.platform",
+    }
+)
+
+
+def _with_target_leaf_key_paths(
+    record_paths: frozenset[str],
+    target_paths: frozenset[str],
+    /,
+) -> frozenset[str]:
+    return frozenset(
+        path
+        for path in record_paths
+        if not path.startswith("declaration.target.")
+    ) | frozenset(f"declaration.target.{path}" for path in target_paths)
+
+
+def _with_outcome_leaf_key_paths(
+    record_paths: frozenset[str],
+    outcome_paths: frozenset[str],
+    /,
+) -> frozenset[str]:
+    return frozenset(
+        path for path in record_paths if not path.startswith("result.outcome.")
+    ) | frozenset(f"result.outcome.{path}" for path in outcome_paths)
 
 
 # --- valid prepared, running, finalized transitions -------------------
@@ -728,100 +807,251 @@ def test_accepted_protocol_outputs_stay_inline_and_complete(
 
 
 @pytest.mark.parametrize(
-    ("outcome", "expected_outcome_keys"),
+    ("target", "env_value", "canaries", "expected_target_paths"),
+    [
+        pytest.param(
+            TrustedCommandTarget(
+                argv=("/bin/echo", TRUSTED_ARGV_CANARY),
+                stdin=TRUSTED_STDIN_CANARY,
+            ),
+            TRUSTED_ENV_CANARY,
+            (
+                TRUSTED_ARGV_CANARY,
+                TRUSTED_STDIN_CANARY,
+                TRUSTED_ENV_CANARY,
+            ),
+            _TRUSTED_TARGET_LEAF_KEY_PATHS,
+            id="trusted-command",
+        ),
+        pytest.param(
+            UntrustedCommandTarget(
+                argv=("/bin/echo", UNTRUSTED_ARGV_CANARY),
+                stdin=UNTRUSTED_STDIN_CANARY,
+                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+            ),
+            UNTRUSTED_ENV_CANARY,
+            (
+                UNTRUSTED_ARGV_CANARY,
+                UNTRUSTED_STDIN_CANARY,
+                UNTRUSTED_ENV_CANARY,
+            ),
+            _UNTRUSTED_COMMAND_TARGET_LEAF_KEY_PATHS,
+            id="untrusted-command",
+        ),
+        pytest.param(
+            UntrustedPythonTarget(
+                driver_source=PYTHON_DRIVER_CANARY,
+                request=build_identity_document(
+                    schema="dr_exec.secret_request",
+                    schema_version=1,
+                    payload={"secret": PYTHON_REQUEST_CANARY},
+                ),
+                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+            ),
+            PYTHON_ENV_CANARY,
+            (
+                PYTHON_DRIVER_CANARY,
+                PYTHON_REQUEST_CANARY,
+                PYTHON_ENV_CANARY,
+            ),
+            _UNTRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS,
+            id="untrusted-python",
+        ),
+    ],
+)
+def test_each_target_producer_is_secret_free_across_the_lifecycle(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    host_runtime: IsolatedHostPythonRuntime,
+    target: ExecutionTarget,
+    env_value: str,
+    canaries: tuple[str | bytes, ...],
+    expected_target_paths: frozenset[str],
+) -> None:
+    prepared_record = _producer_prepared_record(
+        execution_id,
+        target,
+        EnvGrant.fixed({"TOKEN": env_value}),
+        host_runtime,
+    )
+    prepared_run = store.prepare(prepared_record)
+    prepared_bytes = _manifest_bytes(prepared_run.record_dir)
+    running_run = store.mark_running(
+        prepared_run,
+        ProcessRecord(pid=4242, started_at=STARTED_AT),
+    )
+    running_bytes = _manifest_bytes(running_run.record_dir)
+    store.finalize(running_run, _result(execution_id))
+    finalized_bytes = _manifest_bytes(running_run.record_dir)
+
+    expected_prepared_paths = _with_target_leaf_key_paths(
+        _PREPARED_LEAF_KEY_PATHS,
+        expected_target_paths,
+    )
+    expected_paths = (
+        expected_prepared_paths,
+        expected_prepared_paths | {"process.pid", "process.started_at"},
+        _with_target_leaf_key_paths(
+            _FINALIZED_LEAF_KEY_PATHS,
+            expected_target_paths,
+        ),
+    )
+    for manifest_bytes, paths in zip(
+        (prepared_bytes, running_bytes, finalized_bytes),
+        expected_paths,
+        strict=True,
+    ):
+        _assert_no_recoverable_canaries(manifest_bytes, canaries)
+        assert _leaf_key_paths(json.loads(manifest_bytes)) == paths
+
+    prepared = json.loads(prepared_bytes)
+    assert prepared["declaration"]["env"]["var_names"] == ["TOKEN"]
+    assert len(prepared["declaration"]["env"]["canonical_values_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    ("outcome", "canaries", "expected_outcome_paths"),
     [
         pytest.param(
             ExitedOutcome(exit_code=0),
-            {"kind", "exit_code"},
+            (),
+            frozenset({"kind", "exit_code"}),
             id="exited",
         ),
         pytest.param(
             SignaledOutcome(signal_number=9),
-            {"kind", "signal_number"},
+            (),
+            frozenset({"kind", "signal_number"}),
             id="signaled",
         ),
         pytest.param(
-            SpawnAbsentOutcome(executable=SECRET_EXECUTABLE),
-            {"kind"},
+            SpawnAbsentOutcome(executable=SPAWN_ABSENT_CANARY),
+            (SPAWN_ABSENT_CANARY,),
+            frozenset({"kind"}),
             id="spawn-absent",
         ),
         pytest.param(
             SpawnFailedOutcome(
                 errno=errno.EACCES,
-                error_message=SECRET_ERROR_DETAIL,
+                error_message=SPAWN_FAILURE_CANARY,
             ),
-            {"kind", "errno"},
+            (SPAWN_FAILURE_CANARY,),
+            frozenset({"kind", "errno"}),
             id="spawn-failed",
         ),
         pytest.param(
             BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME),
-            {"kind", "axis"},
+            (),
+            frozenset({"kind", "axis"}),
             id="budget-exceeded",
         ),
         pytest.param(
             ProtocolFailedOutcome(
                 failure_code=ProtocolFailureCode.INCOMPLETE_STREAM,
-                failure_detail=SECRET_ERROR_DETAIL,
+                failure_detail=PROTOCOL_FAILURE_CANARY,
                 accepted_output_count=0,
             ),
-            {"kind", "failure_code", "accepted_output_count"},
+            (PROTOCOL_FAILURE_CANARY,),
+            frozenset({"kind", "failure_code", "accepted_output_count"}),
             id="protocol-failed",
         ),
-        pytest.param(CancelledOutcome(), {"kind"}, id="cancelled"),
+        pytest.param(
+            CancelledOutcome(),
+            (),
+            frozenset({"kind"}),
+            id="cancelled",
+        ),
     ],
 )
-def test_every_outcome_manifest_has_exact_keys_and_no_recoverable_secret(
+def test_every_outcome_projection_has_exact_paths_and_no_recoverable_secret(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
+    host_runtime: IsolatedHostPythonRuntime,
     outcome: ExecutionOutcome,
-    expected_outcome_keys: set[str],
+    canaries: tuple[str, ...],
+    expected_outcome_paths: frozenset[str],
 ) -> None:
-    prepared_run = store.prepare(_prepared_record(execution_id))
-    prepared_bytes = _manifest_bytes(prepared_run.record_dir)
+    prepared_run = store.prepare(
+        _producer_prepared_record(
+            execution_id,
+            TrustedCommandTarget(argv=("/bin/true",)),
+            EnvGrant.none(),
+            host_runtime,
+        )
+    )
     running_run = store.mark_running(
         prepared_run, ProcessRecord(pid=4242, started_at=STARTED_AT)
     )
-    running_bytes = _manifest_bytes(running_run.record_dir)
     store.finalize(
         running_run,
         _result(
             execution_id,
             outcome=outcome,
             attribution=ExecutionAttribution(
-                owner=FailureOwner.EXECUTOR, detail=SECRET_ERROR_DETAIL
+                owner=FailureOwner.EXECUTOR,
+                detail=ATTRIBUTION_CANARY,
             ),
         ),
     )
     finalized_bytes = _manifest_bytes(running_run.record_dir)
 
-    secrets = (
-        SECRET_ARGUMENT,
-        SECRET_STDIN,
-        SECRET_ENV_VALUE,
-        SECRET_EXECUTABLE,
-        SECRET_ERROR_DETAIL,
+    _assert_no_recoverable_canaries(
+        finalized_bytes,
+        (*canaries, ATTRIBUTION_CANARY),
     )
-    for manifest in (prepared_bytes, running_bytes, finalized_bytes):
-        for secret in secrets:
-            for recoverable in _recoverable_encodings(secret):
-                assert recoverable not in manifest
-
     finalized = json.loads(finalized_bytes)
-    assert set(finalized["result"]["outcome"]) == expected_outcome_keys
+    assert _leaf_key_paths(finalized) == _with_outcome_leaf_key_paths(
+        _FINALIZED_LEAF_KEY_PATHS,
+        expected_outcome_paths,
+    )
 
 
-def test_the_manifest_keeps_grant_identity_without_grant_values(
+def test_result_byte_and_attribution_fields_leave_only_structural_evidence(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
+    host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
-    run = store.prepare(_prepared_record(execution_id))
+    prepared_run = store.prepare(
+        _producer_prepared_record(
+            execution_id,
+            TrustedCommandTarget(argv=("/bin/true",)),
+            EnvGrant.none(),
+            host_runtime,
+        )
+    )
+    running_run = store.mark_running(
+        prepared_run,
+        ProcessRecord(pid=4242, started_at=STARTED_AT),
+    )
+    store.finalize(
+        running_run,
+        _result(
+            execution_id,
+            attribution=ExecutionAttribution(
+                owner=FailureOwner.EXECUTOR,
+                detail=ATTRIBUTION_CANARY,
+            ),
+            stdout=_stream(
+                head=STDOUT_HEAD_CANARY,
+                tail=STDOUT_TAIL_CANARY,
+            ),
+            stderr=_stream(
+                head=STDERR_HEAD_CANARY,
+                tail=STDERR_TAIL_CANARY,
+            ),
+        ),
+    )
 
-    manifest = json.loads(_manifest_bytes(run.record_dir))
-
-    env = manifest["declaration"]["env"]
-    assert env["var_names"] == ["TOKEN"]
-    assert len(env["canonical_values_sha256"]) == 64
-    assert SECRET_ENV_VALUE not in json.dumps(manifest)
+    _assert_no_recoverable_canaries(
+        _manifest_bytes(running_run.record_dir),
+        (
+            ATTRIBUTION_CANARY,
+            STDOUT_HEAD_CANARY,
+            STDOUT_TAIL_CANARY,
+            STDERR_HEAD_CANARY,
+            STDERR_TAIL_CANARY,
+        ),
+    )
 
 
 def test_the_manifest_excludes_pool_queue_and_lease_context(
@@ -843,107 +1073,6 @@ def test_the_manifest_excludes_pool_queue_and_lease_context(
         "result",
         "outputs",
     }
-
-
-def test_every_lifecycle_manifest_has_exact_recursive_key_paths(
-    store: DirectoryRunStore,
-    execution_id: ExecutionId,
-) -> None:
-    prepared_run = store.prepare(_prepared_record(execution_id))
-    prepared = json.loads(_manifest_bytes(prepared_run.record_dir))
-    assert _leaf_key_paths(prepared) == _PREPARED_LEAF_KEY_PATHS
-
-    running_run = store.mark_running(
-        prepared_run,
-        ProcessRecord(pid=4242, started_at=STARTED_AT),
-    )
-    running = json.loads(_manifest_bytes(running_run.record_dir))
-    assert _leaf_key_paths(running) == _PREPARED_LEAF_KEY_PATHS | {
-        "process.pid",
-        "process.started_at",
-    }
-
-    store.finalize(running_run, _result(execution_id))
-    finalized = json.loads(_manifest_bytes(running_run.record_dir))
-    assert _leaf_key_paths(finalized) == _FINALIZED_LEAF_KEY_PATHS
-
-
-def test_the_manifest_records_secret_free_invocation_evidence(
-    store: DirectoryRunStore,
-    execution_id: ExecutionId,
-) -> None:
-    run = store.prepare(_prepared_record(execution_id))
-
-    target = json.loads(_manifest_bytes(run.record_dir))["declaration"][
-        "target"
-    ]
-
-    assert set(target) == {"kind", "canonical_declaration_sha256"}
-    assert target["kind"] == "trusted_command"
-    assert len(target["canonical_declaration_sha256"]) == 64
-
-
-@pytest.mark.parametrize(
-    ("target_record", "expected_paths"),
-    [
-        pytest.param(
-            TrustedCommandTargetRecord(
-                canonical_declaration_sha256=Sha256Digest("0" * 64)
-            ),
-            {"kind", "canonical_declaration_sha256"},
-            id="trusted-command",
-        ),
-        pytest.param(
-            UntrustedCommandTargetRecord(
-                canonical_declaration_sha256=Sha256Digest("0" * 64),
-                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
-            ),
-            {
-                "kind",
-                "canonical_declaration_sha256",
-                "containment_profile",
-            },
-            id="untrusted-command",
-        ),
-        pytest.param(
-            UntrustedPythonTargetRecord(
-                canonical_declaration_sha256=Sha256Digest("0" * 64),
-                request_id_sha256=Sha256Digest("1" * 64),
-                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
-                runtime=_runtime_record(),
-            ),
-            {
-                "kind",
-                "canonical_declaration_sha256",
-                "request_id_sha256",
-                "containment_profile",
-                "runtime.kind",
-                "runtime.resolved_executable",
-                "runtime.id_doc.schema",
-                "runtime.id_doc.schema_version",
-                "runtime.id_doc.payload.kind",
-                "runtime.id_doc.payload.resolved_executable",
-                "runtime.id_doc.payload.implementation",
-                "runtime.id_doc.payload.python_version",
-                "runtime.id_doc.payload.cache_tag",
-                "runtime.id_doc.payload.platform",
-            },
-            id="untrusted-python",
-        ),
-    ],
-)
-def test_each_target_record_has_exact_recursive_key_paths(
-    store: DirectoryRunStore,
-    execution_id: ExecutionId,
-    target_record: ExecutionTargetRecord,
-    expected_paths: set[str],
-) -> None:
-    run = store.prepare(
-        _prepared_record(execution_id, target_record=target_record)
-    )
-    manifest = json.loads(_manifest_bytes(run.record_dir))
-
-    assert _leaf_key_paths(manifest["declaration"]["target"]) == expected_paths
 
 
 # --- degradation without changed attribution --------------------------

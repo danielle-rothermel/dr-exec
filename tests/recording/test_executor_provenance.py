@@ -88,6 +88,30 @@ def test_an_absent_distribution_yields_complete_unknown_provenance(
     )
 
 
+def test_an_absent_package_version_preserves_available_commit_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_commit = "d" * 40
+
+    def absent_version(name: str) -> str:
+        assert name == "dr-exec"
+        raise PackageNotFoundError(name)
+
+    def available_metadata(name: str) -> _Metadata:
+        assert name == "dr-exec"
+        return _Metadata(expected_commit)
+
+    monkeypatch.setattr(provenance, "version", absent_version)
+    monkeypatch.setattr(provenance, "metadata", available_metadata)
+
+    assert _snapshot_source() == ExecutorSourceSnapshot(
+        package_version="unknown",
+        source_commit=expected_commit,
+        source_state="clean",
+        session_id=None,
+    )
+
+
 def test_absent_distribution_metadata_is_not_an_absent_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
