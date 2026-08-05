@@ -189,6 +189,20 @@ class ExecutionPool:
         self._owning_loop = None
 
     @property
+    def state(self) -> ExecutionPoolState:
+        """The pool's lifecycle state, as an observational snapshot.
+
+        This is the machine-readable break signal: after a drain hands
+        over its buffered tail and the break raises, ``BROKEN`` here is
+        what distinguishes a scheduler-wide failure from any other
+        ``ExecutorFailure`` without parsing messages. It is a snapshot,
+        never a synchronization primitive — a caller that polls it for a
+        transition is racing the scheduler; wait on the pool's own calls
+        and read this afterward.
+        """
+        return self._state
+
+    @property
     def effective_capacity(self) -> EffectivePoolCapacity:
         """The capacity this pool resolved when it opened.
 

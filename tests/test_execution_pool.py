@@ -200,6 +200,25 @@ def test_automatic_capacity_resolves_once_from_the_usable_cpu_count() -> None:
     assert usable_cpu_count() >= 1
 
 
+def test_state_reports_each_lifecycle_stage_through_the_public_surface() -> None:
+    """`state` snapshots the lifecycle: created, running, closed.
+
+    The property is observational: each read here happens after the
+    transition's own call has returned, never as a wait target. The
+    broken stage is pinned where breaks are constructed, alongside the
+    drain-before-raise cases.
+    """
+    pool = fixed_pool(immediate_executor(), 1)
+    assert pool.state is ExecutionPoolState.CREATED
+
+    async def open_observe_close() -> ExecutionPoolState:
+        async with pool:
+            return pool.state
+
+    assert asyncio.run(open_observe_close()) is ExecutionPoolState.RUNNING
+    assert pool.state is ExecutionPoolState.CLOSED
+
+
 def test_fixed_capacity_uses_the_selected_slot_count() -> None:
     """A fixed pool records its own count and still names the machine."""
     pool = fixed_pool(immediate_executor(), 3)
@@ -525,7 +544,7 @@ def test_abort_cancels_work_in_flight_and_awaits_its_teardown() -> None:
     assert set(responder.cancelled) == {job.job_id for job in batch}
     for job in batch:
         assert responder.finished_gate(job.job_id).is_set()
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_abort_cancels_admitted_work_no_worker_has_started() -> None:
@@ -627,7 +646,7 @@ def test_abort_does_not_promise_delivery_of_what_it_tore_down() -> None:
 
     assert only.job_id in responder.cancelled
     assert responder.finished_gate(only.job_id).is_set()
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_drain_lets_admitted_work_finish_uncancelled() -> None:
@@ -659,7 +678,7 @@ def test_drain_lets_admitted_work_finish_uncancelled() -> None:
 
     assert responder.cancelled == ()
     assert responder.finished_gate(only.job_id).is_set()
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_drain_to_empty_delivers_every_admitted_submission() -> None:
@@ -676,7 +695,7 @@ def test_drain_to_empty_delivers_every_admitted_submission() -> None:
     asyncio.run(stream())
 
     assert sorted(collected) == list(range(len(batch)))
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_a_closed_pool_cannot_reopen_or_stream() -> None:
@@ -693,7 +712,7 @@ def test_a_closed_pool_cannot_reopen_or_stream() -> None:
 
     asyncio.run(close_then_reuse())
 
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_a_pool_rejects_lifecycle_calls_from_another_loop() -> None:
@@ -742,7 +761,7 @@ def test_a_pool_rejects_lifecycle_calls_from_another_loop() -> None:
     assert all("opened it" in rejection for rejection in rejections)
     # The owning loop's own close still runs: rejection refused the
     # foreign calls without leaving the pool wedged.
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 # --- Scheduler-wide failure ----------------------------------------------
@@ -773,7 +792,7 @@ def test_a_failing_executor_call_breaks_the_pool() -> None:
         asyncio.run(stream())
 
     assert isinstance(e.value.__cause__, ExecutorFailure)
-    assert pool._state is ExecutionPoolState.BROKEN
+    assert pool.state is ExecutionPoolState.BROKEN
 
 
 def test_a_break_survives_the_close_that_follows_it() -> None:
@@ -800,7 +819,7 @@ def test_a_break_survives_the_close_that_follows_it() -> None:
     with pytest.raises(ExecutorFailure, match="the execution pool broke"):
         asyncio.run(stream())
 
-    assert pool._state is ExecutionPoolState.BROKEN
+    assert pool.state is ExecutionPoolState.BROKEN
 
 
 @pytest.mark.parametrize("close", ["drain", "abort"])
@@ -860,7 +879,7 @@ def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
 
     asyncio.run(close_over_a_breaking_call())
 
-    assert pool._state is ExecutionPoolState.BROKEN
+    assert pool.state is ExecutionPoolState.BROKEN
 
 
 def _await_closed_intake(scheduler: _ExecutionScheduler[object], /) -> None:
@@ -1076,7 +1095,7 @@ def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
     # pinned here is that neither was dropped and the raise came last.
     assert sorted(delivered) == [0, 1]
     assert isinstance(e.value.__cause__, ExecutorFailure)
-    assert pool._state is ExecutionPoolState.BROKEN
+    assert pool.state is ExecutionPoolState.BROKEN
 
 
 def test_a_batch_break_delivers_the_buffered_tail_before_it_raises() -> None:
@@ -1247,7 +1266,7 @@ def test_a_drain_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
     asyncio.run(drain_mid_pull())
 
     assert 1 not in delivered
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 def test_an_abort_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
@@ -1285,7 +1304,7 @@ def test_an_abort_landing_mid_pull_ends_the_stream_without_a_failure() -> None:
     asyncio.run(abort_mid_pull())
 
     assert 1 not in delivered
-    assert pool._state is ExecutionPoolState.CLOSED
+    assert pool.state is ExecutionPoolState.CLOSED
 
 
 async def _collect_contexts(
