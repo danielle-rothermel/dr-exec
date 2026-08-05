@@ -1,320 +1,92 @@
 # dr-exec v1 implementation plan
 
-## Status
+The stack starts from the canonical v1 API scaffold. Source owns exact names,
+shapes, defaults, and signatures; the [planned v1 contracts](contracts.toml)
+own behavior, scope, and governance; the [v1 design](v1-design.md) owns
+implementation mechanics and qualification requirements. This document owns
+one thing: the decomposition of the remaining behavioral work into PRs. Every
+public stub stays unchanged until its complete v1 behavior replaces it in one
+PR.
 
-- **Starting point:** canonical v1 API scaffold.
-- **Strategy:** fresh implementation; one canonical path per behavior.
-- **Platform:** macOS first.
-- **Primary acceptance workload:** high-volume HumanEval-style evaluation.
-- **Bias:** smallest implementation satisfying accepted v1 contracts.
-- **Deferred:** robustness, portability, and extension work without a current
-  contract requirement.
+Prerequisite dr-serialize capabilities are specified in
+[dr-serialize additions](dr-serialize-additions.md); their released pin
+replaces the local source dependency before repository qualification.
 
-### Progress
-
-| Work item | Status | Current state |
-| --- | --- | --- |
-| High-level planning | **Finished** | Merged in PR #3; this document is committed on `main`. |
-| Planned v1 contract set | **Finished** | Consolidated and reviewed in open dr-exec PR #9; activation waits for implementation and repository qualification. |
-| Canonical API scaffold | **Finished** | Published and green in open dr-exec PR #9; behavioral operations remain intentional stubs. |
-| Dr-serialize implementation | **Merged** | The scoped capabilities merged in [dr-serialize PR #9](https://github.com/danielle-rothermel/dr-serialize/pull/9). |
-| Dr-serialize release and pin | **Pending** | The capabilities remain unreleased; dr-exec still pins published `0.1.0`. |
-| Dr-exec PRs 1–6 | **Not started** | Begin after dr-exec PR #9 merges; PR 1 may use local dr-serialize `main` until the released-pin cutover. |
-| Representative performance measurement | **Deferred** | Run after release during the first domain integration; not a v1 package PR and not a contract-activation gate. |
-
-## Explicitly excluded from this stack
-
-- Package-level throughput benchmark; measure the first representative domain
-  integration after release instead, without gating contract activation.
-- Pool prefetch; source intake and resident work are bounded by active capacity.
-- Automatic numerical-library thread environment policy; callers own it through
-  explicit environment grants.
-- Public dr-serialize conformance-corpus API or packaged vectors; dr-serialize
-  keeps internal golden coverage.
-- Exhaustive causal attribution proof; v1 records best-effort diagnostic
-  classification from available evidence.
-
-## Implementation rules
-
-- Build from the canonical source API; do not carry forward alternate public
-  entry points, record options, batch models, or execution paths.
-- Keep every public stub unchanged until its complete v1 behavior can replace
-  it in one PR.
-- Add tests with the first implemented behavior; every later PR owns tests for
-  its contract.
-- Use explicit state synchronization in concurrency/lifecycle tests; timeouts
-  are watchdogs only.
-- Keep domain concepts outside dr-exec:
-  - no HumanEval-specific models;
-  - no experiment dimensions;
-  - no LLM workflow state;
-  - no dr-platform lease state.
-- Preserve useful failure scenarios as requirements; rederive code and tests
-  against the canonical contracts instead of transplanting incompatible
-  implementations.
-- Treat agreed implementation scope as a ceiling. Audit and review findings are
-  evidence to triage, not authority to add behavior, guarantees, abstractions,
-  validation, or hardening.
-- Treat agreed guarantees as binding. Make the smallest coherent correction
-  required for agreed behavior to remain truthful and safe. For guarantees not
-  included in the agreed scope, prefer weakening the claim, simplifying the
-  model, or documenting a limitation over adding premature machinery.
-- During autonomous implementation, record scope-expanding recommendations in
-  the relevant plan or handoff and surface them in the final report; do not
-  silently build them.
-- Stop and report a blocker when truthful or safe implementation requires
-  authority beyond the agreed scope.
-- Maintain one open implementation stack.
-
-## Prerequisite: dr-serialize — implementation merged; release pending
-
-The scoped implementation is merged on dr-serialize `main` in
-[PR #9](https://github.com/danielle-rothermel/dr-serialize/pull/9). It provides
-only the capabilities specified in
-[dr-serialize additions](dr-serialize-additions.md):
-
-1. **Canonical byte access**
-   - canonical strict-JSON UTF-8 bytes;
-   - canonical identity-document UTF-8 bytes;
-   - existing canonical text and hash results unchanged.
-2. **Bounded strict JSON decode**
-   - bytes-first;
-   - strict UTF-8;
-   - duplicate-key rejection;
-   - non-finite-number rejection;
-   - one complete value;
-   - explicit byte and depth bounds;
-   - bounded typed diagnostics.
-3. **Nominal full SHA-256 value**
-   - exactly 64 lowercase hexadecimal characters;
-   - explicit parse failure;
-   - compatible with existing full-hash APIs.
-
-Non-goals:
-
-- public conformance-corpus API or packaged vector data;
-- execution models;
-- Pydantic base models/codecs;
-- NDJSON scanning or protocol state;
-- path or file operations;
-- sidecar hashing;
-- schema registries;
-- bulk data formats.
-
-The remaining prerequisite delivery work is to release the merged capabilities
-and replace dr-exec's temporary local dependency with that released pin before
-repository qualification. The merged local checkout is sufficient to begin PR
-1 after this planning PR merges.
-
-## Dr-exec implementation stack
-
-### PR 1: serialization, identities, and runtime preparation — not started
+## PR 1: serialization, identities, and runtime preparation
 
 Implement:
 
-- local-source integration for the merged dr-serialize capabilities, followed
-  by the released-pin cutover before repository qualification;
+- integration of the merged dr-serialize capabilities;
 - canonical safe model projections;
 - declaration, environment, executor, executor-config, and runtime identity
   construction;
 - executor source snapshot;
-- isolated-host interpreter probe;
-- isolated-host runtime `prepare()` and `describe()`;
+- isolated-host interpreter probe with runtime `prepare()` and `describe()`;
 - nominal SHA-256 usage at every digest boundary.
 
-Verify:
+Qualify: scalar and identity golden vectors and strict read/write behavior per
+the design's scalar wire spellings and validated serialization paths; executor
+provenance forms; the fixed `-I` probe; secret-free projections; public API
+import and model validation.
 
-- exact canonical scalar spellings;
-- identity schema/version/key goldens;
-- clean, dirty, and unknown executor provenance;
-- runtime probe under `-I`;
-- secret-bearing values absent from projections;
-- public API import and model validation.
+## PR 2: directory run store
 
-### PR 2: directory run store — not started
+Implement `DirectoryRunStore` per the design's durable recording sections:
+collision-free run directories, typed lifecycle handles, canonical manifests
+with atomic same-filesystem replacement, retained-output sidecars with
+streaming digests, complete and degraded receipts, and strict load validation.
 
-Implement:
+Qualify: the design's directory-store qualification list under its
+synchronization rules.
 
-- collision-free run directories;
-- typed prepared/running/finalized handles;
-- complete lifecycle manifests;
-- canonical manifest bytes;
-- stdout/stderr retained-output sidecars;
-- streaming sidecar SHA-256;
-- same-filesystem atomic manifest replacement;
-- macOS flush behavior;
-- complete and degraded receipts;
-- strict load validation.
+## PR 3: protected Python request and protocol
 
-Verify:
+Implement the design's Python request, driver protocol handle, and protected
+protocol sections: request transport over stdin through EOF, the library-owned
+bootstrap wrapper and protected fd 3 writer, the frame codec, the
+prelude/output/completion state machine, finite protocol self-budgets, and
+accepted-output preservation on later failure.
 
-- lifecycle transition validity;
-- abrupt-death recovery after explicit committed-state events;
-- sidecar length/digest checks;
-- deterministic head/tail reconstruction;
-- unwritable and failed-finalization degradation;
-- concurrent collision-free writers;
-- malformed/mismatched record rejection.
+Qualify: the design's protocol golden vectors, failure taxonomy, and exact
+finite frame/aggregate/count/depth edges, including unbudgeted axes without a
+hidden finite limit.
 
-### PR 3: protected Python request and protocol — not started
+## PR 4: single-run macOS engine
 
-Implement:
+Implement one private execution path for every target per the design's
+execution boundary, child descriptor, and core engine sections: declaration
+and platform validation, scratch workspace, exact environment grants, argv
+resolution, the library-owned spawn bootstrap, concurrent stdin, payload
+output, and protocol handling, workload budget enforcement, best-effort
+attribution, teardown and reaping on every post-spawn exit path, scratch
+cleanup, and the mandatory run-store lifecycle. Cut over
+`ProcessExecutor.run()`.
 
-- canonical identity-document request bytes;
-- stdin-through-EOF request transport;
-- protected fd 3 driver writer;
-- canonical NDJSON frame encoding;
-- LF frame acquisition;
-- strict bounded decode and canonical byte equality;
-- prelude/output/completion state machine;
-- request identity binding;
-- finite protocol self-budgets;
-- accepted-output preservation on later failure.
+Qualify: the design's containment, lifecycle, and core engine requirements
+across trusted-command, untrusted-command, and untrusted-Python targets,
+including isolation, budget edges, attribution races, teardown before every
+post-spawn exit, and recording degradation.
 
-Verify:
+## PR 5: fake executor and conformance
 
-- zero, one, and multiple outputs;
-- every ordering and completion-count failure;
-- malformed UTF-8/JSON and duplicate keys;
-- non-canonical bytes;
-- missing LF and trailing bytes;
-- identity mismatch;
-- exact finite frame/aggregate/count/depth edges;
-- unbudgeted policy without a hidden finite limit.
+Implement `FakeExecutor.run()` and `calls`: a thread-safe scripted response
+queue or a declaration-dependent responder (mutually exclusive), responder
+access to the call's cancellation token, immutable call capture, declaration
+validation parity, and fake receipt enforcement. Add the shared executor
+conformance suite.
 
-### PR 4: single-run macOS engine — not started
+Qualify: concurrent call isolation, deterministic response ordering and
+exhaustion, mismatched receipt rejection, production/fake validation parity,
+and the absence of process, scratch, or record side effects.
 
-Implement one private execution path for every target:
+## PR 6: execution pool, finite batch, and streaming
 
-- declaration and platform validation;
-- fresh scratch workspace;
-- exact environment grant;
-- direct argv resolution;
-- library-owned Python spawn bootstrap;
-- close-on-exec setup-status pipe;
-- bootstrap session creation, scratch `chdir`, exact fd mapping, and direct
-  payload `exec`;
-- fresh session and process group;
-- intended fd 0-3 mapping only;
-- concurrent stdin, payload stdout/stderr, and protocol handling;
-- deterministic structural head/tail retention;
-- finite supported workload budgets;
-- reject finite memory, CPU, process, file-size, open-file, and disk budgets;
-- best-effort attribution with documented limits;
-- configured original-process-group teardown and direct-child reaping on every
-  post-spawn exit path;
-- scratch cleanup;
-- mandatory run-store lifecycle;
-- `ProcessExecutor.run()` cutover.
+Implement one scheduler core behind `ExecutionPool`,
+`ProcessExecutor.run_many()`, `ProcessExecutor.open_pool()`, and
+`ExecutionPool.run_stream()`, with the admission, capacity, completion-order,
+backpressure, cancellation, abort, and drain behavior of the design's
+scheduling and throughput sections.
 
-Verify:
-
-- trusted command, untrusted command, and untrusted Python targets;
-- inherited-state and descriptor isolation;
-- input/output/wall-time budget edges;
-- pipe backpressure and full-duplex progress;
-- spawn absence versus other spawn failure;
-- output/deadline/exit attribution races;
-- process-group termination and re-session escape non-claim;
-- cleanup and recording degradation;
-- no post-spawn return or machinery-failure raise exits the call before required
-  original-process-group teardown and direct-child reaping complete.
-- finite join exhaustion raises without manufacturing a trustworthy result.
-
-### PR 5: fake executor and conformance — not started
-
-Implement:
-
-- thread-safe scripted response queue;
-- optional declaration-dependent responder, mutually exclusive with queued
-  responses;
-- responder access to the call's cancellation token;
-- immutable call capture;
-- declaration validation parity;
-- fake record receipt enforcement;
-- `FakeExecutor.run()` and `calls`;
-- shared executor conformance suite.
-
-Verify:
-
-- concurrent call isolation;
-- deterministic response ordering;
-- exhaustion behavior;
-- mismatched job/attempt/receipt rejection;
-- no scratch workspace, process, or real record creation;
-- production and fake declaration-validation parity.
-
-### PR 6: execution pool, finite batch, and streaming — not started
-
-Implement one scheduler core used by:
-
-- `ExecutionPool`;
-- `ProcessExecutor.run_many()`;
-- `ProcessExecutor.open_pool()`;
-- `ExecutionPool.run_stream()`.
-
-Required behavior:
-
-- automatic capacity resolved once from usable CPUs;
-- fixed positive capacity;
-- one active slot per job;
-- bounded completion buffering;
-- one resident bound covering running and completed-but-undelivered
-  submissions, capped by capacity;
-- lazy finite input;
-- capacity-driven streaming intake;
-- completion-order delivery;
-- ordinary per-job failures as completion data;
-- scheduler-wide failure as pool failure;
-- normal drain;
-- one `CancelToken` per active call;
-- `Executor.run(..., cancellation=...)` as the single public cancellation
-  boundary;
-- abort stops intake, cancels active tokens, and waits for executor teardown;
-- pre-spawn cancellation records a `CancelledOutcome` without spawning;
-- post-spawn cancellation performs configured original-process-group teardown
-  and direct-child reaping before returning `CancelledOutcome`;
-- closed-pool finality;
-- every completion carries exactly its submission's caller context, in memory
-  only and never serialized;
-- no automatic numeric-library environment policy.
-
-Verify with deterministic gates:
-
-- active count never exceeds capacity;
-- intake never exceeds capacity;
-- slow consumers apply backpressure;
-- completions arrive in completion order;
-- per-job failure does not fail the stream;
-- drain accepts no new work and completes active work;
-- abort terminates active work;
-- pre-spawn and post-spawn cancellation produce recorded terminal outcomes;
-- no future, thread, or process per queued job;
-- sync and async entry points share scheduler semantics.
-
-## Delivery sequence
-
-1. **Complete:** implement, review, and merge the scoped dr-serialize
-   capabilities in dr-serialize PR #9.
-2. **In progress:** merge the consolidated contracts and canonical API scaffold
-   in dr-exec PR #9.
-3. **Not started:** use local dr-serialize `main` while building dr-exec PRs
-   1–6 in order; keep reviews non-blocking while stacking.
-4. **Not started:** run adversarial review per PR and exact-tip validation at
-   stack completion.
-5. **Pending release:** release dr-serialize and replace the local source with
-   the released pin.
-6. **Not started:** run repository qualification at the pre-release tip and
-   activate the v1 contract set.
-7. **Not started:** release dr-exec.
-8. **Deferred until the first domain integration:** adopt dr-exec through its
-   released pin, measure representative throughput, and report optimization or
-   hardening recommendations separately.
-
-## Review checkpoints
-
-- **After PR 1:** identity and serialization bytes are stable enough to persist.
-- **After PR 2:** record durability and secret-safe evidence survive fault
-  injection.
-- **After PR 4:** one real run satisfies the full call-scoped lifecycle.
-- **After PR 6:** finite and streaming scheduling remain bounded.
+Qualify: the design's pool behaviors through deterministic synchronization
+gates, with sync and async entry points sharing scheduler semantics and no
+future, thread, or process per queued job.

@@ -1,21 +1,7 @@
 # dr-exec v1 design
 
-## Unresolved planning gaps
+## Authority
 
-- None.
-
-## Status and authority
-
-- **Planning and contract status:** complete in open dr-exec PR #9.
-- **API scaffold status:** complete in PR #9; behavioral operations remain
-  intentional stubs.
-- **Dr-serialize status:** required capabilities merged in
-  [dr-serialize PR #9](https://github.com/danielle-rothermel/dr-serialize/pull/9);
-  capability release and dr-exec pin cutover remain pending.
-- **Behavioral implementation status:** PRs 1–6 not started; see the
-  [implementation plan](implementation-plan.md).
-- **Qualification status:** pending the behavioral implementation and released
-  dependency pin.
 - **Primary platform:** macOS.
 - **Primary workload:** high-volume HumanEval-style local evaluation.
 - **API authority:** pinned releases of the
@@ -23,8 +9,9 @@
   [stable capability boundaries](../../src/dr_exec/protocols.py).
 - **Planned behavioral authority:** [v1 contracts](contracts.toml), activated
   only after the complete implementation passes repository qualification at the
-  pre-release tip. The post-release first domain-integration throughput
-  measurement does not gate activation.
+  pre-release tip.
+- **Implementation decomposition:**
+  [implementation plan](implementation-plan.md).
 - **Dependency plan:** [dr-serialize additions](dr-serialize-additions.md).
 - **Future runtime:**
   [verified uv-provisioned Python runtime](../future-plans/verified-python-runtime.md).
@@ -97,8 +84,6 @@ public claim. The implementation path to a verified runtime remains
   and canonicalized by dr-exec.
 - Required shared additions and qualification:
   [dr-serialize additions](dr-serialize-additions.md).
-- Use an explicit local source while implementing against the merged additions;
-  release and pin them before repository qualification.
 
 ## Validated serialization paths
 
@@ -161,24 +146,6 @@ bounded bytes acquired by dr-exec
 - **Bulk domain formats:** outside generic JSON lane; adapter records media
   type, size, digest, and schema identity as required.
 
-### Implementation order and progress
-
-1. **Complete:** add, adversarially qualify, and merge the shared
-   `dr-serialize` capabilities while preserving canonical text and digest
-   results.
-2. **Pending before repository qualification:** release `dr-serialize` and pin
-   it with Pydantic in dr-exec; local implementation may use dr-serialize
-   `main` first.
-3. **Not started:** implement boundary models, safe projections, scalar
-   goldens, and role-specific identities.
-4. **Not started:** implement and qualify request transport, protected protocol
-   codec, and state machine.
-5. **Not started:** implement and qualify lifecycle manifests, sidecars, and
-   the directory-store transaction protocol.
-6. **Not started:** run end-to-end conformance across canonical bytes, protocol
-   failures, partial outputs, crash-consistent records, and adapter
-   completeness.
-
 ## Scalar wire spellings
 
 | Scalar | Required spelling |
@@ -236,6 +203,10 @@ frame, identity, and record model under exact pinned dependency releases.
 
 - Resolve and validate absolute executable at construction.
 - Run one fixed construction-time `-I` probe and retain its runtime record.
+- Runtime identity includes the resolved absolute executable path, so equal
+  interpreter builds at different paths compare as distinct runtimes; this
+  false-split bias and its remedies are documented in
+  [isolated-host runtime identity portability](../future-plans/isolated-host-runtime-identity-portability.md).
 - Prepare fixed `<executable> -I -c <library-wrapper-source>` command; the
   wrapper embeds the declared consumer `driver_source` as data, opens the
   protocol handle, decodes the request, resolves `dr_exec_main`, and invokes it.
@@ -272,8 +243,7 @@ frame, identity, and record model under exact pinned dependency releases.
     the first bootstrap `exec`.
 
 This deliberately favors a small Python bootstrap over a native macOS spawn
-extension. It adds one fixed helper interpreter startup per job; the post-release
-first domain integration measures that cost without gating contract activation.
+extension. It adds one fixed helper interpreter startup per job.
 
 ### Python request
 
@@ -643,10 +613,6 @@ Synchronization rules:
   - sequential outer sample stream;
   - full-sweep materialization before progress;
   - consumer must rebuild admission/concurrency control.
-- **Deferred performance measurement:** measure the representative workload in
-  the first domain integration after release; this measurement does not gate
-  contract activation. Report optimization or hardening recommendations
-  separately instead of adding a package benchmark to v1.
 
 ### Execution job
 
@@ -764,11 +730,27 @@ Ownership:
 - **Consumer logic tests:** fake executor.
 - **Production parity/oracles:** real engine plus temporary directory store.
 
+## Verification antipatterns
+
+- **Golden scope creep.** Golden tests exist only where exact bytes are the
+  contract: digest payloads, identity documents, wire literals, persisted
+  keys and discriminants, and canonical scalar spellings. Model reprs,
+  exception messages, diagnostics, narration, and manifests whose byte layout
+  is not load-bearing never get goldens. Every golden beyond a byte contract
+  trains maintainers to regenerate goldens reflexively, which erodes the
+  tripwire value of the real ones.
+- **Mechanical golden regeneration.** A failing golden is never resolved by
+  updating the expected bytes to match current output. The failure signals
+  that persisted identity is changing meaning; the resolution is a decision —
+  revert the drift, or deliberately bump the schema version with new goldens
+  for the new version.
+
 ## Future design hooks
 
 Outside v1:
 
 - [verified uv-provisioned Python runtime](../future-plans/verified-python-runtime.md);
+- [isolated-host runtime identity portability](../future-plans/isolated-host-runtime-identity-portability.md);
 - filesystem/network containment profiles with concrete backends;
 - declared-cwd grant;
 - public spooled output;

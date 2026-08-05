@@ -163,6 +163,13 @@ coherent present-tense contract per behavior. Confirm intentional exclusions as
 part of acceptance and retain the ones that define the plan's standing scope.
 Delete the superseded classification files after verifying the consolidated set.
 
+The consolidated set is a complete replacement for `.defs/contracts.toml`, not
+a delta. Every current parent contract is either merged into a consolidated
+entry, carried forward verbatim from the unaddressed classification, or
+deliberately retired with the retirement recorded as part of acceptance.
+Replacement at activation is then a pure file swap; no active rule is lost by
+omission.
+
 The planned contract file declares its lifecycle explicitly:
 
 ```toml
@@ -183,3 +190,32 @@ After the complete plan passes its stated qualification, replace
 `.defs/contracts.toml` with the qualified set and update `.defs/terms.toml` for
 vocabulary that has become core. History belongs in dated changelog entries,
 not standing documentation.
+
+## 8. Converge the plan documents
+
+Document convergence happens at acceptance, alongside contract consolidation;
+later activation changes nothing in the plan documents.
+
+While planning is active, the documents in `docs/<plan>/` are working
+documents: notes, open questions, placeholders, and provisional structure are
+acceptable and are not prematurely polished.
+
+At acceptance, the surviving documents meet these end-state expectations:
+
+- **Single ownership per layer.** The consolidated contracts own what and why,
+  including scope and governance. The design document owns behavioral and
+  implementation mechanics and qualification requirements. The implementation
+  plan owns only the decomposition of remaining work, with qualification
+  pointers into the design rather than duplicated verification lists. Source
+  owns exact names, shapes, defaults, and signatures. Each statement has one
+  owner; everywhere else it is a link.
+- **Forward-facing content only.** No status, progress tracking, PR numbers,
+  review checkpoints, or delivery narration. PRs and dated changelog entries
+  own history and process.
+- **No restatement of standing agent rules.** Global working rules travel with
+  the agent configuration, not the repository; a plan document states only
+  decisions specific to the plan.
+
+Before deleting any clause as process residue, verify it is owned elsewhere —
+by a consolidated contract, a design section, or a standing global rule — and
+move rather than drop anything unowned.

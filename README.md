@@ -11,7 +11,9 @@ behavior remain intentionally unimplemented.
 - Exact public API: [`src/dr_exec/__init__.py`](src/dr_exec/__init__.py)
 - Stable capability boundaries:
   [`src/dr_exec/protocols.py`](src/dr_exec/protocols.py)
-- Behavioral and persistence contracts:
+- Planned behavioral contracts:
+  [`docs/v1-plan/contracts.toml`](docs/v1-plan/contracts.toml)
+- Design and qualification mechanics:
   [`docs/v1-plan/v1-design.md`](docs/v1-plan/v1-design.md)
 - Required shared serialization work:
   [`docs/v1-plan/dr-serialize-additions.md`](docs/v1-plan/dr-serialize-additions.md)

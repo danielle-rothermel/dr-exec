@@ -1,24 +1,11 @@
 # Dr-serialize capabilities for dr-exec v1
 
-## Status
-
-- **Scoped implementation:** complete and merged in
-  [dr-serialize PR #9](https://github.com/danielle-rothermel/dr-serialize/pull/9).
-- **Verification:** 240 tests pass on Python 3.12, 3.13, and 3.14; Ruff,
-  typing, lock, build, and focused adversarial review gates pass.
-- **Release:** pending; the capabilities remain under `Unreleased`, while the
-  latest published release is `0.1.0`.
-- **Dr-exec integration:** not started; PR 1 will use local dr-serialize `main`
-  until the released-pin cutover.
-- **Qualification gate:** dr-exec must use the released pin before repository
-  qualification and release.
-- **Additional dr-serialize scope:** none planned for v1.
-
 ## Objective and ownership
 
-This document defines the small general-purpose additions now merged on
-dr-serialize `main` to support dr-exec v1 without creating a second
-canonicalization or strict-JSON system in dr-exec. It does not broaden
+This document defines the small general-purpose dr-serialize additions that
+support dr-exec v1 without creating a second canonicalization or strict-JSON
+system in dr-exec. Dr-exec pins their released form before repository
+qualification; no additional dr-serialize scope is planned for v1. It does not broaden
 dr-serialize into an execution protocol, Pydantic model codec, persistence
 library, schema registry, or domain-format owner.
 
@@ -252,19 +239,3 @@ bounded bytes acquired by dr-exec
 field conversion into JSON-mode values; dr-serialize owns the final canonical
 JSON profile. Exact Pydantic spellings for UUIDs, paths, timestamps, and base64
 bytes remain dr-exec golden contracts under a pinned Pydantic release.
-
-## Delivery status and remaining integration
-
-| Stage | Status |
-| --- | --- |
-| Canonical and identity byte APIs | **Complete and merged** |
-| Bounded strict decoder and typed failures | **Complete and merged** |
-| Pydantic-compatible `Sha256Digest` | **Complete and merged** |
-| Internal golden and adversarial coverage | **Complete and merged** |
-| Capability release | **Pending** |
-| Local dr-exec integration | **Not started; planned for dr-exec PR 1** |
-| Released dr-exec dependency pin | **Pending before repository qualification** |
-
-The merged dr-serialize checkout no longer blocks local dr-exec serialization
-work. Its release remains a prerequisite for dr-exec repository qualification
-and release, not for beginning PR 1 with an explicit local source.
