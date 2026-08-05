@@ -2,11 +2,16 @@
 
 dr-exec owns the canonical manifest model, the typed lifecycle handles,
 the secret-safe projection of an execution result into durable evidence,
-the receipt semantics, and strict load validation. The pinned
-``dr_store.docdir`` primitive owns directory allocation, atomic durable
-manifest replacement, sidecar streaming, truncation, and digests: sidecar
-lengths and digests are read out of the finalized ``SidecarSummary`` and
-are never recomputed here.
+the receipt semantics, and the bounded, strictly validated load path. The
+pinned ``dr_store.docdir`` primitive owns directory allocation, atomic
+durable manifest replacement, sidecar streaming, truncation, digests, and
+verified sidecar reads: sidecar lengths and digests are read out of the
+finalized ``SidecarSummary`` and are never recomputed here.
+
+Loading is the shared read path applied to durable evidence. dr-exec
+bounds the stored manifest bytes before anything decodes them and then
+validates those same bytes, so a loaded record is a validation of what is
+on disk rather than of a re-rendering of it.
 """
 
 from __future__ import annotations
@@ -15,14 +20,19 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
-from dr_serialize import Jsonable, Sha256Digest, canonical_json_bytes
+from dr_serialize import Jsonable, SerializationError, Sha256Digest
 from dr_store.docdir import DocumentDirectory, SidecarSummary
-from dr_store.errors import DocumentDirectoryError, ManifestReadError
+from dr_store.errors import DocumentDirectoryError
 from pydantic import TypeAdapter, ValidationError
 
-from dr_exec._model import ContractModel
+from dr_exec._model import (
+    STRUCTURAL_DEPTH_CEILING,
+    ContractModel,
+    NonCanonicalBytesError,
+    require_canonical_json_bytes,
+)
 from dr_exec.errors import ExecutorFailure, RecordLoadError
 from dr_exec.kinds import RecordState
 from dr_exec.names import ExecutionId
@@ -71,6 +81,20 @@ STDOUT_SIDECAR_NAME = "stdout.bin"
 STDERR_SIDECAR_NAME = "stderr.bin"
 
 _RUN_RECORD_ADAPTER: TypeAdapter[RunRecord] = TypeAdapter(RunRecord)
+
+# The pinned structural ceiling on manifest bytes. This is not a budget:
+# ``DirectoryRunStore`` carries no self-budgets, so there is no declared
+# limit to apply here, and the design's read path nonetheless requires
+# dr-exec to bound bytes before any decode. Stating the number here means
+# the read is bounded by something dr-exec owns and a test pins, rather
+# than by whatever the machine happens to tolerate when the pinned
+# Document Directory reads a manifest whole. Honest limitation: protocol
+# outputs are retained inline and complete, so an unbudgeted run can in
+# principle write a manifest this large and then fail to read it back.
+# That is the structural limit of reading a manifest into memory at all,
+# made explicit and refused before the read rather than left to surface
+# as memory exhaustion.
+STRUCTURAL_MANIFEST_BYTE_CEILING: Final = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,7 +365,8 @@ class DirectoryRunStore:
     ) -> RunRecord:
         """Validate and return the run record stored at ``record_dir``.
 
-        Malformed manifest bytes, an invalid lifecycle model, an unsafe
+        A manifest larger than ``STRUCTURAL_MANIFEST_BYTE_CEILING``,
+        malformed manifest bytes, an invalid lifecycle model, an unsafe
         artifact path, and a sidecar length or digest mismatch all raise
         ``RecordLoadError``, preserving the originating shared decoding,
         verification, or validation error as ``__cause__``. An incomplete
@@ -451,34 +476,56 @@ def _directory(record_dir: Path, /) -> DocumentDirectory:
     return DocumentDirectory(record_dir, MANIFEST_NAME)
 
 
-def _load_record(record_dir: Path, /) -> RunRecord:
-    """Read, then strictly validate, the manifest at ``record_dir``.
+def _read_bounded_manifest_bytes(record_dir: Path, /) -> bytes:
+    """Return the stored manifest bytes, refusing an over-ceiling file.
 
-    The primitive returns the decoded payload rather than the bytes it
-    verified, so the bytes handed to strict JSON-mode validation are a
-    canonical re-encoding of that payload. Their equality with the
-    stored bytes rests on the two pinned packages sharing one canonical
-    profile, which is a cross-package assumption pinned by test rather
-    than a property re-derived here. The decoded ``Jsonable`` itself
-    never reaches Pydantic; dr-exec then owns lifecycle meaning.
-
-    This read is unbounded in v1: the primitive reads the manifest whole
-    and applies no byte or depth limit, and ``DirectoryRunStore`` takes
-    no self-budgets, so the ``manifest_bytes`` axis is not enforced here.
+    The size comes from the directory entry, so nothing is read to learn
+    it and an oversized manifest is never materialized. A manifest that
+    cannot be stat-ed or read at all is the same missing-or-unreadable
+    failure either way.
     """
+    manifest_path = record_dir / MANIFEST_NAME
     try:
-        payload = DocumentDirectory.read_manifest(
-            record_dir,
-            manifest_name=MANIFEST_NAME,
-        )
-    except ManifestReadError as error:
+        if manifest_path.stat().st_size > STRUCTURAL_MANIFEST_BYTE_CEILING:
+            raise RecordLoadError(
+                f"run record manifest at {record_dir} exceeds "
+                f"{STRUCTURAL_MANIFEST_BYTE_CEILING} bytes"
+            )
+        return manifest_path.read_bytes()
+    except OSError as error:
         raise RecordLoadError(
             f"could not read the run record at {record_dir}"
         ) from error
+
+
+def _load_record(record_dir: Path, /) -> RunRecord:
+    """Read, then strictly validate, the manifest at ``record_dir``.
+
+    This is the shared read path applied to durable evidence: dr-exec
+    bounds the stored bytes before decode, hands exactly those bytes to
+    the pinned bounded strict decode and canonical-equality check, and
+    then validates those same original bytes in strict JSON mode. The
+    decoded ``Jsonable`` never reaches Pydantic, so the record that loads
+    is a validation of the bytes on disk rather than of a re-rendering
+    of them. dr-exec then owns lifecycle meaning.
+
+    ``DirectoryRunStore`` carries no self-budgets, so
+    ``STRUCTURAL_MANIFEST_BYTE_CEILING`` -- not the declarable
+    ``manifest_bytes`` axis -- is what bounds this read.
+    """
+    manifest_bytes = _read_bounded_manifest_bytes(record_dir)
     try:
-        return _RUN_RECORD_ADAPTER.validate_json(
-            canonical_json_bytes(payload), strict=True
+        require_canonical_json_bytes(
+            manifest_bytes,
+            max_bytes=len(manifest_bytes),
+            max_depth=STRUCTURAL_DEPTH_CEILING,
         )
+    except (SerializationError, NonCanonicalBytesError) as error:
+        raise RecordLoadError(
+            f"run record at {record_dir} is not canonical JSON bytes"
+        ) from error
+    try:
+        return _RUN_RECORD_ADAPTER.validate_json(manifest_bytes, strict=True)
     except ValidationError as error:
         raise RecordLoadError(
             f"run record at {record_dir} is not a valid lifecycle record"

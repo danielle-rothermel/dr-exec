@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
-from base64 import urlsafe_b64decode
+from base64 import b64decode, urlsafe_b64encode
 from datetime import datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from uuid import UUID
 
 from dr_serialize import (
@@ -39,6 +39,17 @@ class ContractModel(BaseModel):
 
 class NonCanonicalBytesError(ValueError):
     """Decoded bytes are not their own canonical re-encoding."""
+
+
+# The pinned structural ceiling on JSON nesting. This is not a budget: it
+# is the depth at which the pinned Pydantic JSON parser stops recursing,
+# restated here so dr-exec owns the number rather than inheriting it as
+# an invisible parser artifact. Bounding the shared decoder by it means
+# depth overflow is always detected on the dr-serialize path, and always
+# reported the same way, instead of surfacing from the parser behind it
+# at some depths and not others. Every read boundary that has no declared
+# depth budget tighter than this one bounds itself here.
+STRUCTURAL_DEPTH_CEILING: Final = 200
 
 
 def canonical_model_bytes(model: ContractModel, /) -> bytes:
@@ -160,9 +171,8 @@ CanonicalUuid = Annotated[
 # accepts the standard alphabet and unpadded input, so up to four distinct
 # documents would otherwise decode to one value and re-digest differently
 # than the bytes they came from.
-_URL_SAFE_BASE64_PATTERN = re.compile(
-    r"(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}==|[A-Za-z0-9_-]{3}=)?"
-)
+_BASE64_MESSAGE = "bytes must be canonical padded URL-safe base64"
+_URL_SAFE_ALTCHARS = b"-_"
 
 
 def _require_pinned_base64_spelling(value: Any) -> Any:
@@ -171,12 +181,27 @@ def _require_pinned_base64_spelling(value: Any) -> Any:
     As with the timestamp, the decode happens here so the permissive
     standard-alphabet and unpadded forms the parser would otherwise accept
     never reach a bytes field.
+
+    Canonicity is decided by re-encoding rather than by an alphabet
+    pattern: base64's final character carries unused bits that the encoder
+    always emits as zero, so a pattern alone still admits spellings like
+    ``AB==`` that decode to the same bytes as ``AA==``. Requiring the
+    input to equal the encoder's own output for the decoded bytes leaves
+    exactly one spelling per value.
     """
     if not isinstance(value, str):
         return value
-    if not _URL_SAFE_BASE64_PATTERN.fullmatch(value):
-        raise ValueError("bytes must be padded URL-safe base64")
-    return urlsafe_b64decode(value)
+    try:
+        decoded = b64decode(
+            value.encode("ascii"),
+            altchars=_URL_SAFE_ALTCHARS,
+            validate=True,
+        )
+    except ValueError as error:
+        raise ValueError(_BASE64_MESSAGE) from error
+    if urlsafe_b64encode(decoded).decode("ascii") != value:
+        raise ValueError(_BASE64_MESSAGE)
+    return decoded
 
 
 Base64UrlBytes = Annotated[

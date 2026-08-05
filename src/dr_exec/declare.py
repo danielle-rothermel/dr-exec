@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from typing import Annotated, Literal, Self
+from typing import Annotated, Final, Literal, Self
 
 from dr_serialize import Sha256Digest, canonical_sorted_values
 from pydantic import (
@@ -21,6 +21,7 @@ from dr_exec._model import (
     IdentityDocumentField,
 )
 from dr_exec.kinds import (
+    BudgetAxis,
     ContainmentProfile,
     EnvGrantKind,
     ExecutionTargetKind,
@@ -102,6 +103,21 @@ type OutputBudget = Annotated[
 ]
 
 
+# The workload axes v1 declares but enforces nowhere. They are named
+# through `BudgetAxis`, which already pins each spelling, so this list
+# cannot drift from the axis vocabulary the outcome data uses. Moving an
+# axis off this list is a contract revision, not a local edit: it means
+# some component now enforces it.
+_UNSUPPORTED_FINITE_WORKLOAD_AXES: Final = (
+    BudgetAxis.MEMORY_BYTES,
+    BudgetAxis.CPU_TIME,
+    BudgetAxis.PROCESS_COUNT,
+    BudgetAxis.FILE_SIZE_BYTES,
+    BudgetAxis.OPEN_FILE_COUNT,
+    BudgetAxis.DISK_BYTES,
+)
+
+
 class Budgets(ContractModel):
     wall_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
     input_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
@@ -112,6 +128,29 @@ class Budgets(ContractModel):
     file_size_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
     open_file_count: CountBudget = Field(default_factory=UnbudgetedLimit)
     disk_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
+
+    @model_validator(mode="after")
+    def unsupported_axes_must_be_unbudgeted(self) -> Budgets:
+        """Refuse a finite limit v1 has no enforcement point for.
+
+        V1 enforces finite workload limits on wall time, input bytes, and
+        aggregate payload output only. The remaining axes exist because
+        every axis is explicitly unbudgeted rather than absent -- but a
+        finite value on one of them would be a declared protection the
+        engine never applies, so it is rejected at the boundary instead
+        of recorded as policy that does not hold.
+        """
+        declared_finite = [
+            axis
+            for axis in _UNSUPPORTED_FINITE_WORKLOAD_AXES
+            if getattr(self, axis).kind is LimitKind.FINITE
+        ]
+        if declared_finite:
+            raise ValueError(
+                f"{', '.join(declared_finite)} accept no finite limit in "
+                "v1 and must be unbudgeted"
+            )
+        return self
 
     @classmethod
     def unbudgeted(cls) -> Budgets:

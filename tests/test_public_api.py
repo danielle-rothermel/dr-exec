@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from dr_serialize import Sha256Digest, build_identity_document
@@ -11,11 +12,16 @@ from pydantic import ValidationError
 
 import dr_exec
 from dr_exec import (
+    Budgets,
     EnvGrantKind,
     EnvGrantRecord,
     ExecutorSelfBudgets,
+    FiniteByteLimit,
+    FiniteCountLimit,
+    FiniteDurationLimit,
     OutputArtifactRecord,
     RuntimeRecord,
+    UnbudgetedLimit,
 )
 from dr_exec._identity import (
     _build_executor_config_identity,
@@ -24,6 +30,9 @@ from dr_exec._identity import (
     _validate_isolated_host_runtime_identity,
 )
 from dr_exec._wire import ProtocolPrelude
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 VALID_DIGEST = "a" * 64
 
@@ -182,6 +191,76 @@ def test_identity_validators_reject_a_foreign_schema_version() -> None:
     )
     with pytest.raises(ValueError, match="schema version 1"):
         _validate_executor_config_identity(document)
+
+
+# Each case builds `Budgets` through a real keyword rather than a mapping
+# splat, so the declaration each case makes is exactly the one a caller
+# could write and stays type-checked.
+UNSUPPORTED_FINITE_WORKLOAD_AXES = (
+    pytest.param(
+        lambda: Budgets(memory_bytes=FiniteByteLimit(max_bytes=1)),
+        id="memory-bytes",
+    ),
+    pytest.param(
+        lambda: Budgets(cpu_time=FiniteDurationLimit(max_ns=1)),
+        id="cpu-time",
+    ),
+    pytest.param(
+        lambda: Budgets(process_count=FiniteCountLimit(max_count=1)),
+        id="process-count",
+    ),
+    pytest.param(
+        lambda: Budgets(file_size_bytes=FiniteByteLimit(max_bytes=1)),
+        id="file-size-bytes",
+    ),
+    pytest.param(
+        lambda: Budgets(open_file_count=FiniteCountLimit(max_count=1)),
+        id="open-file-count",
+    ),
+    pytest.param(
+        lambda: Budgets(disk_bytes=FiniteByteLimit(max_bytes=1)),
+        id="disk-bytes",
+    ),
+)
+
+
+@pytest.mark.parametrize("declare", UNSUPPORTED_FINITE_WORKLOAD_AXES)
+def test_budgets_reject_a_finite_limit_v1_never_enforces(
+    declare: Callable[[], Budgets],
+) -> None:
+    """A declared limit no component applies is refused, not recorded.
+
+    These axes exist so that every axis is explicitly unbudgeted rather
+    than absent. Accepting a finite value on one would put a protection
+    into the record and the config identity that the engine never
+    applies.
+    """
+    with pytest.raises(ValidationError, match="accept no finite limit"):
+        declare()
+
+
+def test_unsupported_axes_still_accept_their_unbudgeted_spelling() -> None:
+    """Only the finite spelling is refused, never the axis itself."""
+    budgets = Budgets(
+        memory_bytes=UnbudgetedLimit(),
+        cpu_time=UnbudgetedLimit(),
+        process_count=UnbudgetedLimit(),
+        file_size_bytes=UnbudgetedLimit(),
+        open_file_count=UnbudgetedLimit(),
+        disk_bytes=UnbudgetedLimit(),
+    )
+
+    assert budgets == Budgets.unbudgeted()
+
+
+def test_budgets_accept_the_finite_limits_v1_enforces() -> None:
+    wall_time = FiniteDurationLimit(max_ns=1)
+    input_bytes = FiniteByteLimit(max_bytes=1)
+
+    budgets = Budgets(wall_time=wall_time, input_bytes=input_bytes)
+
+    assert budgets.wall_time == wall_time
+    assert budgets.input_bytes == input_bytes
 
 
 def test_executor_config_identity_accepts_effective_self_budgets() -> None:

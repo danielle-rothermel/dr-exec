@@ -34,6 +34,7 @@ from dr_serialize import (
 from pydantic import TypeAdapter, ValidationError
 
 from dr_exec._model import (
+    STRUCTURAL_DEPTH_CEILING,
     NonCanonicalBytesError,
     require_canonical_json_bytes,
 )
@@ -59,18 +60,6 @@ _FRAME_ADAPTER: TypeAdapter[ProtocolFrame] = TypeAdapter(ProtocolFrame)
 # size is a transport detail, never a protocol limit: acquisition stops at
 # the terminator or at a declared finite budget, never at this value.
 _CHUNK_BYTES: Final = 65536
-
-# The pinned structural ceiling on frame nesting. This is not a budget: it
-# is the depth at which the pinned Pydantic JSON parser stops recursing,
-# restated here so dr-exec owns the number rather than inheriting it as an
-# invisible parser artifact. Bounding the shared decoder by it means depth
-# overflow is always detected on the dr-serialize path and always
-# classified `OVERSIZED_FRAME`, instead of surfacing from the parser
-# behind it as a malformed frame at one depth and an oversized frame at
-# another. An unbudgeted `json_depth` axis installs no *budget*; this
-# ceiling is the structural limit of the pinned parsers, which the design
-# leaves as machine-resource exhaustion rather than executor policy.
-STRUCTURAL_DEPTH_CEILING: Final = 200
 
 
 class ProtocolViolation(Exception):
@@ -191,6 +180,22 @@ def _finite_bytes(budget: ByteBudget, /) -> int | None:
 
 def _finite_count(budget: CountBudget, /) -> int | None:
     return budget.max_count if isinstance(budget, FiniteCountLimit) else None
+
+
+def _effective_depth(max_depth: int | None, /) -> int:
+    """Bound the decoder by the tighter of the budget and the ceiling.
+
+    A declaration may legally spell a ``json_depth`` budget above the
+    structural ceiling. Passing that budget through verbatim would let the
+    parser behind the shared decoder be the component that rejects the
+    frame, which reports a malformed frame -- so the same over-deep input
+    would classify one way under a small budget and another way under a
+    large one. Clamping keeps the depth classification single-valued
+    whatever the declaration spells.
+    """
+    if max_depth is None:
+        return STRUCTURAL_DEPTH_CEILING
+    return min(max_depth, STRUCTURAL_DEPTH_CEILING)
 
 
 @dataclass(slots=True)
@@ -409,11 +414,7 @@ def read_protocol_stream(
             state.accept(
                 decode_frame(
                     frame_bytes,
-                    max_depth=(
-                        STRUCTURAL_DEPTH_CEILING
-                        if max_depth is None
-                        else max_depth
-                    ),
+                    max_depth=_effective_depth(max_depth),
                 )
             )
     except ProtocolViolation as violation:

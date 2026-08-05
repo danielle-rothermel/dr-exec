@@ -225,6 +225,14 @@ REJECTED_BYTES_SPELLINGS = (
     pytest.param("AAH+/w==", id="standard-alphabet-padded"),
     pytest.param("AAH-_w", id="url-safe-unpadded"),
     pytest.param("AAH+/w", id="standard-alphabet-unpadded"),
+    # The final character of a padded group carries bits the encoder
+    # never sets, so these all decode to bytes whose own encoding is a
+    # different string: `AB==`, `AC==`, and `AP==` decode to `AA==`'s
+    # `b"\x00"`, and `AAF=` decodes to `AAE=`'s `b"\x00\x01"`.
+    pytest.param("AB==", id="two-char-trailing-bits-low"),
+    pytest.param("AC==", id="two-char-trailing-bits-mid"),
+    pytest.param("AP==", id="two-char-trailing-bits-high"),
+    pytest.param("AAF=", id="three-char-trailing-bits"),
 )
 
 

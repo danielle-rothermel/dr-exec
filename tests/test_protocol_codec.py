@@ -21,8 +21,8 @@ from dr_exec import (
     ProtocolFailureCode,
     UnbudgetedLimit,
 )
+from dr_exec._model import STRUCTURAL_DEPTH_CEILING
 from dr_exec._protocol import (
-    STRUCTURAL_DEPTH_CEILING,
     ProtocolStreamResult,
     encode_frame,
     read_protocol_stream,
@@ -760,6 +760,55 @@ def test_depth_past_the_structural_ceiling_is_oversized_not_malformed(
     )
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.OVERSIZED_FRAME
+
+
+@pytest.mark.parametrize(
+    "payload_depth",
+    [
+        pytest.param(_DEEPEST_ACCEPTED_PAYLOAD + 1, id="just-past-ceiling"),
+        pytest.param(_DEEPEST_ACCEPTED_PAYLOAD + 300, id="deep-past-ceiling"),
+    ],
+)
+def test_depth_past_the_ceiling_is_oversized_under_a_larger_budget(
+    payload_depth: int,
+) -> None:
+    """A budget above the ceiling does not change the classification.
+
+    A declaration may legally spell a `json_depth` budget larger than the
+    structural ceiling. The ceiling still bounds the shared decoder, so a
+    frame nested between the ceiling and that budget is `OVERSIZED_FRAME`
+    exactly as it is when unbudgeted or under a small budget -- rather
+    than reaching the parser behind the decoder and reporting a malformed
+    frame.
+    """
+    digest = Sha256Digest("a" * 64)
+    budget = STRUCTURAL_DEPTH_CEILING + 1000
+    assert payload_depth < budget
+    result = _read(
+        _raw_nested_stream(digest, payload_depth),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets(
+            json_depth=FiniteCountLimit(max_count=budget)
+        ),
+    )
+    assert result.failure is not None
+    assert result.failure.code == ProtocolFailureCode.OVERSIZED_FRAME
+
+
+def test_a_budget_above_the_ceiling_still_accepts_frames_beneath_it() -> None:
+    """Clamping narrows nothing the ceiling already admits."""
+    digest = Sha256Digest("a" * 64)
+    result = _read(
+        _raw_nested_stream(digest, _DEEPEST_ACCEPTED_PAYLOAD),
+        request_id_sha256=digest,
+        self_budgets=ExecutorSelfBudgets(
+            json_depth=FiniteCountLimit(
+                max_count=STRUCTURAL_DEPTH_CEILING + 1000
+            )
+        ),
+    )
+    assert result.completed
+    assert len(result.outputs) == 1
 
 
 # --- Request transport ---------------------------------------------------

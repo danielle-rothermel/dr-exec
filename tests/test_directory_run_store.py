@@ -20,10 +20,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from dr_serialize import canonical_json_bytes
-from dr_store.docdir import DocumentDirectory
 from dr_store.errors import DocumentDirectoryError
 from pydantic import ValidationError
 
+import dr_exec.store
 from dr_exec import (
     AttemptId,
     Budgets,
@@ -73,6 +73,8 @@ from dr_exec.store import (
     RECORD_DIRECTORY_PREFIX,
     STDERR_SIDECAR_NAME,
     STDOUT_SIDECAR_NAME,
+    STRUCTURAL_MANIFEST_BYTE_CEILING,
+    _read_bounded_manifest_bytes,
 )
 
 if TYPE_CHECKING:
@@ -744,9 +746,13 @@ def test_concurrent_writers_allocate_collision_free_directories(
 @pytest.mark.parametrize(
     ("manifest", "expected_message"),
     [
-        pytest.param(b"{", "could not read", id="malformed-json"),
-        pytest.param(b"\xff\xfe", "could not read", id="invalid-utf8"),
-        pytest.param(b'{"b":1,"a":2}', "could not read", id="non-canonical"),
+        pytest.param(b"{", "not canonical JSON bytes", id="malformed-json"),
+        pytest.param(
+            b"\xff\xfe", "not canonical JSON bytes", id="invalid-utf8"
+        ),
+        pytest.param(
+            b'{"b":1,"a":2}', "not canonical JSON bytes", id="non-canonical"
+        ),
         pytest.param(b'{"state":"gone"}', "not a valid", id="unknown-state"),
         pytest.param(b"{}", "not a valid", id="missing-discriminant"),
     ],
@@ -809,23 +815,20 @@ def test_load_rejects_a_corrupted_embedded_identity_document(
     assert raised.value.__cause__ is not None
 
 
-def test_the_manifest_read_reproduces_the_stored_canonical_bytes(
+def test_the_manifest_read_validates_exactly_the_stored_bytes(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Strict validation runs on bytes equal to the ones on disk.
+    """Strict validation runs on the bytes that are on disk.
 
-    The primitive returns a decoded payload rather than the bytes it
-    verified, so the load path re-encodes it. This pins the two pinned
-    packages' canonical profiles agreeing, for every lifecycle state.
+    The load path reads the stored bytes itself and hands those same
+    bytes to strict validation, so nothing between disk and Pydantic
+    re-renders the record. Checked for every lifecycle state.
     """
 
     def stored_bytes_round_trip() -> bytes:
         raw = _manifest_bytes(run.record_dir)
-        decoded = DocumentDirectory.read_manifest(
-            run.record_dir, manifest_name=MANIFEST_NAME
-        )
-        assert canonical_json_bytes(decoded) == raw
+        assert _read_bounded_manifest_bytes(run.record_dir) == raw
         return raw
 
     run = store.prepare(_prepared_record(execution_id))
@@ -838,6 +841,58 @@ def test_the_manifest_read_reproduces_the_stored_canonical_bytes(
     finalized_bytes = stored_bytes_round_trip()
 
     assert len({prepared_bytes, running_bytes, finalized_bytes}) == 3
+
+
+def test_the_manifest_byte_ceiling_is_exactly_pinned() -> None:
+    """The bound on the manifest read is a stated dr-exec number.
+
+    ``DirectoryRunStore`` carries no self-budgets, so nothing declared
+    bounds this read; only this constant does. Pinning it here is what
+    makes the bound auditable rather than incidental.
+    """
+    assert STRUCTURAL_MANIFEST_BYTE_CEILING == 64 * 1024 * 1024
+
+
+def test_load_rejects_a_manifest_past_the_byte_ceiling_before_reading_it(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    """Bytes are bounded before decode, from the directory entry alone.
+
+    The oversized manifest is grown sparsely, so a bound applied to bytes
+    already read would have to materialize the whole file to reach the
+    same verdict. Refusal at the real ceiling therefore shows the size
+    comes from the directory entry, ahead of any read or decode.
+    """
+    run = store.prepare(_prepared_record(execution_id))
+    manifest_path = run.record_dir / MANIFEST_NAME
+    with manifest_path.open("r+b") as manifest:
+        manifest.truncate(STRUCTURAL_MANIFEST_BYTE_CEILING + 1)
+    assert manifest_path.stat().st_size == STRUCTURAL_MANIFEST_BYTE_CEILING + 1
+
+    with pytest.raises(RecordLoadError, match="exceeds"):
+        store.load(run.record_dir)
+
+
+def test_a_manifest_exactly_at_the_byte_ceiling_is_read_whole(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ceiling is inclusive: only a byte past it is refused.
+
+    The ceiling is lowered to the stored manifest's own length rather
+    than growing a manifest to the real ceiling, so the boundary is
+    exercised on exactly the bytes a real record contains.
+    """
+    run = store.prepare(_prepared_record(execution_id))
+    stored = _manifest_bytes(run.record_dir)
+    monkeypatch.setattr(
+        dr_exec.store, "STRUCTURAL_MANIFEST_BYTE_CEILING", len(stored)
+    )
+
+    assert _read_bounded_manifest_bytes(run.record_dir) == stored
+    assert store.load(run.record_dir).state == RecordState.PREPARED
 
 
 def test_load_rejects_a_missing_manifest(

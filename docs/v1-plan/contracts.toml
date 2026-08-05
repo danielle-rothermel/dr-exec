@@ -136,9 +136,11 @@ axis, declarations have no unset state, effective workload and self-budgets \
 participate in records and identity, and the engine installs no hidden, \
 adaptive, machine-derived, or capacity-derived finite limit. A supported axis \
 is one a declaration may legally spell; each axis is enforced by the single \
-component that owns its boundary, and `manifest_bytes` names no enforcement \
-point in v1 because `DirectoryRunStore` carries no self-budgets and the pinned \
-Document Directory reads a manifest whole.
+component that owns its boundary. `DirectoryRunStore` carries no self-budgets, \
+so a declared `manifest_bytes` value reaches no enforcement point in v1; the \
+manifest read is instead bounded before decode by a stated, test-pinned \
+structural ceiling, which is a property of reading a manifest into memory \
+rather than a caller-declared limit.
 """
 
 [[contracts]]
