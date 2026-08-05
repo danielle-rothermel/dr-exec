@@ -1,5 +1,3 @@
-"""Shared state synchronization and hang protection for process tests."""
-
 from __future__ import annotations
 
 import os
@@ -25,7 +23,6 @@ _PID_POLL_SECONDS = 0.01
 
 @pytest.fixture
 def process_watchdog() -> Iterator[object]:
-    """Fail a hung process case without treating time as success evidence."""
     timer = threading.Timer(
         WATCHDOG_SECONDS,
         lambda: os.kill(os.getpid(), signal.SIGALRM),
@@ -42,8 +39,6 @@ def process_watchdog() -> Iterator[object]:
 
 @dataclass(frozen=True, slots=True)
 class Gate:
-    """One FIFO that synchronizes parent and child on an observed event."""
-
     path: Path
 
     @classmethod
@@ -53,18 +48,15 @@ class Gate:
         return cls(path=path)
 
     def receive(self) -> str:
-        """Block until the peer writes, then return exactly what it sent."""
         with self.path.open() as reader:
             return reader.read()
 
     def release(self, message: str = "go", /) -> None:
-        """Unblock a peer waiting on this gate."""
         with self.path.open("w") as writer:
             writer.write(message)
 
 
 def exact_pid_exists(pid: int, /) -> bool:
-    """Probe only the exact process identifier supplied by a test case."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -73,7 +65,6 @@ def exact_pid_exists(pid: int, /) -> bool:
 
 
 def _kill_and_await_exact_pid(pid: int, /) -> None:
-    """Kill one registered PID and require its kernel identity to disappear."""
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -98,7 +89,6 @@ def _kill_and_await_exact_pid(pid: int, /) -> None:
 
 @contextmanager
 def cleanup_exact_pids() -> Iterator[list[int]]:
-    """Unconditionally kill only the exact PIDs registered by one case."""
     registered: list[int] = []
     try:
         yield registered
@@ -109,8 +99,6 @@ def cleanup_exact_pids() -> Iterator[list[int]]:
 
 @dataclass(frozen=True, slots=True)
 class ThreadedCall[T]:
-    """One caller thread whose return or failure is retained for its owner."""
-
     thread: threading.Thread
     future: Future[T]
 
@@ -119,7 +107,6 @@ def start_threaded_calls[T](
     calls: Sequence[Callable[[], T]],
     /,
 ) -> tuple[ThreadedCall[T], ...]:
-    """Start calls together without losing a return value or exception."""
     started: list[ThreadedCall[T]] = []
     for index, call in enumerate(calls):
         future: Future[T] = Future()
@@ -147,7 +134,6 @@ def finish_threaded_calls[T](
     calls: Sequence[ThreadedCall[T]],
     /,
 ) -> tuple[T, ...]:
-    """Join every caller, then return all results or surface all failures."""
     deadline = monotonic() + WATCHDOG_SECONDS
     for call in calls:
         call.thread.join(timeout=max(0.0, deadline - monotonic()))

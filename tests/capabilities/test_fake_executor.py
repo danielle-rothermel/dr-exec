@@ -1,19 +1,3 @@
-"""``FakeExecutor`` behavior that is the fake's own, not shared semantics.
-
-The behaviors both executors genuinely share -- declaration validation,
-supported target shapes, and truthful receipt kinds -- live in the shared
-conformance suite next door. What this file qualifies is what only the fake
-has: caller-owned completion scripts, the two mutually exclusive response
-sources, deterministic queue ordering and exhaustion, immutable call capture,
-mismatched receipt rejection, and the absence of process, scratch, and record
-side effects.
-
-Concurrency here synchronizes on barriers and events. No case treats
-elapsed time as evidence that a call interleaved, and every blocking case
-carries a watchdog so a deadlocked fake fails loudly instead of hanging the
-suite.
-"""
-
 from __future__ import annotations
 
 import os
@@ -48,7 +32,6 @@ CONCURRENT_CALLERS = 8
 
 @pytest.fixture
 def watchdog() -> object:
-    """Fail a hung case instead of letting it hang the whole suite."""
     timer = threading.Timer(
         WATCHDOG_SECONDS,
         lambda: os.kill(os.getpid(), signal.SIGALRM),
@@ -67,11 +50,7 @@ def job() -> ExecutionJob:
     return job_for(trusted_target(("/usr/bin/true",)))
 
 
-# --- One response source, chosen at construction -------------------------
-
-
 def test_construction_rejects_both_response_sources() -> None:
-    """Two sources would make response selection ambiguous per call."""
     with pytest.raises(ValueError, match="mutually exclusive"):
         FakeExecutor(
             [fake_completion()],
@@ -80,13 +59,11 @@ def test_construction_rejects_both_response_sources() -> None:
 
 
 def test_a_responder_alone_and_a_queue_alone_both_construct() -> None:
-    """Each source is complete on its own; neither implies the other."""
     assert FakeExecutor([fake_completion()]).calls == ()
     assert FakeExecutor(responder=lambda _j, _c: fake_completion()).calls == ()
 
 
 def test_an_empty_queue_still_admits_a_responder() -> None:
-    """The default empty iterable is absence, not a scripted queue."""
     executor = FakeExecutor((), responder=lambda _j, _c: fake_completion())
 
     assert executor.run(job()).record_receipt.kind is (
@@ -94,11 +71,7 @@ def test_an_empty_queue_still_admits_a_responder() -> None:
     )
 
 
-# --- Deterministic ordering and exhaustion -------------------------------
-
-
 def test_queued_responses_are_returned_in_declared_order() -> None:
-    """The queue is in-order: call N gets response N, never a match."""
     ids = [JobId(uuid4()) for _ in range(3)]
     executor = FakeExecutor([completion_for(one) for one in ids])
 
@@ -109,7 +82,6 @@ def test_queued_responses_are_returned_in_declared_order() -> None:
 
 @pytest.mark.parametrize("source", ["queue", "responder"])
 def test_completion_identity_is_scripted_by_the_caller(source: str) -> None:
-    """The fake validates the receipt, not consumer-authored identity data."""
     accepted = job()
     scripted = completion_for(
         JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
@@ -128,7 +100,6 @@ def test_completion_identity_is_scripted_by_the_caller(source: str) -> None:
 
 @pytest.mark.parametrize("source", ["queue", "responder"])
 def test_cancellation_outcome_is_scripted_by_the_caller(source: str) -> None:
-    """Passing a cancelled token does not rewrite a scripted completion."""
     scripted = fake_completion()
     executor = (
         FakeExecutor([scripted])
@@ -143,7 +114,6 @@ def test_cancellation_outcome_is_scripted_by_the_caller(source: str) -> None:
 
 @pytest.mark.parametrize("source", ["queue", "responder"])
 def test_attempt_identity_is_scripted_by_the_caller(source: str) -> None:
-    """The fake does not turn repeated scripted evidence into new attempts."""
     scripted = fake_completion()
     executor = (
         FakeExecutor([scripted, scripted])
@@ -158,7 +128,6 @@ def test_attempt_identity_is_scripted_by_the_caller(source: str) -> None:
 
 
 def test_an_exhausted_queue_fails_rather_than_inventing_a_completion() -> None:
-    """A completion the consumer never scripted would be a fabrication."""
     executor = FakeExecutor([fake_completion()])
     executor.run(job())
 
@@ -167,7 +136,6 @@ def test_an_exhausted_queue_fails_rather_than_inventing_a_completion() -> None:
 
 
 def test_exhaustion_still_records_the_call_that_exhausted_the_queue() -> None:
-    """The job was accepted; only the response was missing."""
     executor = FakeExecutor()
     accepted = job()
 
@@ -177,11 +145,7 @@ def test_exhaustion_still_records_the_call_that_exhausted_the_queue() -> None:
     assert executor.calls == (accepted,)
 
 
-# --- Immutable call capture ----------------------------------------------
-
-
 def test_calls_captures_every_accepted_job_in_order() -> None:
-    """Consumers assert on declarations, so capture must be exact."""
     executor = FakeExecutor([fake_completion() for _ in range(3)])
     jobs = [job() for _ in range(3)]
 
@@ -192,7 +156,6 @@ def test_calls_captures_every_accepted_job_in_order() -> None:
 
 
 def test_calls_returns_a_snapshot_that_later_calls_do_not_mutate() -> None:
-    """A held snapshot is evidence about a moment, not a live view."""
     executor = FakeExecutor([fake_completion() for _ in range(2)])
     executor.run(job())
     snapshot = executor.calls
@@ -204,7 +167,6 @@ def test_calls_returns_a_snapshot_that_later_calls_do_not_mutate() -> None:
 
 
 def test_a_rejected_declaration_is_not_captured_as_a_call() -> None:
-    """Production leaves nothing behind a pre-spawn refusal either."""
     executor = FakeExecutor([fake_completion()])
     invalid = job_for(trusted_target(("dr-exec-test-relative",)))
 
@@ -214,18 +176,10 @@ def test_a_rejected_declaration_is_not_captured_as_a_call() -> None:
     assert executor.calls == ()
 
 
-# --- Mismatched receipt rejection ----------------------------------------
-
-
 @pytest.mark.parametrize("source", ["queue", "responder"])
 def test_a_production_receipt_is_refused_from_either_source(
     source: str,
 ) -> None:
-    """A fake call recorded nothing, so it may not claim a record.
-
-    This is what keeps `NOT_APPLICABLE` meaning "no record was ever
-    attempted" rather than decaying into a production no-record option.
-    """
     real = real_receipted_completion()
     executor = (
         FakeExecutor([real])
@@ -237,11 +191,7 @@ def test_a_production_receipt_is_refused_from_either_source(
         executor.run(job())
 
 
-# --- Responder access to the call's cancellation token -------------------
-
-
 def test_the_responder_receives_the_calls_own_cancellation_token() -> None:
-    """Consumers script cancellation-dependent behavior through it."""
     seen: list[CancelToken | None] = []
 
     def responder(
@@ -262,7 +212,6 @@ def test_the_responder_receives_the_calls_own_cancellation_token() -> None:
 def test_the_responder_sees_cancellation_observed_during_its_own_call() -> (
     None
 ):
-    """The token is live, not a snapshot taken before the call."""
     released = threading.Event()
     entered = threading.Event()
     observed: list[bool] = []
@@ -302,7 +251,6 @@ def test_the_responder_sees_cancellation_observed_during_its_own_call() -> (
 
 
 def test_the_responder_sees_each_calls_own_declaration() -> None:
-    """Response selection is declaration-dependent, per call."""
     executor = FakeExecutor(
         responder=lambda one, _c: completion_for(one.job_id)
     )
@@ -312,17 +260,8 @@ def test_the_responder_sees_each_calls_own_declaration() -> None:
     assert executor.run(second).result.execution_id.job_id == second.job_id
 
 
-# --- Concurrent call isolation -------------------------------------------
-
-
 @pytest.mark.usefixtures("watchdog")
 def test_concurrent_calls_take_distinct_queued_responses() -> None:
-    """No response is delivered twice and none is lost.
-
-    Every caller is held at one barrier so the pops genuinely contend,
-    then released together; the assertion is on the exact set of delivered
-    responses, never on how long anything took.
-    """
     ids = [JobId(uuid4()) for _ in range(CONCURRENT_CALLERS)]
     executor = FakeExecutor([completion_for(one) for one in ids])
     barrier = threading.Barrier(CONCURRENT_CALLERS)
@@ -343,7 +282,6 @@ def test_concurrent_calls_take_distinct_queued_responses() -> None:
 
 @pytest.mark.usefixtures("watchdog")
 def test_concurrent_calls_capture_every_job_exactly_once() -> None:
-    """Contended appends lose nothing and duplicate nothing."""
     executor = FakeExecutor(
         responder=lambda _j, _c: fake_completion(),
     )
@@ -369,13 +307,6 @@ def test_concurrent_calls_capture_every_job_exactly_once() -> None:
 
 @pytest.mark.usefixtures("watchdog")
 def test_one_responder_call_does_not_block_another() -> None:
-    """The responder runs outside the lock, so calls truly overlap.
-
-    Each responder waits for the *other* call to have entered before
-    returning. That is only satisfiable if both are inside the executor at
-    once, so completion of the pair is the evidence -- a serializing fake
-    deadlocks here and the watchdog reports it.
-    """
     entered = threading.Barrier(2)
 
     def responder(
@@ -396,13 +327,9 @@ def test_one_responder_call_does_not_block_another() -> None:
     assert len(executor.calls) == 2
 
 
-# --- No process, scratch, or record side effects -------------------------
-
-
 def test_a_fake_call_creates_no_child_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fake executes no payload, so nothing may reach a spawn."""
     import subprocess
 
     def refuse(*_args: object, **_kwargs: object) -> object:
@@ -418,11 +345,6 @@ def test_a_fake_call_creates_no_child_process(
 def test_a_fake_call_creates_no_scratch_or_record_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No scratch workspace, no record directory, no durable trace.
-
-    Both the default temporary root and the working directory are watched,
-    so a scratch workspace created under either is visible as a new entry.
-    """
     watched = tmp_path / "watched"
     watched.mkdir()
     monkeypatch.setenv("TMPDIR", str(watched))

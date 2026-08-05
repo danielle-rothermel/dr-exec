@@ -7,7 +7,7 @@ class ExecutorFailure(RuntimeError):
 
 
 class RecordLoadError(ValueError):
-    """A persisted run record is malformed or internally inconsistent."""
+    """A persisted run record is malformed or inconsistent."""
 
 
 __all__ = ["DeclarationError", "ExecutorFailure", "RecordLoadError"]

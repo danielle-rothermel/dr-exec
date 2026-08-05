@@ -1,21 +1,3 @@
-"""The single-run engine against real children, for the Python target.
-
-Every case here spawns one real isolated interpreter through the engine's
-own bootstrap, so what is exercised is the production path: the runtime's
-fixed ``-I -c <wrapper>`` command, the canonical request on stdin through
-EOF, the protected fd 3 stream, and the same containment, budget, teardown,
-and recording lifecycle every other target follows.
-
-Synchronization is on explicit gates, files, and terminal outcomes.
-Nothing waits on elapsed time or treats its passage as evidence: a case
-that must observe a child which is deliberately still running releases it
-through a gate it created, and deadlines appear only as watchdogs.
-
-macOS process semantics are what these cases rest on, so they are marked
-and skipped off darwin; their passing on macOS is the qualification
-evidence.
-"""
-
 from __future__ import annotations
 
 import os
@@ -80,10 +62,6 @@ pytestmark = [
     pytest.mark.usefixtures("process_watchdog"),
 ]
 
-# Watchdog only. It bounds a case that would otherwise hang the suite; no
-# case asserts on it, and no case uses its non-expiry as evidence.
-# Watchdogs expressed as budgets, for cases whose child is deliberately
-# immortal. The case asserts on the terminal outcome, never on timing.
 WATCHDOG_WALL_TIME = FiniteDurationLimit(max_ns=10_000_000_000)
 WATCHDOG_JOIN_TIME = FiniteDurationLimit(max_ns=10_000_000_000)
 
@@ -92,7 +70,6 @@ OUTPUT_SCHEMA = "dr_exec.test_output"
 
 
 def emit_call(payload: str, /) -> str:
-    """Render one ``emit`` call whose payload expression is given."""
     return (
         "emit({"
         f"'schema': {OUTPUT_SCHEMA!r}, "
@@ -111,8 +88,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
 @dataclass(frozen=True, slots=True)
 class Harness:
-    """One temporary record root plus the executor that writes into it."""
-
     executor: ProcessExecutor
     store: DirectoryRunStore
     root: Path
@@ -210,12 +185,6 @@ def payloads_of(completed: CompletedExecution, /) -> list[object]:
 
 
 def sole_mapping(completed: CompletedExecution, /) -> Mapping[str, object]:
-    """Return the one output payload as a mapping the case can read.
-
-    Drivers that report facts about their own process emit exactly one
-    object payload; narrowing it once here keeps every such case reading
-    named keys instead of repeating the same shape assertions.
-    """
     (payload,) = payloads_of(completed)
     assert isinstance(payload, Mapping)
     return cast("Mapping[str, object]", payload)
@@ -227,9 +196,6 @@ def protocol_failure_of(
     outcome = completed.result.outcome
     assert isinstance(outcome, ProtocolFailedOutcome)
     return outcome
-
-
-# --- Complete streams ----------------------------------------------------
 
 
 @requires_macos
@@ -259,12 +225,6 @@ def test_a_driver_emitting_nothing_completes_with_no_outputs(
 def test_the_request_reaches_the_child_intact_through_eof(
     harness: Harness,
 ) -> None:
-    """The prelude digest is computed by the child over the bytes it read.
-
-    Accepting the stream therefore proves the canonical request arrived
-    whole: a truncated or altered request could not produce a prelude that
-    binds the parent's digest.
-    """
     completed = harness.run(ECHO_DRIVER, count=1, echo="é中\U0001f600")
 
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
@@ -275,7 +235,6 @@ def test_the_request_reaches_the_child_intact_through_eof(
 def test_recorded_input_bytes_are_the_canonical_request_length(
     harness: Harness,
 ) -> None:
-    """Measurement is the canonical length, not a declared raw stdin."""
     from dr_exec.declarations.transport import request_transport_bytes
 
     request = build_identity_document(
@@ -314,19 +273,10 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     )
 
 
-# --- Isolation and containment -------------------------------------------
-
-
 @requires_macos
 def test_python_wrapper_closes_protected_fd_before_domain_code(
     harness: Harness,
 ) -> None:
-    """The wrapper closes protected fd 3 before domain code begins.
-
-    The common command launch test owns all-descriptor closure. This
-    Python-specific case owns the wrapper remapping: domain code retains
-    the three payload streams, while protected fd 3 itself is closed.
-    """
     driver = f"""
 import os
 
@@ -352,12 +302,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 def test_the_payload_cannot_write_the_protected_stream_directly(
     harness: Harness,
 ) -> None:
-    """The honest limit is stated in the design; this pins what holds.
-
-    Domain code writing the well-known descriptor number cannot inject
-    bytes into the protected stream, because the wrapper duplicated the
-    handle and closed that number before loading the driver.
-    """
     driver = f"""
 import os
 
@@ -400,7 +344,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 def test_driver_source_is_not_a_payload_argument_or_shell_syntax(
     harness: Harness,
 ) -> None:
-    """Domain argv is CPython's ``-c`` argv; hostile source stays inert."""
     driver = f"""
 import sys
 
@@ -416,14 +359,10 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert reported["argv"] == ["-c"]
 
 
-# --- Post-start machinery failure ---------------------------------------
-
-
 @requires_macos
 def test_a_started_protocol_worker_failure_raises_after_lifecycle_cleanup(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A dead reader cannot turn missing protocol evidence into a result."""
 
     def failing_read(*_: object, **__: object) -> None:
         raise RuntimeError("synthetic protocol failure")
@@ -458,9 +397,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
         os.waitpid(-1, os.WNOHANG)
 
 
-# --- Protocol failure taxonomy as outcome data ---------------------------
-
-
 @requires_macos
 @pytest.mark.parametrize(
     "driver",
@@ -474,7 +410,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 def test_a_payload_owned_driver_failure_is_an_incomplete_stream_outcome(
     harness: Harness, driver: str
 ) -> None:
-    """Payload-owned protocol failure is data, never a raise."""
     completed = harness.run(driver)
 
     outcome = protocol_failure_of(completed)
@@ -488,7 +423,6 @@ def test_a_payload_owned_driver_failure_is_an_incomplete_stream_outcome(
 def test_a_later_failure_preserves_every_previously_accepted_output(
     harness: Harness,
 ) -> None:
-    """The domain owns completeness; dr-exec discards nothing it accepted."""
     driver = f"""
 def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     {emit_call("{'index': 0}")}
@@ -541,7 +475,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 def test_a_protocol_failure_is_recorded_with_its_accepted_outputs(
     harness: Harness,
 ) -> None:
-    """The manifest carries the same outputs the result did, inline."""
     driver = f"""
 def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     {emit_call("{'index': 0}")}
@@ -556,19 +489,10 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     ] == [{"index": 0}]
 
 
-# --- Protocol self-budget edges ------------------------------------------
-
-
 @requires_macos
 def test_an_output_count_budget_stops_the_stream_as_an_oversized_frame(
     harness: Harness,
 ) -> None:
-    """An executor limit is attributed to the executor, not the payload.
-
-    A self-budget stopping the stream is executor policy; classifying it
-    as a payload fault would let an executor limit masquerade as a
-    payload crash.
-    """
     completed = harness.run(
         ECHO_DRIVER,
         count=5,
@@ -588,7 +512,6 @@ def test_an_output_count_budget_stops_the_stream_as_an_oversized_frame(
 def test_an_output_count_exactly_at_its_budget_completes(
     harness: Harness,
 ) -> None:
-    """The edge itself: the budget admits exactly what it declares."""
     completed = harness.run(
         ECHO_DRIVER,
         count=2,
@@ -623,21 +546,16 @@ def test_a_frame_byte_budget_refuses_an_oversized_frame(
 def test_an_unbudgeted_protocol_axis_installs_no_hidden_limit(
     harness: Harness,
 ) -> None:
-    """Explicitly unbudgeted means no executor cap, not a large one."""
     completed = harness.run(ECHO_DRIVER, count=64, echo="y" * 2048)
 
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
     assert len(completed.result.protocol_outputs) == 64
 
 
-# --- Workload budgets ----------------------------------------------------
-
-
 @requires_macos
 def test_an_over_budget_request_is_refused_before_any_spawn(
     harness: Harness,
 ) -> None:
-    """The canonical request length is checked before a child exists."""
     with pytest.raises(DeclarationError, match="input budget"):
         harness.run(
             ECHO_DRIVER,
@@ -652,12 +570,6 @@ def test_an_over_budget_request_is_refused_before_any_spawn(
 def test_wall_time_overflow_beats_the_incomplete_stream_it_causes(
     harness: Harness,
 ) -> None:
-    """Pinned precedence: the budget names the failure, not its symptom.
-
-    The engine's own teardown is what ends the stream, so reporting the
-    resulting incomplete stream would blame the payload for the
-    executor's deadline. The accepted output still survives.
-    """
     driver = f"""
 import time
 
@@ -679,19 +591,10 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert payloads_of(completed) == [{"index": 0}]
 
 
-# --- Cancellation --------------------------------------------------------
-
-
 @requires_macos
 def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The gate orders the two: the token is set while the child is alive.
-
-    The canceller's read returns exactly when the driver announces itself,
-    so cancellation is observed against a real running child rather than
-    at some hoped-for moment.
-    """
     gate = Gate.create(tmp_path, "started")
     token = CancelToken()
     canceller = threading.Thread(
@@ -726,17 +629,10 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert record.state is RecordState.FINALIZED
 
 
-# --- Teardown ------------------------------------------------------------
-
-
-# --- Durable recording ---------------------------------------------------
-
-
 @requires_macos
 def test_the_record_carries_python_specific_durable_evidence(
     harness: Harness,
 ) -> None:
-    """Request identity, containment profile, and runtime evidence."""
     completed = harness.run(ECHO_DRIVER)
 
     record = harness.store.load(record_dir_of(completed))
@@ -755,7 +651,6 @@ def test_the_record_carries_python_specific_durable_evidence(
 def test_the_record_never_exposes_the_driver_source_or_the_request(
     harness: Harness,
 ) -> None:
-    """Secret-safe durable evidence: digests, never recoverable input."""
     secret_source = f"""
 SECRET_LITERAL = "a-secret-in-the-driver"
 
@@ -784,14 +679,10 @@ def test_accepted_outputs_are_recorded_inline_not_as_digests(
     ] == [{"index": index, "echo": "inline"} for index in range(2)]
 
 
-# --- Concurrency ---------------------------------------------------------
-
-
 @requires_macos
 def test_concurrent_python_calls_keep_their_streams_separate(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """All Python children overlap without crossing protected fd 3 streams."""
     call_count = 6
     callers_ready = threading.Barrier(call_count + 1)
     arrivals = tuple(

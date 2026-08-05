@@ -1,5 +1,3 @@
-"""Public dr-exec v1 capability and data-contract surface."""
-
 from dr_exec.capabilities.fake import FakeExecutor
 from dr_exec.capabilities.protocols import Executor, RunStore, Runtime
 from dr_exec.core.cancel import CancelToken

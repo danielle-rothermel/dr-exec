@@ -1,11 +1,3 @@
-"""Strict read and write behavior for the validated serialization paths.
-
-``require_canonical_json_bytes`` is the shared front half of every read
-boundary, so its bounds, its strict-decoder taxonomy, and its canonical
-equality check are exercised directly. The closed-model tail belongs to
-the real boundaries, so ``decode_frame`` stands in for it here.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -118,7 +110,6 @@ def test_read_enforces_the_declared_depth_bound(
 
 
 def test_a_real_boundary_validates_the_same_canonical_bytes() -> None:
-    """The closed-model tail runs on the bytes the front half verified."""
     prelude = ProtocolPrelude(
         version=1,
         request_id_sha256=Sha256Digest("a" * 64),
@@ -140,7 +131,6 @@ def test_a_real_boundary_rejects_a_valid_document_of_the_wrong_model(
 
 
 def test_a_real_boundary_rejects_extra_fields() -> None:
-    """An extra key in canonical position still fails model validation."""
     prelude = ProtocolPrelude(
         version=1,
         request_id_sha256=Sha256Digest("a" * 64),

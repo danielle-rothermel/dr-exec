@@ -103,11 +103,6 @@ type OutputBudget = Annotated[
 ]
 
 
-# The workload axes v1 declares but enforces nowhere. They are named
-# through `BudgetAxis`, which already pins each spelling, so this list
-# cannot drift from the axis vocabulary the outcome data uses. Moving an
-# axis off this list is a contract revision, not a local edit: it means
-# some component now enforces it.
 _UNSUPPORTED_FINITE_WORKLOAD_AXES: Final = (
     BudgetAxis.MEMORY_BYTES,
     BudgetAxis.CPU_TIME,
@@ -131,15 +126,7 @@ class Budgets(ContractModel):
 
     @model_validator(mode="after")
     def unsupported_axes_must_be_unbudgeted(self) -> Budgets:
-        """Refuse a finite limit v1 has no enforcement point for.
-
-        V1 enforces finite workload limits on wall time, input bytes, and
-        aggregate payload output only. The remaining axes exist because
-        every axis is explicitly unbudgeted rather than absent -- but a
-        finite value on one of them would be a declared protection the
-        engine never applies, so it is rejected at the boundary instead
-        of recorded as policy that does not hold.
-        """
+        """Reject finite limits for axes v1 cannot enforce."""
         declared_finite = [
             axis
             for axis in _UNSUPPORTED_FINITE_WORKLOAD_AXES
@@ -284,9 +271,7 @@ class EnvGrantRecord(ContractModel):
             )
         for name in (*self.var_names, *self.excluded_var_names):
             _validate_env_var_name(name)
-        # Canonical JSON text order, not code-point order: these names are
-        # persisted evidence, so they carry dr-serialize's ordering for
-        # logically-unordered collections rather than a local one.
+        # Persist unordered names in canonical JSON text order.
         if self.var_names != tuple(
             canonical_sorted_values(set(self.var_names))
         ):

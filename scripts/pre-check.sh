@@ -23,7 +23,6 @@ contains_path() {
     return 1
 }
 
-# Bash 3.2 treats an empty array expansion as unset under `set -u`.
 fixer_paths=("")
 if ! git diff --cached --name-only --diff-filter=ACMR -z \
     >"${CACHE_DIR}/staged-paths.bin"; then

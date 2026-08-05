@@ -1,5 +1,3 @@
-"""Executor source snapshot and the provenance forms it can produce."""
-
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError
@@ -21,8 +19,6 @@ from dr_exec.recording.provenance import (
 
 
 class _Metadata:
-    """The subset of distribution metadata provenance reads."""
-
     def __init__(self, source_commit: str | None) -> None:
         self._source_commit = source_commit
 
@@ -31,7 +27,6 @@ class _Metadata:
 
 
 def _embed(monkeypatch: pytest.MonkeyPatch, value: str | None, /) -> None:
-    """Install the build-time metadata provenance is allowed to read."""
     monkeypatch.setattr(
         provenance,
         "metadata",
@@ -147,11 +142,6 @@ def test_unknown_snapshots_never_compare_equal(
 def test_provenance_spawns_no_subprocess(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Provenance reads embedded metadata and never probes a repository.
-
-    An enclosing checkout is not evidence about dr-exec's own source, so
-    resolving provenance must not shell out at all.
-    """
 
     def _forbidden(*arguments: object, **keywords: object) -> object:
         raise AssertionError("provenance must not spawn a subprocess")

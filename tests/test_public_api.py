@@ -1,5 +1,3 @@
-"""The complete public package and capability-protocol surfaces."""
-
 from __future__ import annotations
 
 import dr_exec

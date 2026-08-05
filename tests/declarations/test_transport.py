@@ -1,5 +1,3 @@
-"""The exact request transport owned by a Python declaration."""
-
 from dr_serialize import IdentityDocument, canonical_identity_json_bytes
 
 from dr_exec.declarations.transport import request_transport_bytes

@@ -1,11 +1,3 @@
-"""The library-owned child wrapper against a real isolated interpreter.
-
-Every case here spawns one real interpreter with the protected pipe mapped
-onto fd 3 and the request on stdin, then synchronizes on the protected
-stream reaching EOF and on the child's terminal exit status. Nothing here
-waits on elapsed time or treats it as evidence.
-"""
-
 from __future__ import annotations
 
 import os
@@ -56,7 +48,6 @@ WATCHDOG_SECONDS = 30.0
 
 @pytest.fixture(autouse=True)
 def watchdog() -> Iterator[object]:
-    """Fail a wedged child lifecycle and let the helper clean it up."""
     timer = threading.Timer(
         WATCHDOG_SECONDS,
         lambda: os.kill(os.getpid(), signal.SIGALRM),
@@ -73,8 +64,6 @@ def watchdog() -> Iterator[object]:
 
 @dataclass(frozen=True, slots=True)
 class ChildRun:
-    """One completed child: its protected stream and its exit status."""
-
     stream: ProtocolStreamResult
     exit_status: int
     stdout: bytes
@@ -106,13 +95,6 @@ def _run_driver(
     invocation_arguments: tuple[str, ...] = ISOLATED_INVOCATION_ARGUMENTS,
     protocol_descriptor: int = PROTOCOL_DESCRIPTOR,
 ) -> ChildRun:
-    """Spawn one wrapper child with fd 3 mapped to the protected pipe.
-
-    ``posix_spawn`` file actions place the descriptors exactly, so no
-    caller or package Python runs between the fork and the child's
-    ``exec``. The engine that will own this mapping in production does not
-    exist yet; this helper stands in for it and nothing more.
-    """
     wrapper = driver_wrapper_source(driver_source)
     stdout_path = tmp_path / "stdout.bin"
     stderr_path = tmp_path / "stderr.bin"
@@ -202,9 +184,6 @@ def _run_driver(
     )
 
 
-# --- Invocation shape ----------------------------------------------------
-
-
 def test_the_wrapper_embeds_consumer_source_as_an_inert_literal() -> None:
     hostile = "'\"\\\n#'''" + '"""'
     wrapper = driver_wrapper_source(hostile)
@@ -221,11 +200,6 @@ def test_the_wrapper_rejects_nul_bearing_consumer_source() -> None:
 
 
 def test_the_child_observable_literals_are_exactly_pinned() -> None:
-    """These are what the child sees; changing one is a contract revision.
-
-    Every other case reads them symbolically and so would follow a
-    rename; only spelling the values out catches silent drift.
-    """
     assert PROTOCOL_DESCRIPTOR == 3
     assert DRIVER_ENTRYPOINT_NAME == "dr_exec_main"
     assert DRIVER_SOURCE_BINDING == "DR_EXEC_DRIVER_SOURCE"
@@ -235,11 +209,6 @@ def test_the_child_observable_literals_are_exactly_pinned() -> None:
 def test_a_child_spelling_both_literals_bare_runs_and_completes(
     tmp_path: Path,
 ) -> None:
-    """One real child that hardcodes `dr_exec_main` and fd 3.
-
-    The symbolic cases follow a rename of either literal; this one
-    cannot, so it fails if the child-observable contract changes.
-    """
     literal_driver = """
 def dr_exec_main(request, emit):
     emit({
@@ -261,9 +230,6 @@ def dr_exec_main(request, emit):
     assert run.stream.completed
     assert len(run.stream.outputs) == 1
     assert run.stream.outputs[0].payload == {"echo": "bare"}
-
-
-# --- Complete streams ----------------------------------------------------
 
 
 def test_a_driver_emitting_outputs_produces_a_complete_stream(
@@ -290,11 +256,6 @@ def test_a_driver_emitting_nothing_produces_a_complete_empty_stream(
 def test_the_child_receives_exactly_the_canonical_request(
     tmp_path: Path,
 ) -> None:
-    """The prelude digest is computed by the child over the bytes it read.
-
-    A parent-side digest match therefore proves the transported bytes
-    arrived intact and complete through EOF.
-    """
     request = _request(count=1, echo="é中\U0001f600")
     run = _run_driver(ECHO_DRIVER, request, tmp_path)
     assert run.stream.completed
@@ -400,12 +361,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 def test_the_payload_cannot_reach_the_stream_through_the_raw_descriptor(
     tmp_path: Path,
 ) -> None:
-    """The wrapper closes the original fd 3 after duplicating it.
-
-    Domain code writing to the well-known descriptor number therefore
-    cannot inject bytes into the protected stream; the library-owned
-    handle remains the only writer.
-    """
     driver = f"""
 import os
 
@@ -425,9 +380,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     run = _run_driver(driver, _request(), tmp_path)
     assert run.stream.completed
     assert run.stream.outputs[0].payload == {"reached": False}
-
-
-# --- Payload-owned failures ---------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -561,9 +513,6 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     ]
 
 
-# --- Invalid request: no protocol output --------------------------------
-
-
 @pytest.mark.parametrize(
     "request_bytes",
     [
@@ -629,11 +578,6 @@ def test_an_invalid_request_produces_no_protocol_output(
 def test_a_request_the_child_did_not_receive_fails_the_identity_binding(
     tmp_path: Path,
 ) -> None:
-    """A prelude can only match bytes the child actually read.
-
-    Sending one canonical request while the parent expects another's
-    digest is exactly the substitution the binding exists to catch.
-    """
     run = _run_driver(
         ECHO_DRIVER,
         _request(count=1, echo="expected"),

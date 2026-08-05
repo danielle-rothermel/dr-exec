@@ -1,12 +1,3 @@
-// Generic client-side renderer for .defs/ TOML files. Copyable across repos.
-//
-// Usage in index.html:
-//   <tbody data-defs-file="terms.toml" data-defs-kind="terms"></tbody>
-//   <tbody data-defs-file="contracts.toml" data-defs-kind="contracts"></tbody>
-//   <script type="module" src="defs-render.js"></script>
-//
-// Requires serving over HTTP (fetch of local TOML fails on file://).
-
 import { parse } from "./smol-toml.js";
 
 function el(tag, className, children) {

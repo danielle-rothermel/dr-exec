@@ -1,42 +1,10 @@
-"""Fixed isolated invocation shape and the library-owned child wrapper.
-
-The interpreter is always invoked as ``<executable> -I -c <wrapper source>``.
-That wrapper source is one OS-level argv element and contains the consumer's
-``driver_source`` as inert data in one string literal bound to a fixed name.
-Domain code sees CPython's own ``sys.argv`` with no source argument; the wrapper
-intentionally evaluates the embedded driver, but no shell interprets either
-source string.
-
-The wrapper runs inside an isolated host interpreter that is not required
-to have dr-exec importable, so its body is stdlib-only and reproduces the
-pinned canonical JSON profile directly. It opens the protected descriptor
-before any domain code, reads the request through EOF, validates it,
-resolves ``dr_exec_main``, and writes LF-terminated canonical frames.
-
-A missing or non-callable entrypoint, source-load failure, or callback failure
-can stop the wrapper without a completion frame. If a protected-writer failure
-leaves the protocol incomplete, the parent preserves previously accepted output
-but has no separate signal that distinguishes the library-owned failure from
-another incomplete stream; it can classify only the protocol evidence it
-receives. Parent-observed transport worker failures remain executor machinery
-failures.
-"""
-
 from __future__ import annotations
 
-# Child-observable literals. The invocation shape, the entrypoint name,
-# the embedded-source binding, and the protected descriptor number are
-# pinned; changing any of them is a standing-contract revision, not an
-# implementation detail.
 ISOLATED_INVOCATION_ARGUMENTS = ("-I", "-c")
 DRIVER_ENTRYPOINT_NAME = "dr_exec_main"
 DRIVER_SOURCE_BINDING = "DR_EXEC_DRIVER_SOURCE"
 PROTOCOL_DESCRIPTOR = 3
 
-# The wrapper body, stdlib-only and self-contained. It reads its own
-# module globals and never inspects argv or the environment. The pinned
-# child-observable literals are not spelled here: they are rendered from
-# the module constants above, which are their single source.
 _WRAPPER_BODY = '''
 import hashlib as _dr_exec_hashlib
 import json as _dr_exec_json
@@ -181,14 +149,8 @@ _dr_exec_bootstrap()
 
 
 def driver_wrapper_source(driver_source: str, /) -> str:
-    """Return the library-owned wrapper source embedding ``driver_source``.
+    """Embed driver source as inert data in the library-owned wrapper."""
 
-    ``driver_source`` is embedded through ``repr``, so arbitrary consumer
-    text -- quotes, backslashes, and newlines included -- stays one inert
-    string literal in the wrapper rather than executable wrapper syntax.
-    The pinned child-observable literals are rendered from the module
-    constants, so the child can only ever observe their one spelling.
-    """
     if "\0" in driver_source:
         raise ValueError("driver_source must not contain NUL")
     return "\n".join(

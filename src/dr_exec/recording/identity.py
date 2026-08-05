@@ -32,8 +32,6 @@ from dr_exec.declarations.models import (
 )
 from dr_exec.recording.provenance import ExecutorSourceSnapshot
 
-# Persisted identity schema names and version. These are wire literals
-# pinned by golden vectors; never derive them from module or class names.
 EXECUTOR_IDENTITY_SCHEMA = "dr_exec.executor"
 EXECUTOR_CONFIG_IDENTITY_SCHEMA = "dr_exec.executor_config"
 EXECUTOR_IDENTITY_KIND = "process_executor"
@@ -133,7 +131,6 @@ def _build_executor_identity(
     snapshot: ExecutorSourceSnapshot,
     /,
 ) -> IdentityDocument:
-    """Build the executor identity from one executor source snapshot."""
     payload = _ExecutorIdentityPayload(
         kind=EXECUTOR_IDENTITY_KIND,
         package_version=snapshot.package_version,
@@ -152,7 +149,6 @@ def _build_executor_config_identity(
     self_budgets: ExecutorSelfBudgets,
     /,
 ) -> IdentityDocument:
-    """Build the executor-config identity from effective self-budgets."""
     return build_identity_document(
         schema=EXECUTOR_CONFIG_IDENTITY_SCHEMA,
         schema_version=IDENTITY_SCHEMA_VERSION,
@@ -161,19 +157,10 @@ def _build_executor_config_identity(
 
 
 def _canonical_declaration_digest(target: ExecutionTarget, /) -> Sha256Digest:
-    """Digest the canonical bytes of a complete target declaration.
-
-    The declaration itself carries argv, source, stdin, and the request
-    payload, so only this digest reaches durable evidence.
-    """
     return json_hash(_identity_payload(target))
 
 
 def _canonical_env_values_digest(grant: EnvGrant, /) -> Sha256Digest:
-    """Digest the canonical name/value payload of an environment grant.
-
-    Values feed only this digest; they are never persisted or returned.
-    """
     payload: Jsonable = {
         variable.name: variable.value for variable in grant.variables
     }
@@ -181,17 +168,10 @@ def _canonical_env_values_digest(grant: EnvGrant, /) -> Sha256Digest:
 
 
 def _canonical_sorted_names(names: Iterable[str], /) -> tuple[str, ...]:
-    """Order variable names by canonical JSON text, never locally.
-
-    ``canonical_sorted_values`` is policy-free and returns its inputs
-    untouched, so ``str`` members stay ``str``; only its ``Jsonable``
-    signature is widened, and the cast narrows it back.
-    """
     return tuple(cast("list[str]", canonical_sorted_values(names)))
 
 
 def _build_env_grant_record(grant: EnvGrant, /) -> EnvGrantRecord:
-    """Project a live environment grant into secret-free durable evidence."""
     return EnvGrantRecord(
         kind=grant.kind,
         var_names=_canonical_sorted_names(

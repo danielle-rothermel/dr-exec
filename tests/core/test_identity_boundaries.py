@@ -1,5 +1,3 @@
-"""Shared role checks for versioned identity documents."""
-
 from __future__ import annotations
 
 import pytest

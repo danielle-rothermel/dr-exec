@@ -4,7 +4,7 @@ from threading import Event
 
 
 class CancelToken:
-    """One-shot cooperative cancellation signal for one execution call."""
+    """One-shot cooperative cancellation for one execution call."""
 
     __slots__ = ("_event",)
 

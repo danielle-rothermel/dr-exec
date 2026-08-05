@@ -1,21 +1,3 @@
-"""Shared behavioral qualification for the ``Executor`` Protocol.
-
-Structural typing is not qualification. These cases run against both
-supported implementations and pin the behavior they genuinely share:
-declaration validation, acceptance of supported target shapes, and a receipt
-whose kind truthfully identifies the implementation that returned it.
-
-The fake's queue or responder scripts the entire completion. Job/result
-binding, cancellation outcomes, and attempt identities are therefore caller
-responsibilities when using ``FakeExecutor``; a shared test must not manufacture
-those values and then claim the fake enforced them. Fake-specific tests next
-door qualify the validation, capture, receipt, and concurrency invariants the
-fake itself does enforce.
-
-Only the process fixture is macOS-qualified. The fake half remains runnable on
-every CI host, including successful declarations.
-"""
-
 from __future__ import annotations
 
 import sys

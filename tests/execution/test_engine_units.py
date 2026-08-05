@@ -1,12 +1,3 @@
-"""Retention arithmetic and spawn-bootstrap rendering, in isolation.
-
-These are pure units: retention is byte arithmetic and the bootstrap is
-source rendering, so both are exercised without a child. They are what
-pins the properties the real-child cases cannot isolate -- that retention
-is independent of chunk boundaries, and that no declared value can become
-helper syntax.
-"""
-
 from __future__ import annotations
 
 import errno
@@ -97,8 +88,6 @@ def finite_output_budget(
 
 @dataclass(slots=True)
 class _ProcessProbe:
-    """The process operations whose teardown ordering is contract evidence."""
-
     pid: int = 4321
     signals: list[int] = field(default_factory=list)
     wait_calls: int = 0
@@ -112,11 +101,7 @@ class _ProcessProbe:
         return 0
 
 
-# --- Retention -----------------------------------------------------------
-
-
 def test_an_unbudgeted_stream_retains_every_byte_in_one_segment() -> None:
-    """No declared budget means no split for a reader to rejoin."""
     retention = PayloadRetention.for_budget(UnbudgetedOutput())
     retention.stdout.offer(b"abc")
     retention.stdout.offer(b"def")
@@ -132,7 +117,6 @@ def test_an_unbudgeted_stream_retains_every_byte_in_one_segment() -> None:
 def test_retention_is_identical_however_the_bytes_arrive(
     chunk_size: int,
 ) -> None:
-    """Retention is declaration-pinned, not a record of drain scheduling."""
     produced = bytes(range(48, 78))
     retention = PayloadRetention.for_budget(finite_output_budget())
     for offset in range(0, len(produced), chunk_size):
@@ -170,7 +154,6 @@ def test_a_zero_head_allocation_keeps_only_the_tail() -> None:
 def test_production_at_exactly_the_aggregate_budget_has_not_overflowed() -> (
     None
 ):
-    """A run that produces exactly the declared total stayed within it."""
     budget = finite_output_budget(
         stdout_head=2, stdout_tail=2, stderr_head=2, stderr_tail=2
     )
@@ -194,7 +177,6 @@ def test_one_byte_past_the_aggregate_budget_overflows() -> None:
 
 
 def test_the_aggregate_budget_spans_both_streams_together() -> None:
-    """Neither stream alone crosses it; their sum does."""
     budget = finite_output_budget(
         stdout_head=4, stdout_tail=0, stderr_head=4, stderr_tail=0
     )
@@ -207,7 +189,6 @@ def test_the_aggregate_budget_spans_both_streams_together() -> None:
 
 
 def test_retained_and_dropped_bytes_always_equal_production() -> None:
-    """The record model enforces this, so the counts must satisfy it."""
     retention = PayloadRetention.for_budget(finite_output_budget())
     retention.stdout.offer(bytes(range(100)))
     retention.stderr.offer(bytes(range(50)))
@@ -229,11 +210,7 @@ def test_the_default_budgets_install_no_output_retention_limit() -> None:
     assert not retention.overflowed
 
 
-# --- Spawn bootstrap rendering -------------------------------------------
-
-
 def test_the_helper_embeds_every_declared_value_as_an_inert_literal() -> None:
-    """A hostile argv or scratch path stays data, never helper syntax."""
     hostile = "'\"\\\n#'''" + '"""'
     source = spawn_bootstrap_source(
         executable=hostile,
@@ -267,11 +244,6 @@ def test_the_helper_renders_the_pinned_literals_once_each() -> None:
 
 
 def test_the_child_observable_spawn_literals_are_exactly_pinned() -> None:
-    """These are what the child and its status line spell.
-
-    Every other case reads them symbolically and so would follow a
-    rename; only spelling the values out catches silent drift.
-    """
     assert SPAWN_HELPER_ARGUMENTS == ("-I", "-c")
     assert STATUS_STAGE_KEY == "stage"
     assert STATUS_ERRNO_KEY == "errno"
@@ -280,9 +252,6 @@ def test_the_child_observable_spawn_literals_are_exactly_pinned() -> None:
     assert PAYLOAD_STDOUT_DESCRIPTOR == 1
     assert PAYLOAD_STDERR_DESCRIPTOR == 2
     assert PAYLOAD_PROTOCOL_DESCRIPTOR == 3
-
-
-# --- Setup status classification -----------------------------------------
 
 
 def test_an_empty_status_pipe_means_the_payload_exec_succeeded() -> None:
@@ -317,7 +286,6 @@ def test_a_status_line_reports_its_stage_and_errno() -> None:
 def test_an_unreadable_status_line_is_still_a_setup_failure(
     line: bytes,
 ) -> None:
-    """Never mistaken for a successful start, which is the dangerous read."""
     failure = parse_setup_status(line)
 
     assert failure is not None
@@ -332,9 +300,6 @@ def test_a_status_line_without_an_errno_reports_none() -> None:
     )
 
 
-# --- Spawn outcome classification ----------------------------------------
-
-
 def test_enoent_from_the_payload_exec_is_spawn_absence() -> None:
     outcome = _spawn_outcome(
         SetupFailure(stage=SETUP_STAGE_EXEC, errno=errno.ENOENT),
@@ -345,11 +310,6 @@ def test_enoent_from_the_payload_exec_is_spawn_absence() -> None:
 
 
 def test_enoent_from_an_earlier_setup_stage_is_not_spawn_absence() -> None:
-    """The same errno from `chdir` means a missing directory, not a tool.
-
-    Reporting it as absence would name the wrong thing missing, which is
-    exactly the diagnostic the caller would act on.
-    """
     outcome = _spawn_outcome(
         SetupFailure(stage=SETUP_STAGE_CHDIR, errno=errno.ENOENT),
         "/declared/executable",
@@ -379,9 +339,6 @@ def test_a_setup_failure_with_no_reported_errno_still_classifies() -> None:
     assert outcome == SpawnFailedOutcome(
         errno=0, error_message=SETUP_STAGE_EXEC
     )
-
-
-# --- Attribution ---------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -421,20 +378,10 @@ def test_a_setup_failure_with_no_reported_errno_still_classifies() -> None:
 def test_every_recognized_outcome_gets_one_evidence_based_owner(
     outcome: ExecutionOutcome, owner: FailureOwner
 ) -> None:
-    """Attribution is total over the closed outcome union, and diagnostic.
-
-    It is a classification of the evidence, not causal proof: an ordinary
-    nonzero exit is attributed to the payload that produced it because no
-    stronger evidence exists, not because the payload was proven at fault.
-    """
     assert _attribute(outcome).owner is owner
 
 
-# --- Teardown classification and escalation -----------------------------
-
-
 def test_a_transport_worker_captures_non_exception_base_failures() -> None:
-    """The thread boundary reports every failure after the worker stops."""
 
     def stop_thread() -> None:
         raise SystemExit("synthetic worker exit")
@@ -451,7 +398,6 @@ def test_a_transport_worker_captures_non_exception_base_failures() -> None:
 def test_session_stage_teardown_signals_only_the_direct_child(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reported pre-setsid failure never targets a process group."""
     process = _ProcessProbe()
     group_signals: list[tuple[int, int]] = []
     monkeypatch.setattr(
@@ -492,7 +438,6 @@ def test_teardown_escalation_follows_the_termination_result(
     reaped_after_term: bool,
     expected_signals: list[int],
 ) -> None:
-    """Only a child that survives the graceful window receives SIGKILL."""
     process = _ProcessProbe()
     group_signals: list[tuple[int, int]] = []
     monkeypatch.setattr(
@@ -521,18 +466,6 @@ def test_teardown_escalation_follows_the_termination_result(
 
 
 def test_a_pump_that_cannot_register_still_closes_what_it_owns() -> None:
-    """The forward write end has no second closer, so the pump must free it.
-
-    Closing that end is what gives the protocol reader its EOF. A
-    registration that raises before the pump's own cleanup would leave the
-    end open in the parent forever, stranding the reader on an EOF that can
-    never arrive -- so registration belongs inside the block that owns
-    cleanup, which this pins.
-
-    A closed descriptor is the reachable trigger, and `os.fstat` on the
-    forward end afterwards is the exact terminal state: it raises `EBADF`
-    only if the pump released it.
-    """
     forward_read, forward_write = os.pipe()
     release_read, release_write = os.pipe()
     stdout_read, stdout_write = os.pipe()

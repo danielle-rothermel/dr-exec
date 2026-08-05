@@ -1,5 +1,3 @@
-"""Shared fixtures for the dr-exec test suite."""
-
 from __future__ import annotations
 
 import sys
@@ -25,7 +23,6 @@ ATTEMPT_UUID = UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f71")
 
 @pytest.fixture(scope="session")
 def host_runtime() -> IsolatedHostPythonRuntime:
-    """One immutable probed runtime for tests of runtime consumers."""
     return IsolatedHostPythonRuntime(executable=Path(sys.executable))
 
 

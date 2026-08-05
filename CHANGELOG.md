@@ -16,10 +16,10 @@ Initial release: the complete dr-exec v1.
   records and receipts, and the `Executor`/`Runtime`/`RunStore` Protocol
   boundaries.
 - Identity and serialization substrate: role-specific versioned
-  identities, canonical secret-safe projections, the strict bounded read
+  identities, canonical secret-safe projections, the size-preflighted canonical read
   path, scalar wire spellings pinned by golden vectors, and nominal
   SHA-256 digests throughout (via the pinned `dr-serialize`).
-- `DirectoryRunStore` over the pinned `dr-store` Document Directory:
+- `DirectoryRunStore` over the `dr-store>=0.1.2` Document Directory:
   typed lifecycle handles, secret-safe durable manifests, complete and
   degraded receipts, and strict load validation.
 - The protected Python protocol: stdin-through-EOF request transport, the

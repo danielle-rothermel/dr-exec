@@ -1,5 +1,3 @@
-"""Shared mechanics for role-specific identity documents."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -20,7 +18,6 @@ def _require_identity_role(
     *,
     schema: str,
 ) -> Mapping[str, object]:
-    """Require one identity document to carry the named role's schema."""
     if document.schema != schema:
         raise ValueError(f"identity must use schema {schema}")
     if document.schema_version != IDENTITY_SCHEMA_VERSION:
@@ -35,5 +32,4 @@ def _require_identity_role(
 
 
 def _identity_payload(model: ContractModel, /) -> Jsonable:
-    """Project a validated payload model into its identity payload."""
     return cast("Jsonable", model.model_dump(mode="json"))

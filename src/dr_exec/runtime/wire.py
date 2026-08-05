@@ -8,9 +8,6 @@ from pydantic import Field, NonNegativeInt
 from dr_exec.core.kinds import ProtocolFrameKind
 from dr_exec.core.model import ContractModel, IdentityDocumentField
 
-# Child-observable wire literal: the frame boundary. The frame version is
-# spelled by each frame model's `version` field, which is what the child
-# writes and the parent validates; golden byte vectors pin both.
 FRAME_TERMINATOR = b"\n"
 
 

@@ -1,14 +1,5 @@
 @import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=IBM+Plex+Sans:wght@400;600;700&display=swap");
 
-/* ── v2 vocabulary (see SKILL.md §6, references/rules.md) ──────────────────
-   Hue bindings — one hue = one meaning:
-     --accent #1866b4  links + navigation ONLY
-     --anchor #6f42c1  semantic scan anchors (.key) + callouts — never a link
-     green / amber / red  status encodings only, keyed where used
-   Weights: 700 headings · 600 labels/th/inline emphasis · 400 body.
-   Type scale: 28 title · 18 section · 16.5 card head · 16 body ·
-               14.5 secondary · 13 quiet.                                   */
-
 :root {
   --bg: #f4f6f9;
   --surface: #fff;

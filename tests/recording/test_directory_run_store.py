@@ -1,11 +1,3 @@
-"""Lifecycle, degradation, secret-safety, and recovery of the run store.
-
-Filesystem durability mechanics -- temp-write, flush, atomic replace --
-are qualified in the pinned dr-store primitive and are not re-proven
-here. These cases synchronize on published lifecycle state and terminal
-outcomes; no case uses a sleep or elapsed time as evidence.
-"""
-
 from __future__ import annotations
 
 import errno
@@ -513,9 +505,6 @@ def _with_outcome_leaf_key_paths(
     ) | frozenset(f"result.outcome.{path}" for path in outcome_paths)
 
 
-# --- valid prepared, running, finalized transitions -------------------
-
-
 def test_prepare_publishes_a_complete_prepared_record(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
@@ -568,7 +557,6 @@ def test_a_recognized_pre_child_outcome_finalizes_from_prepared(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Pre-spawn cancellation never publishes a `running` state."""
     prepared_run = store.prepare(_prepared_record(execution_id))
 
     receipt = store.finalize(
@@ -586,12 +574,6 @@ def test_mark_running_rejects_a_handle_whose_record_is_finalized(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Every ``mark_running`` failure leaves as the documented type.
-
-    The engine converts this post-start publication failure into a
-    degraded receipt, so the read half of the operation must not raise a
-    different class than the write half.
-    """
     prepared_run = store.prepare(_prepared_record(execution_id))
     store.finalize(prepared_run, _result(execution_id))
 
@@ -609,7 +591,6 @@ def test_mark_running_reports_an_unreadable_manifest_as_executor_failure(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """A corrupt manifest is a read failure, not a different taxonomy."""
     prepared_run = store.prepare(_prepared_record(execution_id))
     (prepared_run.record_dir / MANIFEST_NAME).write_bytes(b"{")
 
@@ -642,9 +623,6 @@ def test_finalizing_twice_degrades_rather_than_replacing_the_record(
     assert receipt.latest_state == store.load(prepared_run.record_dir).state
 
 
-# --- abrupt parent death and valid incomplete recovery ----------------
-
-
 @pytest.mark.parametrize(
     ("commit_state", "expected_state"),
     [
@@ -668,13 +646,6 @@ def test_a_record_committed_before_parent_death_recovers_as_incomplete(
     commit_state: RecordState,
     expected_state: RecordState,
 ) -> None:
-    """The committed state is the recovery evidence, not a wall clock.
-
-    A child process publishes exactly one lifecycle state and then dies
-    abruptly via ``os._exit``, skipping every cleanup path. The parent
-    synchronizes on that terminal exit, so the on-disk state is
-    whatever was committed before death -- never a partial manifest.
-    """
     root = tmp_path / "records"
     root.mkdir()
     handoff = tmp_path / "record-dir.txt"
@@ -714,7 +685,6 @@ def test_recovery_never_infers_completion_from_sidecars_on_disk(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Sidecar bytes without a finalized manifest prove nothing."""
     running_run = store.mark_running(
         store.prepare(_prepared_record(execution_id)),
         ProcessRecord(pid=4242, started_at=STARTED_AT),
@@ -725,9 +695,6 @@ def test_recovery_never_infers_completion_from_sidecars_on_disk(
     recovered = store.load(running_run.record_dir)
 
     assert recovered.state == RecordState.RUNNING
-
-
-# --- atomic finalization with digest-matching sidecars ----------------
 
 
 def test_finalization_stores_digest_matching_retrievable_sidecars(
@@ -757,7 +724,6 @@ def test_head_and_tail_segments_recover_exactly_with_their_counts(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Readers get segment lengths, never an inferred contiguous stream."""
     prepared_run = store.prepare(_prepared_record(execution_id))
     stdout = _stream(head=b"HEAD", tail=b"TAILTAIL", dropped_bytes=17)
 
@@ -780,7 +746,6 @@ def test_accepted_protocol_outputs_stay_inline_and_complete(
     execution_id: ExecutionId,
     request_document: IdentityDocument,
 ) -> None:
-    """A later protocol failure never discards earlier accepted outputs."""
     prepared_run = store.prepare(_prepared_record(execution_id))
     outputs = (request_document, request_document)
 
@@ -801,9 +766,6 @@ def test_accepted_protocol_outputs_stay_inline_and_complete(
     finalized = store.load(prepared_run.record_dir)
     assert isinstance(finalized, FinalizedRecord)
     assert finalized.result.protocol_outputs == outputs
-
-
-# --- secret-safe durable evidence -------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1075,9 +1037,6 @@ def test_the_manifest_excludes_pool_queue_and_lease_context(
     }
 
 
-# --- degradation without changed attribution --------------------------
-
-
 def test_an_unwritable_run_directory_degrades_the_receipt(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
@@ -1186,13 +1145,6 @@ def test_an_unwritable_directory_fails_mark_running_without_losing_prepared(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Post-start publication failure raises dr-exec's typed error.
-
-    ``mark_running`` returns a lifecycle handle, not a receipt, so the
-    engine is what converts this into a degraded receipt. The
-    ``prepared`` manifest stays intact and loadable on disk, so
-    ``prepared`` remains the latest valid state.
-    """
     prepared_run = store.prepare(_prepared_record(execution_id))
     committed = _manifest_bytes(prepared_run.record_dir)
     prepared_run.record_dir.chmod(0o500)
@@ -1251,11 +1203,6 @@ def test_a_missing_run_directory_degrades_rather_than_raising(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Finalization degrades even when nothing valid remains on disk.
-
-    No lifecycle state is readable here, so the handle's own state is
-    the closest remaining claim the receipt can make.
-    """
     missing = PreparedRun(
         execution_id=execution_id,
         record_dir=store.root / "run-absent",
@@ -1304,19 +1251,11 @@ def test_prepare_failure_raises_so_no_child_is_spawned(
     tmp_path: Path,
     execution_id: ExecutionId,
 ) -> None:
-    """Prepare has no degraded receipt: it precedes the attempt.
-
-    The primitive's allocation error is translated into dr-exec's own
-    taxonomy and preserved as ``__cause__``.
-    """
     store = DirectoryRunStore(root=tmp_path / "never-created")
 
     with pytest.raises(ExecutorFailure) as raised:
         store.prepare(_prepared_record(execution_id))
     assert isinstance(raised.value.__cause__, DocumentDirectoryError)
-
-
-# --- concurrent collision-free writers --------------------------------
 
 
 def test_concurrent_writers_allocate_collision_free_directories(
@@ -1339,9 +1278,6 @@ def test_concurrent_writers_allocate_collision_free_directories(
     for run in runs:
         loaded = store.load(run.record_dir)
         assert loaded.declaration.execution_id == run.execution_id
-
-
-# --- malformed manifest and sidecar rejection -------------------------
 
 
 @pytest.mark.parametrize(
@@ -1398,12 +1334,6 @@ def test_load_rejects_a_corrupted_embedded_identity_document(
     execution_id: ExecutionId,
     corrupt: Callable[[Jsonable], Jsonable],
 ) -> None:
-    """A bad identity document is a load failure, not an escaping error.
-
-    The manifest stays canonical, so only the embedded document's shape
-    is invalid: the shared validator's error must arrive as
-    ``RecordLoadError`` with the original preserved as ``__cause__``.
-    """
     run = store.prepare(_prepared_record(execution_id))
     payload = json.loads(_manifest_bytes(run.record_dir))
     header = payload["header"]
@@ -1420,7 +1350,6 @@ def test_load_rejects_a_canonical_manifest_with_a_coercible_scalar(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """Canonical JSON still fails when a strict field needs coercion."""
     run = store.prepare(_prepared_record(execution_id))
     manifest = json.loads(_manifest_bytes(run.record_dir))
     manifest["header"]["schema_version"] = "1"
@@ -1433,12 +1362,6 @@ def test_load_rejects_a_canonical_manifest_with_a_coercible_scalar(
 
 
 def test_the_manifest_byte_ceiling_is_exactly_pinned() -> None:
-    """The bound on the manifest read is a stated dr-exec number.
-
-    ``DirectoryRunStore`` carries no self-budgets, so nothing declared
-    bounds this read; only this constant does. Pinning it here is what
-    makes the bound auditable rather than incidental.
-    """
     assert STRUCTURAL_MANIFEST_BYTE_CEILING == 256 * 1024 * 1024
 
 
@@ -1446,13 +1369,6 @@ def test_load_rejects_a_statically_oversized_manifest_before_reading_it(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """An already-oversized file is refused from its directory entry.
-
-    The oversized manifest is grown sparsely, so a bound applied to bytes
-    already read would have to materialize the whole file to reach the
-    same verdict. Refusal at the real ceiling therefore shows the size
-    comes from the directory entry, ahead of any read or decode.
-    """
     run = store.prepare(_prepared_record(execution_id))
     manifest_path = run.record_dir / MANIFEST_NAME
     with manifest_path.open("r+b") as manifest:
@@ -1468,12 +1384,6 @@ def test_a_static_manifest_exactly_at_the_byte_ceiling_is_read_whole(
     execution_id: ExecutionId,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ceiling is inclusive: only a byte past it is refused.
-
-    The ceiling is lowered to the stored manifest's own length rather
-    than growing a manifest to the real ceiling, so the boundary is
-    exercised on exactly the bytes a real record contains.
-    """
     run = store.prepare(_prepared_record(execution_id))
     stored = _manifest_bytes(run.record_dir)
     monkeypatch.setattr(
@@ -1535,7 +1445,6 @@ def test_load_rejects_an_unsafe_artifact_path_in_the_manifest(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """An escaping relative path fails validation, never a read attempt."""
     run = store.prepare(_prepared_record(execution_id))
     store.finalize(run, _result(execution_id))
     manifest = json.loads(_manifest_bytes(run.record_dir))
@@ -1592,9 +1501,6 @@ def test_load_rejects_an_equal_content_external_sidecar_symlink(
         store.load(run.record_dir)
 
 
-# --- records for successful and failed real runs ----------------------
-
-
 @pytest.mark.parametrize(
     ("outcome", "owner"),
     [
@@ -1639,12 +1545,6 @@ def test_the_finalized_record_binds_the_declaration_to_its_result(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
-    """A result from another run is a caller defect, not a disk failure.
-
-    Degradation describes the storage medium failing. An invalid record
-    construction is dr-exec's own invariant breaking, so it raises
-    rather than being reported as a recording problem.
-    """
     run = store.prepare(_prepared_record(execution_id))
     other = ExecutionId(job_id=JobId(uuid4()), attempt_id=AttemptId(uuid4()))
 
@@ -1654,15 +1554,7 @@ def test_the_finalized_record_binds_the_declaration_to_its_result(
     assert store.load(run.record_dir).state == RecordState.PREPARED
 
 
-# --- pinned persisted literals ----------------------------------------
-
-
 def test_the_on_disk_layout_literals_are_exactly_pinned() -> None:
-    """The four layout names are the on-disk contract, spelled out.
-
-    Reading these symbolically everywhere else means only this test
-    stands between a rename and silent drift of the stored layout.
-    """
     assert RECORD_DIRECTORY_PREFIX == "run"
     assert MANIFEST_NAME == "record.json"
     assert STDOUT_SIDECAR_NAME == "stdout.bin"
@@ -1695,7 +1587,6 @@ def test_a_finalized_run_directory_contains_exactly_the_pinned_files(
 
 
 def test_the_lifecycle_state_literals_are_exactly_pinned() -> None:
-    """Lifecycle states are persisted identity in every manifest."""
     assert RecordState.PREPARED == "prepared"
     assert RecordState.RUNNING == "running"
     assert RecordState.FINALIZED == "finalized"
@@ -1738,7 +1629,6 @@ def test_each_lifecycle_state_lands_in_the_manifest_verbatim(
     state: RecordState,
     expected: str,
 ) -> None:
-    """The stored bytes, not the enum, are what a reader must see."""
     run: PreparedRun | RunningRun = store.prepare(
         _prepared_record(execution_id)
     )

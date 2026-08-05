@@ -1,22 +1,3 @@
-"""Payload-output retention: deterministic head and tail per stream.
-
-Retention is declaration-pinned and independent of drain scheduling. Each
-stream keeps its declared head prefix and its declared tail suffix of the
-bytes the payload produced; everything between them is dropped and counted.
-Two streams draining in different chunk sizes therefore retain the same
-bytes, which is what makes the retained evidence reproducible rather than a
-record of how the parent happened to schedule its reads.
-
-The aggregate budget spans both streams. It is a production threshold, not
-a retention cap: production keeps being counted through EOF under marked
-truncation, so ``produced_bytes`` remains exact after the bound is crossed.
-Under the fail policy the same total is the termination threshold, and the
-engine -- not this module -- acts on the crossing.
-
-No decoding, newline normalization, or in-band framing happens anywhere on
-this path: the bytes retained are the bytes produced.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -31,14 +12,6 @@ from dr_exec.recording.models import PayloadOutputs, RetainedPayloadStream
 
 @dataclass(slots=True)
 class StreamRetention:
-    """One stream's head/tail retention and exact production counts.
-
-    With no declared budget every byte is retained, so the head grows
-    without bound and the tail stays empty: an unbudgeted stream has one
-    contiguous segment rather than a split the reader would have to
-    rejoin.
-    """
-
     head_bytes: int | None
     tail_bytes: int | None
     _head: bytearray = field(default_factory=bytearray)
@@ -47,7 +20,6 @@ class StreamRetention:
     dropped_bytes: int = 0
 
     def offer(self, chunk: bytes, /) -> None:
-        """Retain what the declaration allows and count everything."""
         self.produced_bytes += len(chunk)
         if self.head_bytes is None:
             self._head.extend(chunk)
@@ -90,8 +62,6 @@ def _stream_retention(
 
 @dataclass(slots=True)
 class PayloadRetention:
-    """Both payload streams' retention against one aggregate budget."""
-
     stdout: StreamRetention
     stderr: StreamRetention
     max_total_bytes: int | None
@@ -116,12 +86,6 @@ class PayloadRetention:
 
     @property
     def overflowed(self) -> bool:
-        """Whether aggregate production has crossed the finite bound.
-
-        Crossing means strictly more bytes than the budget allows were
-        produced: a run that produces exactly the declared total stayed
-        within it.
-        """
         return (
             self.max_total_bytes is not None
             and self.produced_bytes > self.max_total_bytes

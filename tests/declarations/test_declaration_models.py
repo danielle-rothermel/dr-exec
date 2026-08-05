@@ -1,5 +1,3 @@
-"""Declaration construction and validation boundaries."""
-
 from __future__ import annotations
 
 import os
@@ -297,8 +295,6 @@ def test_python_targets_reject_nul_in_driver_source(
         )
 
 
-# Each case uses a real keyword rather than a mapping splat, so the
-# declaration stays representative and type-checked.
 UNSUPPORTED_FINITE_WORKLOAD_AXES = (
     pytest.param(
         lambda: Budgets(memory_bytes=FiniteByteLimit(max_bytes=1)),

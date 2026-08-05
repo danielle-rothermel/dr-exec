@@ -1,11 +1,3 @@
-"""Golden vectors pinning every scalar wire spelling.
-
-These bytes are the contract, not an observation of current output. A
-failure here means persisted identity is changing meaning: revert the
-drift, or deliberately revise the standing contract and bump the schema
-version with new vectors. Never regenerate expected bytes to match.
-"""
-
 from __future__ import annotations
 
 import json
@@ -101,13 +93,6 @@ def _env_grant_record_model() -> ContractModel:
 
 
 def _non_ascii_env_grant_record_model() -> ContractModel:
-    """Names whose canonical order differs from Python's `sorted()`.
-
-    `canonical_sorted_values` orders by canonical JSON text, in which a
-    non-ASCII character is its `\\uXXXX` escape, so `é` sorts before `a`
-    where `sorted()` puts it after. An all-ASCII vector cannot tell the
-    two rules apart, so only this one pins the persisted ordering.
-    """
     return EnvGrantRecord(
         kind=EnvGrantKind.OVERLAY,
         var_names=("Z", "é", "a"),
@@ -188,18 +173,9 @@ def test_the_pinned_scalar_spelling_reads_back(
     build_model: Callable[[], ContractModel],
     expected: bytes,
 ) -> None:
-    """Each written vector is accepted by the read path that wrote it."""
     model = build_model()
     assert type(model).model_validate_json(expected, strict=True) == model
 
-
-# --- rejected alternate spellings ----------------------------------------
-#
-# The read path accepts exactly one spelling per scalar. These are the
-# forms the underlying parsers would otherwise accept and silently
-# normalize, which would let distinct durable documents read back as one
-# value -- or, for a seventh fractional digit, let a loaded value differ
-# from the bytes on disk without any error.
 
 GOOD_UUID = "0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"
 
@@ -223,10 +199,6 @@ REJECTED_BYTES_SPELLINGS = (
     pytest.param("AAH+/w==", id="standard-alphabet-padded"),
     pytest.param("AAH-_w", id="url-safe-unpadded"),
     pytest.param("AAH+/w", id="standard-alphabet-unpadded"),
-    # The final character of a padded group carries bits the encoder
-    # never sets, so these all decode to bytes whose own encoding is a
-    # different string: `AB==`, `AC==`, and `AP==` decode to `AA==`'s
-    # `b"\x00"`, and `AAF=` decodes to `AAE=`'s `b"\x00\x01"`.
     pytest.param("AB==", id="two-char-trailing-bits-low"),
     pytest.param("AC==", id="two-char-trailing-bits-mid"),
     pytest.param("AP==", id="two-char-trailing-bits-high"),

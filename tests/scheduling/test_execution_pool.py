@@ -1,27 +1,3 @@
-"""Qualification of the one scheduler core through both its surfaces.
-
-What is established here is scheduling behavior, not execution behavior:
-admission under a shared resident bound, completion-order delivery,
-backpressure on the source, cancellation and abort mid-queue and
-mid-flight, drain to empty, and the exact preservation of caller context.
-None of that needs a real child, and using one would make every case a
-race against process startup. `FakeExecutor` with a gated responder is the
-substrate instead, so each call's start and finish are events the test
-sets rather than moments it hopes for. Real-engine coverage lives in
-`test_pool_real_engine.py`, where it belongs.
-
-Shared admission, resident accounting, publication, cancellation, and break
-behavior are qualified once against the scheduler core. Surface cases remain
-only where the drivers differ: async source pulling and concurrent feeders for
-`run_stream`, and iterable laziness and generator cleanup for finite batches.
-
-Synchronization is on explicit gates and terminal state throughout. There
-is no sleep in this file, no elapsed-time assertion, and no case whose
-evidence is that something had not happened yet after a delay. Where a
-case must show that intake did *not* advance, it first waits for a state
-that would necessarily follow the advance, then asserts the absence.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -62,30 +38,21 @@ if TYPE_CHECKING:
     from dr_exec.capabilities.protocols import Executor
 
 
-# The ticket the break case loads its queue under. Any value distinct
-# from the scheduler's own counter works; naming it keeps the constructed
-# state readable where it is asserted on.
 _QUEUED_TICKET = 9_000
 
 
-# --- Building blocks -----------------------------------------------------
-
-
 def jobs(count: int, /) -> list[ExecutionJob]:
-    """`count` distinct well-formed jobs. Their target is never spawned."""
     return [job_for(trusted_target(("/usr/bin/true",))) for _ in range(count)]
 
 
 def gated_executor(
     *, cancellation_aware: bool = False
 ) -> tuple[FakeExecutor, GatedResponder]:
-    """A fake whose every call is held until the test releases it."""
     responder = GatedResponder(cancellation_aware=cancellation_aware)
     return FakeExecutor(responder=responder), responder
 
 
 def immediate_executor() -> FakeExecutor:
-    """A fake that completes every call at once, for order-free cases."""
     return FakeExecutor(
         responder=lambda job, _token: completion_for(job.job_id)
     )
@@ -103,29 +70,10 @@ def fixed_pool(executor: Executor, slots: int, /) -> ExecutionPool:
 def batch_of(
     executor: Executor, batch: Iterable[ExecutionJob], /, *, slots: int
 ) -> Generator[CompletedExecution]:
-    """`run_many`'s exact driver, over an arbitrary executor.
-
-    `ProcessExecutor.run_many` is capacity resolution plus this driver,
-    and the driver is what these cases are about. Reaching it directly is
-    what lets a gated fake stand in for real children while still
-    exercising the production surface's own loop; `run_many` itself is
-    qualified end to end against the real engine.
-
-    The generator type is deliberate here rather than the surface's
-    `Iterator`: abandoning a batch is one of the behaviors under test, and
-    `close()` is how a caller abandons one.
-    """
     return _run_batch(executor, batch, capacity=slots)
 
 
 class RecordingSource:
-    """An async submission source reporting exactly how far it advanced.
-
-    Backpressure is a claim about the source, so the source is what has to
-    answer: `pulled` is the number of submissions the scheduler actually
-    requested. Nothing about the scheduler's internals is inspected.
-    """
-
     def __init__(
         self, submissions: Iterable[ExecutionSubmission[int]], /
     ) -> None:
@@ -150,42 +98,29 @@ def recording_source(batch: list[ExecutionJob], /) -> RecordingSource:
 async def submissions_of(
     batch: Iterable[ExecutionJob], /
 ) -> AsyncIterator[ExecutionSubmission[int]]:
-    """Submit each job with its own position as its caller context."""
     for index, job in enumerate(batch):
         yield ExecutionSubmission(job=job, context=index)
 
 
 async def consume(stream: AsyncIterator[object], /) -> None:
-    """Drive a stream to exhaustion, discarding what it yields."""
     async for _ in stream:
         pass
 
 
 def in_thread(work: object, /) -> threading.Thread:
-    """Start one thread running `work`, so the test can gate against it."""
     thread = threading.Thread(target=work)  # ty: ignore[invalid-argument-type]
     thread.start()
     return thread
 
 
 def join(thread: threading.Thread, /) -> None:
-    """Join under the watchdog, failing rather than hanging the suite."""
     thread.join(WATCHDOG_SECONDS)
     assert not thread.is_alive(), "watchdog fired joining a driver thread"
-
-
-# --- Capacity ------------------------------------------------------------
 
 
 def test_automatic_capacity_resolves_once_from_the_usable_cpu_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Automatic capacity is the usable CPU count, recorded as automatic.
-
-    Reading it back twice must give the same answer: a bound that drifted
-    with machine load would make the pool's own resident guarantee
-    unstatable.
-    """
     resolved = iter((3, 7))
     calls = 0
 
@@ -218,13 +153,6 @@ def test_automatic_capacity_resolves_once_from_the_usable_cpu_count(
 def test_state_reports_each_lifecycle_stage_through_the_public_surface() -> (
     None
 ):
-    """`state` snapshots the lifecycle: created, running, closed.
-
-    The property is observational: each read here happens after the
-    transition's own call has returned, never as a wait target. The
-    broken stage is pinned where breaks are constructed, alongside the
-    drain-before-raise cases.
-    """
     pool = fixed_pool(immediate_executor(), 1)
     assert pool.state is ExecutionPoolState.CREATED
 
@@ -239,7 +167,6 @@ def test_state_reports_each_lifecycle_stage_through_the_public_surface() -> (
 def test_fixed_capacity_uses_the_selected_slot_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fixed pool records its own count and still names the machine."""
     monkeypatch.setattr("dr_exec.scheduling.pool.usable_cpu_count", lambda: 5)
     pool = fixed_pool(immediate_executor(), 3)
 
@@ -256,39 +183,18 @@ def test_fixed_capacity_uses_the_selected_slot_count(
 
 @pytest.mark.parametrize("slots", [0, -1])
 def test_fixed_capacity_refuses_a_non_positive_slot_count(slots: int) -> None:
-    """A pool with no slots could never make progress."""
     with pytest.raises(ValueError, match="must be positive"):
         FixedPoolCapacity(max_active_jobs=slots)
 
 
 def test_effective_capacity_is_unavailable_before_the_pool_opens() -> None:
-    """Answering early would invent a bound or resolve an unused one."""
     pool = fixed_pool(immediate_executor(), 2)
 
     with pytest.raises(ExecutorFailure, match="resolved when the pool"):
         _ = pool.effective_capacity
 
 
-# --- Admission under the one shared resident bound -----------------------
-
-
 def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
-    """The bound is shared: completion alone does not admit replacement.
-
-    Two slots, three jobs, every call gated. The case drives the scheduler
-    directly because delivery is exactly what must not happen: no
-    completion is taken while the assertion is made, so the first call's
-    finished result provably still occupies its slot rather than merely
-    not having been delivered yet.
-
-    That construction is what makes the evidence a held gate instead of a
-    won race. `can_admit` is the one predicate every surface's intake is
-    gated on, and it is read at a point where a separate active bound
-    would already have freed the first slot -- the first call is released
-    and *observed to have returned*. Only afterwards is the completion
-    taken, and only then does the third job become admissible, which pins
-    delivery rather than completion as the moment the slot frees.
-    """
     executor, responder = gated_executor()
     batch = jobs(3)
     first, second, third = batch
@@ -324,14 +230,6 @@ def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
 
 
 def test_intake_advances_only_while_the_resident_bound_has_room() -> None:
-    """The source is pulled exactly as far as capacity allows, never past.
-
-    A two-slot pool over a five-item source: with both calls held, the
-    source must have advanced twice and no further. The gate makes "both
-    calls started" a state rather than a moment, so the pull count is read
-    at a point where a third pull would already have happened if the
-    scheduler prefetched.
-    """
     executor, responder = gated_executor()
     batch = jobs(5)
     source = recording_source(batch)
@@ -356,22 +254,6 @@ def test_intake_advances_only_while_the_resident_bound_has_room() -> None:
 
 
 def test_a_stalled_consumer_stops_the_source_advancing() -> None:
-    """A consumer that stops consuming stops the source, exactly.
-
-    The source is advanced by the delivery loop, so a consumer that stops
-    taking completions stops intake at a determined point rather than an
-    approximate one. With two slots and a consumer that stalls while
-    holding its second completion, the count is exact: two pulls fill the
-    bound, the first delivery frees one slot which the next loop pass
-    refills, and the second delivery's refill never happens because the
-    consumer never returns from the loop body. Three pulls, not four --
-    and not five, which is the backpressure.
-
-    The stall is a gate the test opens, not a delay: `pulled` is read only
-    after the consumer has announced it is holding, and the assertion is
-    an exact equality, so an extra pull would fail rather than pass
-    silently.
-    """
     executor, responder = gated_executor()
     batch = jobs(6)
     source = recording_source(batch)
@@ -410,12 +292,6 @@ def test_a_stalled_consumer_stops_the_source_advancing() -> None:
 
 
 def test_capacity_is_reached_by_genuinely_overlapping_executor_calls() -> None:
-    """Configured concurrency is exercised, not merely left unviolated.
-
-    Every call reports its own arrival and departure under one lock. Two
-    slots over four jobs must reach a peak of two calls held inside the
-    executor before either is released; a serial implementation cannot pass.
-    """
     slots = 2
     executor, responder = gated_executor()
     batch = jobs(4)
@@ -434,9 +310,6 @@ def test_capacity_is_reached_by_genuinely_overlapping_executor_calls() -> None:
     }
 
 
-# --- Completion order ----------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "finish_order",
     [
@@ -448,12 +321,6 @@ def test_capacity_is_reached_by_genuinely_overlapping_executor_calls() -> None:
 def test_results_are_delivered_in_completion_order(
     finish_order: tuple[int, ...],
 ) -> None:
-    """Delivery follows completion, whatever order submission was in.
-
-    Each call is released and observed in the scheduler's ready queue before
-    the next is released, so publication order is imposed by the test rather
-    than raced for, and the delivered contexts must reproduce it exactly.
-    """
     executor, responder = gated_executor()
     batch = jobs(3)
     pool = fixed_pool(executor, 4)
@@ -494,16 +361,7 @@ def test_results_are_delivered_in_completion_order(
     assert collected == list(finish_order)
 
 
-# --- Caller context ------------------------------------------------------
-
-
 def test_every_completion_carries_exactly_its_submissions_context() -> None:
-    """Context is paired by identity, in memory, never serialized.
-
-    The contexts here hold a lock, so no serialization path could carry
-    one; the assertion is `is`, not equality. The very object submitted
-    with a job comes back with that job's completion.
-    """
     batch = jobs(4)
     contexts = {job.job_id: _UnserializableContext() for job in batch}
     pool = fixed_pool(immediate_executor(), 2)
@@ -530,26 +388,13 @@ def test_every_completion_carries_exactly_its_submissions_context() -> None:
 
 
 class _UnserializableContext:
-    """A caller context no serialization path could survive."""
-
     __slots__ = ("lock",)
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
 
 
-# --- Cancellation, abort, and drain --------------------------------------
-
-
 def test_abort_cancels_work_in_flight_and_awaits_its_teardown() -> None:
-    """Abort cancels active calls and waits for each one to return.
-
-    The calls are genuinely mid-flight when abort begins -- the test waits
-    for their arrival first -- and each observes a cancelled token. That
-    abort waited for them is what the executor-returned gates show: they are
-    set by the time abort returns, which is the "await their teardown" half
-    of the promise.
-    """
     executor, responder = gated_executor(cancellation_aware=True)
     batch = jobs(2)
     pool = fixed_pool(executor, 2)
@@ -573,14 +418,6 @@ def test_abort_cancels_work_in_flight_and_awaits_its_teardown() -> None:
 
 
 def test_abort_stops_intake_before_the_next_submission_is_admitted() -> None:
-    """Abort cancels the resident call and never admits later source work.
-
-    One slot, two jobs: the second is admitted only after the first is
-    delivered, so aborting while the first is in flight leaves the second
-    unadmitted. Nothing is dropped from what *was* admitted -- the
-    in-flight call reaches its cancelled outcome -- and the unadmitted job
-    was never a queue entry to lose.
-    """
     executor, responder = gated_executor(cancellation_aware=True)
     batch = jobs(2)
     first, second = batch
@@ -605,7 +442,6 @@ def test_abort_stops_intake_before_the_next_submission_is_admitted() -> None:
 def test_abort_cancels_a_genuinely_admitted_pending_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Abort cancels a queued token before its worker enters the executor."""
     worker_waiting = threading.Event()
     may_enter_scheduler = threading.Event()
 
@@ -665,13 +501,6 @@ def test_abort_cancels_a_genuinely_admitted_pending_submission(
 
 
 def test_a_cancelled_call_is_delivered_as_completion_data() -> None:
-    """Cancellation is an outcome the consumer receives, not a lost job.
-
-    A call that returns a cancelled outcome is a completion like any
-    other, and the scheduler delivers it as one. The stream is consumed to
-    exhaustion, so nothing about the delivery depends on how the pool is
-    later closed.
-    """
     batch = jobs(2)
     cancelled_job, plain_job = batch
 
@@ -706,12 +535,6 @@ def test_a_cancelled_call_is_delivered_as_completion_data() -> None:
 
 
 def test_drain_lets_admitted_work_finish_uncancelled() -> None:
-    """Normal close stops intake and drains; it does not cancel.
-
-    The in-flight call is released by the test, not by cancellation, and
-    drain must wait for it: by the time the pool reports closed the call
-    has returned and never saw a cancelled token.
-    """
     executor, responder = gated_executor()
     batch = jobs(1)
     only = batch[0]
@@ -739,7 +562,6 @@ def test_drain_lets_admitted_work_finish_uncancelled() -> None:
 def test_exceptional_context_exit_preserves_the_error_and_awaits_abort() -> (
     None
 ):
-    """An exceptional owning-context exit aborts and preserves its exception."""
 
     class _BodyFailure(Exception):
         pass
@@ -773,7 +595,6 @@ def test_exceptional_context_exit_preserves_the_error_and_awaits_abort() -> (
 
 
 def test_drain_to_empty_delivers_every_admitted_submission() -> None:
-    """A stream consumed to exhaustion leaves the pool empty and closed."""
     batch = jobs(5)
     pool = fixed_pool(immediate_executor(), 2)
     collected: list[int] = []
@@ -790,7 +611,6 @@ def test_drain_to_empty_delivers_every_admitted_submission() -> None:
 
 
 def test_a_closed_pool_cannot_reopen_or_stream() -> None:
-    """One capacity bound gets one lifetime."""
     pool = fixed_pool(immediate_executor(), 1)
 
     async def close_then_reuse() -> None:
@@ -807,20 +627,12 @@ def test_a_closed_pool_cannot_reopen_or_stream() -> None:
 
 
 def test_a_pool_rejects_lifecycle_calls_from_another_loop() -> None:
-    """The loop that opened the pool is the only loop that may drive it.
-
-    The scheduler core is condition-guarded, but the pool's own lifecycle
-    attributes are not: a `drain` on a second loop would race the state a
-    live stream is reading and could tear down completions it was about
-    to deliver. Provenance is therefore checked, not assumed.
-    """
     pool = fixed_pool(immediate_executor(), 1)
     opened = threading.Event()
     intruded = threading.Event()
     rejections: list[str] = []
 
     def intrude() -> None:
-        """Drive each lifecycle entry point from a distinct second loop."""
         wait_for(opened, what="the pool to open on its owning loop")
         try:
 
@@ -855,18 +667,7 @@ def test_a_pool_rejects_lifecycle_calls_from_another_loop() -> None:
     assert pool.state is ExecutionPoolState.CLOSED
 
 
-# --- Scheduler-wide failure ----------------------------------------------
-
-
 def test_a_failing_executor_call_breaks_the_pool() -> None:
-    """A machinery failure is not per-job completion data.
-
-    `Executor.run` returns outcomes for everything it can observe about a
-    child, so an exception escaping it means no trustworthy result exists
-    at all. The pool breaks rather than reporting a job that never
-    completed as though it had, and the original failure stays as the
-    cause.
-    """
 
     def explode(
         _job: ExecutionJob, _token: CancelToken | None, /
@@ -890,25 +691,6 @@ def test_a_failing_executor_call_breaks_the_pool() -> None:
 def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
     close: str,
 ) -> None:
-    """A close waits for running calls, so a break can land inside it.
-
-    Closing is not instantaneous: it stops intake and then *waits* for
-    every call still running to finish its teardown. Any of those calls
-    may be the one whose machinery fails, so the break can land after
-    the close began and before it returned. A close that decided its
-    terminal state from a snapshot taken before that wait would report
-    an ordinary CLOSED for a pool whose scheduler is broken -- exactly
-    the distinction a consumer reads the state to make.
-
-    The window is held open rather than raced for: the failing call is
-    parked at a gate, the close is started and waited on until it has
-    provably closed intake, and only then is the call released to raise.
-    Driving the scheduler directly is deliberate -- with no live stream
-    there is nothing that could observe the break first and set BROKEN
-    by the other path, so the state under test is the close's own.
-
-    Both close paths are covered, because both take the same snapshot.
-    """
     arrived = threading.Event()
     release = threading.Event()
 
@@ -947,12 +729,6 @@ def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
 
 
 def _await_closed_intake(scheduler: _ExecutionScheduler[object], /) -> None:
-    """Block until the scheduler's intake is closed, under the watchdog.
-
-    This is a state gate, not a delay: it waits on the scheduler's own
-    condition for the flag a close sets, so a case can act at a point the
-    close has provably reached rather than one it probably has.
-    """
     with scheduler._condition:
         if not scheduler._condition.wait_for(
             lambda: scheduler._intake_closed, WATCHDOG_SECONDS
@@ -963,7 +739,6 @@ def _await_closed_intake(scheduler: _ExecutionScheduler[object], /) -> None:
 def _await_scheduler_publication(
     scheduler: _ExecutionScheduler[object], *job_ids: JobId
 ) -> None:
-    """Block until the exact jobs are present in the scheduler ready queue."""
     expected = set(job_ids)
     with scheduler._condition:
         if not scheduler._condition.wait_for(
@@ -983,7 +758,6 @@ def _await_scheduler_publication(
 
 
 def _await_scheduler_break[T](scheduler: _ExecutionScheduler[T], /) -> None:
-    """Block until the scheduler has retained its first machinery failure."""
     with scheduler._condition:
         if not scheduler._condition.wait_for(
             lambda: scheduler._broken is not None, WATCHDOG_SECONDS
@@ -992,35 +766,6 @@ def _await_scheduler_break[T](scheduler: _ExecutionScheduler[T], /) -> None:
 
 
 def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
-    """A broken scheduler stops dispatching, it does not drain the queue.
-
-    What a break bounds is dispatch, not flight. A call another worker
-    already entered runs to its own end -- it is cancelled, but its
-    teardown completes and its result is discarded. So the behavior under
-    test is only observable on a submission that is *genuinely queued*
-    when the break lands.
-
-    That state is not reachable by admitting, and the case is explicit
-    about constructing it directly rather than pretending otherwise.
-    Admission enforces the resident bound, and the worker cap is the same
-    number, so every submission the bound accepts has a worker free to
-    take it: a queue that outlives its dispatch exists only in the window
-    between a worker returning from one call and re-entering the wait for
-    the next. The queue is therefore loaded through the scheduler's own
-    state, with the only worker provably inside the failing call.
-
-    What is pinned is `_finish`'s guarantee about that queue: a break
-    drops it rather than starting it. The queued submission's completion
-    could never reach a consumer, because delivery raises before it
-    inspects the ready queue, so starting it would spawn a child and
-    write a record for a result guaranteed to be discarded. Its token is
-    cancelled and dropped rather than left resident for the pool's life.
-
-    The evidence is a state, not a delay: the scheduler is driven to its
-    terminal break and fully shut down, which joins every worker, before
-    the arrival record is read. Any dispatch that was going to happen has
-    necessarily already happened by then.
-    """
     failing, queued = jobs(2)
     started: list[JobId] = []
     failing_arrived = threading.Event()
@@ -1062,14 +807,6 @@ def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
 
 
 class _BreakAfterBuffering:
-    """Complete every job but one, and fail that one on release.
-
-    This is the substrate for the drain-before-raise cases. Two jobs are
-    ordinary gated calls whose completions the scheduler buffers; the
-    third raises, which breaks the scheduler with results already sitting
-    in the ready queue -- the exact state the behavior is about.
-    """
-
     def __init__(self, failing: JobId, /) -> None:
         self._failing = failing
         self._arrived: dict[JobId, threading.Event] = {}
@@ -1108,7 +845,6 @@ class _BreakAfterBuffering:
             wait_for(self.arrived(job_id), what=f"job {job_id} to start")
 
     def release_successes(self, *job_ids: JobId) -> None:
-        """Let successful executor responders return to their workers."""
         for job_id in job_ids:
             self.gate(job_id).set()
         for job_id in job_ids:
@@ -1118,7 +854,6 @@ class _BreakAfterBuffering:
             )
 
     def break_the_pool(self) -> None:
-        """Release the failing call and wait until it has raised."""
         self.await_arrivals(self._failing)
         self.gate(self._failing).set()
         wait_for(
@@ -1128,30 +863,6 @@ class _BreakAfterBuffering:
 
 
 def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
-    """A break ends delivery after the buffer, not instead of it.
-
-    A completion sitting in the ready queue is a call that genuinely ran
-    and recorded its own result. A machinery failure on some *other* job
-    says nothing about it, so it is delivered rather than discarded, and
-    the break is raised only once nothing is left to hand over.
-
-    Capacity is above one because that is the only place the behavior
-    exists: with one slot there is never a buffered completion for a
-    break to reach past. Four slots take all three jobs at once, two of
-    which finish and buffer while the third fails, and the two must still
-    arrive -- each carrying exactly its own submission's context -- before
-    the failure surfaces.
-
-    The ordering is constructed, not raced. The source parks after its
-    last job, so the consumer is held inside a pull rather than inside a
-    delivery for the whole setup: the two ordinary calls are released and
-    *observed to have returned*, then the failing one is released and
-    observed to have raised. At the moment the break lands, both
-    completions are provably buffered and provably undelivered, which is
-    the state the behavior is about. Only then is the pull let go, and
-    the source ends there, so nothing admitted after the break can blur
-    what the drain hands over.
-    """
     first, second, failing = jobs(3)
     responder = _BreakAfterBuffering(failing.job_id)
     pool = fixed_pool(FakeExecutor(responder=responder), 4)
@@ -1206,16 +917,6 @@ def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
 def test_a_batch_break_delivers_the_buffered_tail_before_it_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same drain-before-raise through the synchronous surface.
-
-    One scheduler core reached two ways must end a break the same way, so
-    the batch driver is held to the identical rule: every buffered
-    completion first, the failure last. The construction is the batch
-    equivalent of the stream case, gate for gate -- the source parks after
-    its last job, so the driver is held inside its pull while the two
-    completions buffer and the break lands, and nothing has been
-    delivered at that point.
-    """
     first, second, failing = jobs(3)
     responder = _BreakAfterBuffering(failing.job_id)
     captured: list[_ExecutionScheduler[object]] = []
@@ -1273,26 +974,8 @@ def test_a_worker_that_cannot_start_breaks_the_pool_rather_than_hanging(
     surface: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A resource failure the caller could handle must not become a wait.
-
-    Thread creation fails on a loaded host, and the submission that
-    triggered it is already queued for the worker that does not exist.
-    Nothing can ever run it, so every wait for quiescence -- which is
-    what both surfaces close through -- would block forever on work with
-    no runner. An unbounded hang is the one outcome a caller cannot
-    handle; a break is one they can, so the failure surfaces as
-    `SchedulerBroken` carrying the resource error as its cause.
-
-    Both surfaces are covered because both close through that same wait,
-    and the assertion is that each *finishes*: the watchdog on the
-    driving thread is what distinguishes a reported break from the hang
-    this pins, since a wedged close fails the case rather than passing
-    it slowly.
-    """
 
     class _UnstartableThread(threading.Thread):
-        """A worker thread the host refuses to start."""
-
         def start(self) -> None:
             raise RuntimeError("can't start new thread")
 
@@ -1338,32 +1021,10 @@ def test_a_worker_that_cannot_start_breaks_the_pool_rather_than_hanging(
     assert isinstance(failure.__cause__, RuntimeError)
 
 
-# --- Requested close during intake ---------------------------------------
-
-
 @pytest.mark.parametrize("close_kind", ["drain", "abort"])
 def test_a_close_landing_mid_pull_ends_the_stream_without_a_failure(
     close_kind: str,
 ) -> None:
-    """A requested close is not a scheduler-wide failure.
-
-    Every realistic source awaits between items -- a lease from a
-    workflow queue is a network round trip -- so a `drain` can always
-    land between the admission check and the admission itself. The
-    consumer must see that as the end of the stream, because nothing
-    about the scheduler's ability to produce trustworthy completions has
-    changed; it was simply asked to stop taking new work.
-
-    The window is not hoped for, it is held open: the source parks on an
-    event that the test sets only after the drain has been requested, so
-    the pull is provably in flight across the close.
-
-    What is pinned is the shape of the ending, not a delivery count. The
-    consumer reaches the end of its stream and the pool reports a clean
-    close; which completions a concurrent drain still hands over is not
-    promised, because closing stops delivery. What must never arrive is
-    the submission from beyond the close.
-    """
     parked = asyncio.Event()
     may_proceed = asyncio.Event()
 
@@ -1403,47 +1064,13 @@ async def _collect_contexts(
     into: list[int],
     /,
 ) -> None:
-    """Consume a stream to its end, recording each context delivered."""
     async for completion in stream:
         into.append(completion.context)
-
-
-# --- Several sources, one pool -------------------------------------------
 
 
 def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
     None
 ):
-    """The admission check is a hint; the bound holds under a real race.
-
-    Every stream checks for room and then *awaits* its source before
-    admitting, and that await releases the scheduler's lock. So several
-    streams on one pool can each observe the same last free slot and all
-    arrive at admission believing it is theirs. The check cannot be what
-    enforces the bound, because it is stale by the time it is acted on.
-
-    The race is constructed rather than hoped for: every feeder parks
-    inside its pull on a gate the test opens only once *all* of them are
-    parked, so each one provably observed room before any of them
-    admitted. Releasing them together is the exact interleaving that
-    over-admits if admission trusts the check.
-
-    Two things are asserted, because a bound held by dropping work is not
-    held. Occupancy never exceeds capacity, and every submission is still
-    delivered exactly once: the stream that loses the race carries its
-    already-pulled submission and retries it rather than discarding it.
-
-    The occupancy evidence is recorded at the moment of each admission,
-    not sampled from outside. A poll between admissions can miss the
-    breach entirely -- it is repaired by the very next delivery -- so the
-    peak is taken under the scheduler's own lock on the admitting path,
-    where an over-admission is unmissable by construction.
-
-    Residents are the right observable here, not arrivals. Worker threads
-    are capped separately, so the in-flight count stays correct even when
-    the shared bound is breached -- an arrival-count assertion would pass
-    against the very defect this pins.
-    """
     feeders = 4
     capacity = 1
     all_parked = asyncio.Event()
@@ -1451,8 +1078,6 @@ def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
     parked = 0
 
     class _PeakRecordingScheduler(_ExecutionScheduler[object]):
-        """Records the bound's occupancy as each admission takes it."""
-
         peak_residents = 0
 
         def admit(
@@ -1468,7 +1093,6 @@ def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
     async def racing_source(
         which: int, /
     ) -> AsyncIterator[ExecutionSubmission[int]]:
-        """Park inside the pull until every feeder is parked too."""
         nonlocal parked
         parked += 1
         if parked == feeders:
@@ -1506,22 +1130,7 @@ def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
     assert sorted(delivered) == list(range(feeders))
 
 
-# --- Bounded retention ---------------------------------------------------
-
-
 def test_cancellation_tokens_are_bounded_by_capacity_not_by_history() -> None:
-    """The long-lived pool shape must not accumulate one token per job.
-
-    A durable streaming worker is one pool over a hundred thousand
-    samples, so any structure that grows per admitted job rather than per
-    resident is a leak -- and a `CancelToken` holds an OS-level lock, not
-    just a Python object. Every other scheduler structure is already
-    sized by the bound; this pins that the token map is too.
-
-    The check runs against delivered work, not a clock: after each
-    delivery the scheduler has provably retired that submission, so the
-    live token count may never exceed the capacity that bounds it.
-    """
     capacity = 2
     delivered = 0
     peak_tokens = 0
@@ -1550,11 +1159,7 @@ def test_cancellation_tokens_are_bounded_by_capacity_not_by_history() -> None:
     assert peak_tokens <= capacity
 
 
-# --- Finite batch --------------------------------------------------------
-
-
 def test_a_finite_batch_yields_every_one_of_its_completions() -> None:
-    """The whole batch comes back, one completion per job."""
     batch = jobs(7)
 
     completed = list(batch_of(immediate_executor(), batch, slots=2))
@@ -1565,12 +1170,6 @@ def test_a_finite_batch_yields_every_one_of_its_completions() -> None:
 
 
 def test_a_finite_batch_consumes_its_input_lazily() -> None:
-    """A batch far larger than capacity never materializes.
-
-    The source counts its own advancement and the consumer takes exactly
-    one completion before the count is read. With two slots, no more than
-    the resident bound may ever have been pulled.
-    """
     batch = jobs(2)
     pulled = 0
 
@@ -1592,12 +1191,6 @@ def test_a_finite_batch_consumes_its_input_lazily() -> None:
 def test_an_abandoned_batch_still_drains_its_admitted_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Closing the iterator early still awaits in-flight teardown.
-
-    The drain happens in the generator's own cleanup, so a caller who
-    stops consuming cannot leave an executor call running behind the
-    pool's back. The executor-returned gates are set when `close` returns.
-    """
     executor, responder = gated_executor()
     batch = jobs(2)
     first, held = batch
@@ -1631,12 +1224,8 @@ def test_an_abandoned_batch_still_drains_its_admitted_work(
     responder.assert_no_watchers()
 
 
-# --- Driver-specific termination ----------------------------------------
-
-
 @pytest.mark.parametrize("surface", ["batch", "stream"])
 def test_each_driver_handles_an_empty_source(surface: str) -> None:
-    """Each driver terminates cleanly without a submission or completion."""
     if surface == "batch":
         assert list(batch_of(immediate_executor(), [], slots=1)) == []
         return

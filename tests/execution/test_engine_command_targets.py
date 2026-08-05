@@ -1,19 +1,3 @@
-"""The single-run engine against real children, for command targets.
-
-Every case here spawns a real macOS child and synchronizes on explicit
-files, FIFO gates, and terminal outcomes. Nothing waits on elapsed time or
-treats the passage of time as evidence: where a case must observe a child
-that is deliberately still running, it releases the child through a gate it
-created and then reads the terminal outcome. Deadlines appear only as
-watchdogs, and every case carries one so a hung child cannot hang the
-suite.
-
-macOS process semantics -- sessions, process groups, group-targeted
-teardown, direct-child reaping -- are what these cases exercise, so they
-are marked and skipped off darwin. Their passing on macOS is the
-qualification evidence for the lifecycle claims.
-"""
-
 from __future__ import annotations
 
 import errno
@@ -106,24 +90,15 @@ pytestmark = [
     pytest.mark.usefixtures("process_watchdog"),
 ]
 
-# Watchdog only. It bounds a case that would otherwise hang the suite; no
-# case ever asserts on it, and no case uses its non-expiry as evidence.
-# Watchdogs expressed as budgets. A test that needs the engine itself to
-# stop an intentionally-immortal child declares one of these; the case
-# then asserts on the terminal outcome, never on how long it took.
 WATCHDOG_WALL_TIME = FiniteDurationLimit(max_ns=5_000_000_000)
 WATCHDOG_JOIN_TIME = FiniteDurationLimit(max_ns=5_000_000_000)
 ESCAPEE_JOIN_TIME = FiniteDurationLimit(max_ns=500_000_000)
 
-# An input far past any pipe buffer a kernel offers, so a child that never
-# reads it leaves the feed mid-payload rather than absorbing it all.
 UNREADABLE_STDIN_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class Harness:
-    """One temporary record root plus the runtime and budgets to run it."""
-
     store: DirectoryRunStore
     root: Path
     runtime: IsolatedHostPythonRuntime
@@ -188,12 +163,6 @@ class Harness:
 
 
 def record_dir_of(completed: CompletedExecution, /) -> Path:
-    """Read the record location a real receipt always carries.
-
-    A production call never yields the fake receipt, so narrowing here
-    keeps the assertion about the record rather than about which receipt
-    variant arrived.
-    """
     receipt = completed.record_receipt
     assert isinstance(receipt, CompleteRecordReceipt | DegradedRecordReceipt)
     return receipt.record_dir
@@ -229,11 +198,7 @@ def harness(
 
 
 def python_command(source: str, /) -> tuple[str, ...]:
-    """One real child that is a fresh isolated interpreter, not a shell."""
     return (sys.executable, "-I", "-c", source)
-
-
-# --- Recognized outcomes -------------------------------------------------
 
 
 @requires_macos
@@ -275,11 +240,6 @@ def test_a_signalled_child_reports_its_signal_number(
 def test_a_missing_executable_is_spawn_absence_not_a_raise(
     harness: Harness,
 ) -> None:
-    """Absence is a recognized outcome, so it is data rather than an error.
-
-    It also names the executable that was missing, which the durable
-    record deliberately drops.
-    """
     completed = harness.run(("/nonexistent/definitely-not-here",))
 
     assert completed.result.outcome == SpawnAbsentOutcome(
@@ -309,13 +269,6 @@ def test_a_non_executable_file_is_a_spawn_failure_preserving_its_errno(
 def test_a_bootstrap_setup_failure_names_the_stage_that_failed(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A setup stage before `exec` is a spawn failure, never absence.
-
-    The scratch directory is removed between its creation and the spawn,
-    so the helper's `chdir` fails with the same `ENOENT` a missing
-    executable would report. Classifying on the errno alone would name
-    the wrong thing missing.
-    """
     original = dr_exec.execution.engine._scratch_workspace
 
     @contextmanager
@@ -333,9 +286,6 @@ def test_a_bootstrap_setup_failure_names_the_stage_that_failed(
     assert isinstance(outcome, SpawnFailedOutcome)
     assert outcome.errno == errno.ENOENT
     assert outcome.error_message == SETUP_STAGE_CHDIR
-
-
-# --- Transports ----------------------------------------------------------
 
 
 @requires_macos
@@ -362,7 +312,6 @@ def test_declared_stdin_reaches_the_child_and_is_followed_by_eof(
 def test_payload_stdout_and_stderr_stay_separate_raw_byte_channels(
     harness: Harness,
 ) -> None:
-    """No decoding, no newline normalization, no interleaving."""
     completed = harness.run(
         python_command(
             "import sys\n"
@@ -379,11 +328,6 @@ def test_payload_stdout_and_stderr_stay_separate_raw_byte_channels(
 def test_both_streams_drain_concurrently_past_one_pipe_buffer(
     harness: Harness,
 ) -> None:
-    """Sequential draining would deadlock here; concurrent draining does not.
-
-    Each stream writes far more than a pipe buffer holds, so a parent that
-    drained one to EOF before starting the other could never finish.
-    """
     volume = 1 << 20
     completed = harness.run(
         python_command(
@@ -399,14 +343,10 @@ def test_both_streams_drain_concurrently_past_one_pipe_buffer(
     assert completed.result.payload_outputs.stdout.head == b"o" * volume
 
 
-# --- Containment and inherited state -------------------------------------
-
-
 @requires_macos
 def test_a_command_child_excludes_a_high_inheritable_parent_descriptor(
     harness: Harness,
 ) -> None:
-    """``close_fds`` excludes inheritable descriptors above a low scan."""
     seed_read, seed_write = os.pipe()
     high_descriptor = fcntl.fcntl(seed_read, fcntl.F_DUPFD, 512)
     os.set_inheritable(high_descriptor, True)
@@ -437,14 +377,6 @@ def test_a_command_child_excludes_a_high_inheritable_parent_descriptor(
 def test_the_child_receives_only_the_granted_environment(
     harness: Harness,
 ) -> None:
-    """The grant is the whole inherited environment dr-exec installs.
-
-    CPython and macOS's own runtime add a small fixed set of variables
-    inside the child after exec; those are platform artifacts rather than
-    values dr-exec passed, and a plain interpreter started with an empty
-    environment shows the same ones. What this pins is that no parent
-    variable outside the grant survives.
-    """
     os.environ["DR_EXEC_TEST_AMBIENT_SECRET"] = "must not reach the child"
     try:
         completed = harness.run(
@@ -466,7 +398,6 @@ def test_the_child_receives_only_the_granted_environment(
 def test_a_named_grant_snapshots_values_when_the_grant_is_built(
     harness: Harness,
 ) -> None:
-    """Live-grant snapshot semantics: the grant, not the run, reads os.environ."""
     os.environ["DR_EXEC_TEST_SNAPSHOT"] = "at construction"
     try:
         grant = EnvGrant.named(["DR_EXEC_TEST_SNAPSHOT"])
@@ -531,9 +462,6 @@ def test_the_child_leads_a_fresh_session_and_process_group(
     assert pgid != os.getpgrp()
 
 
-# --- Argv resolution -----------------------------------------------------
-
-
 @requires_macos
 def test_a_relative_executable_resolves_through_the_granted_path(
     harness: Harness, tmp_path: Path
@@ -556,7 +484,6 @@ def test_a_relative_executable_resolves_through_the_granted_path(
 def test_a_relative_executable_without_a_granted_path_is_refused(
     harness: Harness,
 ) -> None:
-    """Refused before anything durable exists, and before any spawn."""
     with pytest.raises(DeclarationError, match="granted PATH"):
         harness.run(("dr-exec-test-tool",))
 
@@ -576,15 +503,6 @@ def test_an_absolute_executable_resolves_without_any_granted_path(
 def test_a_relative_granted_path_entry_is_refused_before_anything_durable(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A relative entry names nothing the child could reach.
-
-    The tool really exists at ``<cwd>/bin/<name>``, so the search would
-    succeed and hand back a relative hit; the child chdirs to its fresh
-    scratch directory before ``exec``, where that hit resolves to
-    nothing. Reading the entry against the parent's location instead
-    would be the ambient cwd the engine never consults, so the
-    declaration is refused rather than resolved.
-    """
     tool_dir = tmp_path / "bin"
     tool_dir.mkdir()
     tool = tool_dir / "dr-exec-test-tool"
@@ -605,7 +523,6 @@ def test_a_relative_granted_path_entry_is_refused_before_anything_durable(
 def test_an_empty_granted_path_entry_is_refused_before_anything_durable(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """An empty entry is the current directory, spelled shorter."""
     tool_dir = tmp_path / "bin"
     tool_dir.mkdir()
 
@@ -653,13 +570,9 @@ def test_argv_reaches_the_child_verbatim_without_shell_interpretation(
     assert completed.result.payload_outputs.stdout.head == hostile.encode()
 
 
-# --- Platform and target validation --------------------------------------
-
-
 def test_an_unsupported_platform_is_refused_before_anything_durable(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The refusal is the declaration boundary, so it holds off darwin too."""
     monkeypatch.setattr(sys, "platform", "linux")
 
     with pytest.raises(DeclarationError, match="darwin"):
@@ -672,12 +585,6 @@ def test_an_unsupported_platform_is_refused_before_anything_durable(
 def test_every_declared_target_kind_runs_through_the_one_engine_path(
     harness: Harness,
 ) -> None:
-    """All three target kinds reach a completion through the same path.
-
-    The Python target's own behavior is qualified separately; what this
-    pins is that the engine's target dispatch is total over the declared
-    union, so no declared kind is left refused.
-    """
     python_job = ExecutionJob(
         job_id=JobId(uuid4()),
         target=UntrustedPythonTarget(
@@ -717,9 +624,6 @@ def test_an_untrusted_command_records_its_containment_profile(
     )
 
 
-# --- Budgets -------------------------------------------------------------
-
-
 @requires_macos
 def test_an_over_budget_input_is_refused_before_any_spawn(
     harness: Harness,
@@ -754,12 +658,6 @@ def test_an_input_exactly_at_its_budget_is_within_it(
 def test_wall_time_overflow_terminates_an_otherwise_immortal_child(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The child never exits on its own, so only the budget can end it.
-
-    Its announcement on stdout is the evidence it really started, so the
-    outcome is a budget termination rather than a child that died on its
-    own before the deadline mattered.
-    """
     del tmp_path
     completed = harness.run(
         python_command(
@@ -849,11 +747,6 @@ def test_output_exactly_at_the_aggregate_budget_is_retained_whole(
 def test_marked_truncation_keeps_head_and_tail_and_exact_counts(
     harness: Harness,
 ) -> None:
-    """The retained segments are the declaration's, not the drain's.
-
-    Head and tail stay separate values: no marker is inserted, and nothing
-    represents them as contiguous output.
-    """
     budgets = finite_output(
         policy=OutputOverflowPolicy.MARKED_TRUNCATION,
         stdout_head=3,
@@ -889,7 +782,6 @@ def test_marked_truncation_keeps_head_and_tail_and_exact_counts(
 def test_marked_truncation_counts_production_through_eof(
     harness: Harness,
 ) -> None:
-    """Overflow does not stop the drain, so the counts stay exact."""
     volume = 1 << 18
     budgets = finite_output(
         policy=OutputOverflowPolicy.MARKED_TRUNCATION,
@@ -917,7 +809,6 @@ def test_marked_truncation_counts_production_through_eof(
 def test_the_fail_policy_terminates_a_child_that_would_never_exit(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Only the output budget can end this child; the wall clock is a watchdog."""
     budgets = finite_output(
         policy=OutputOverflowPolicy.FAIL,
         stdout_head=8,
@@ -950,7 +841,6 @@ def test_the_fail_policy_terminates_a_child_that_would_never_exit(
 def test_a_recorded_output_violation_beats_a_clean_exit(
     harness: Harness,
 ) -> None:
-    """The child exits zero; the violation is what the outcome reports."""
     budgets = finite_output(
         policy=OutputOverflowPolicy.MARKED_TRUNCATION,
         stdout_head=2,
@@ -972,7 +862,6 @@ def test_a_recorded_output_violation_beats_a_clean_exit(
 def test_a_recorded_output_violation_beats_the_wall_clock_deadline(
     harness: Harness,
 ) -> None:
-    """Both bounds are crossed; the pinned precedence picks the output one."""
     budgets = finite_output(
         policy=OutputOverflowPolicy.MARKED_TRUNCATION,
         stdout_head=2,
@@ -999,19 +888,10 @@ def test_a_recorded_output_violation_beats_the_wall_clock_deadline(
     )
 
 
-# --- Teardown and reaping ------------------------------------------------
-
-
 @requires_macos
 def test_teardown_reaches_the_original_process_group(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """A forked descendant in the group goes with the leader.
-
-    The direct child announces the descendant's pid on stdout and flushes
-    before either process sleeps, so the pid this case checks belongs to a
-    process that provably existed and shared the group.
-    """
     del tmp_path
     completed = harness.run(
         python_command(
@@ -1053,18 +933,6 @@ def test_the_direct_child_is_reaped_so_no_zombie_remains(
 def test_a_clean_exit_still_tears_down_the_group_it_led(
     harness: Harness,
 ) -> None:
-    """Teardown is unconditional, so a clean return leaves no survivors.
-
-    The direct child forks a descendant that outlives it and then exits
-    zero. Signalling only a live leader would let this ordinary
-    successful return leave a background process behind, which is exactly
-    what the lifecycle claim excludes.
-
-    The descendant keeps stdout open, so the call cannot return until the
-    inherited pipe reaches EOF -- which happens only once the descendant
-    is gone. The return is therefore evidence that teardown reached it,
-    with no window between the signal and the check.
-    """
     completed = harness.run(
         python_command(
             "import os, sys, time\n"
@@ -1086,7 +954,6 @@ def test_a_clean_exit_still_tears_down_the_group_it_led(
 
 @requires_macos
 def test_exact_pid_cleanup_runs_when_the_case_body_fails() -> None:
-    """A failing assertion cannot orphan a PID already registered by a test."""
 
     class _ForcedFailure(Exception):
         pass
@@ -1120,7 +987,6 @@ def test_finite_termination_budget_allows_a_cooperative_term_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ready child handles TERM and exits without escalation."""
     ready = Gate.create(tmp_path, "cooperative-ready")
     handled = tmp_path / "term-handled"
     token = CancelToken()
@@ -1180,7 +1046,6 @@ def test_finite_termination_budget_escalates_a_term_ignoring_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ready child that ignores TERM is killed and reaped."""
     ready = Gate.create(tmp_path, "ignoring-ready")
     token = CancelToken()
     group_signals: list[int] = []
@@ -1233,12 +1098,6 @@ def test_finite_termination_budget_escalates_a_term_ignoring_child(
 def test_a_descendant_that_leaves_the_session_escapes_the_claim(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The honest limit of the containment claim, pinned as behavior.
-
-    The escapee also holds the inherited pipes open, so this is the join
-    exhaustion path: no trustworthy result exists and the call raises,
-    leaving the latest lifecycle state incomplete on disk.
-    """
     gate = Gate.create(tmp_path, "escapee")
     (collector,) = start_threaded_calls((lambda: int(gate.receive()),))
     escapee_pid: int | None = None
@@ -1280,16 +1139,6 @@ def test_a_descendant_that_leaves_the_session_escapes_the_claim(
 def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The escapee cannot pin the call to a payload it will never read.
-
-    An input larger than the pipe buffer only drains as fast as the child
-    reads it, and this child's escaped descendant holds the read end
-    without ever reading. The feed thread is therefore still mid-payload
-    when the join budget expires, and the raise below is what says it was
-    released rather than waited on: the failure can only surface if
-    ``close`` -- which joins the transport threads with no deadline of its
-    own -- reached them all and returned.
-    """
     gate = Gate.create(tmp_path, "escapee")
     (collector,) = start_threaded_calls((lambda: int(gate.receive()),))
     escapee_pid: int | None = None
@@ -1328,14 +1177,10 @@ def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
     assert record.state is RecordState.RUNNING
 
 
-# --- Cancellation --------------------------------------------------------
-
-
 @requires_macos
 def test_pre_spawn_cancellation_records_without_launching_a_child(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """A cancelled call cannot have run its payload, which would leave a mark."""
     marker = tmp_path / "the-child-ran"
     token = CancelToken()
     token.cancel()
@@ -1358,12 +1203,6 @@ def test_pre_spawn_cancellation_records_without_launching_a_child(
 def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Cancellation is observed only after the child proves it is running.
-
-    The gate is what orders the two: the canceller's read returns exactly
-    when the child announces itself, so the token is set while a real
-    child is alive rather than at some hoped-for moment.
-    """
     gate = Gate.create(tmp_path, "started")
     token = CancelToken()
     canceller = threading.Thread(
@@ -1391,9 +1230,6 @@ def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     assert record.state is RecordState.FINALIZED
 
 
-# --- Recording lifecycle -------------------------------------------------
-
-
 @requires_macos
 def test_a_completed_run_finalizes_with_digest_matching_sidecars(
     harness: Harness,
@@ -1419,7 +1255,6 @@ def test_a_completed_run_finalizes_with_digest_matching_sidecars(
 def test_the_record_carries_the_declaration_digest_but_never_argv(
     harness: Harness,
 ) -> None:
-    """Secret-safe durable evidence: the digest, not the invocation."""
     secret = "a-secret-argument"
     completed = harness.run(
         (sys.executable, "-I", "-c", "pass", secret),
@@ -1452,7 +1287,6 @@ def test_the_record_names_granted_variables_but_never_their_values(
 def test_a_spawn_absence_finalizes_directly_from_prepared(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No child started, so `running` is never published for this attempt."""
     marked: list[PreparedRun] = []
     original = DirectoryRunStore.mark_running
 
@@ -1477,7 +1311,6 @@ def test_a_spawn_absence_finalizes_directly_from_prepared(
 def test_the_running_manifest_is_published_while_the_child_is_alive(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Read ``running`` only after its publication returns, with a live child."""
     arrived = Gate.create(tmp_path, "arrived")
     release = Gate.create(tmp_path, "release")
     marked_running = threading.Event()
@@ -1527,8 +1360,6 @@ def test_the_running_manifest_is_published_while_the_child_is_alive(
 
 @dataclass(frozen=True, slots=True)
 class _MarkRunningObservedStore:
-    """Delegate storage and signal only after ``mark_running`` returns."""
-
     delegate: DirectoryRunStore
     marked_running: threading.Event
 
@@ -1559,16 +1390,6 @@ class _MarkRunningObservedStore:
 
 @dataclass(frozen=True, slots=True)
 class _GatedMarkingStore(DirectoryRunStore):
-    """A conforming store whose `running` publish waits on an explicit gate.
-
-    A slow ``mark_running`` is an ordinary implementation -- a contended
-    disk, a network mount, a cold cache -- so the engine must already be
-    draining the child before it publishes. The gate makes the ordering
-    exact rather than probable: the publish returns only once the test
-    releases it, and the test releases it only after the child has proved
-    it pushed more than one pipe buffer through.
-    """
-
     gate: Gate
 
     def mark_running(
@@ -1588,19 +1409,6 @@ def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
     tmp_path: Path,
     host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
-    """Draining is live across the durable `running` publish.
-
-    macOS pipes hold 64 KiB, so a child writing more than that blocks in
-    the kernel until someone reads. If the parent published the `running`
-    manifest before starting the transports, the child would be stalled for
-    the whole publish and charged for it against its own wall-clock budget.
-
-    The gate pins the ordering with no timing at all: the publish waits on
-    `written`, which the child opens only after the full oversized write has
-    completed. Under the wrong order the two processes deadlock and the
-    case's watchdog reports it; under the right order the child streams
-    through and exits cleanly with every byte retained.
-    """
     produced_bytes = 200_000
     assert produced_bytes > 64 * 1024
     root = tmp_path / "gated"
@@ -1639,14 +1447,6 @@ def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
     tmp_path: Path,
     host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
-    """The same ordering in the input direction, which fails identically.
-
-    A child that reads its whole stdin first cannot see EOF until the feed
-    thread has pushed every byte, and the feed thread blocks after one pipe
-    buffer. The gate releases the `running` publish only once the child has
-    echoed a full oversized stdin back, so the publish provably overlapped
-    a live feed rather than preceding it.
-    """
     stdin_bytes = b"y" * 200_000
     root = tmp_path / "gated-stdin"
     root.mkdir()
@@ -1678,12 +1478,7 @@ def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
     )
 
 
-# --- Recording degradation -----------------------------------------------
-
-
 class _UnwritableStore(DirectoryRunStore):
-    """A store whose finalization always fails, and only its finalization."""
-
     def finalize(
         self,
         run: FinalizableRun,
@@ -1720,8 +1515,6 @@ def test_finalization_failure_degrades_the_receipt_not_the_outcome(
 
 
 class _UnmarkableStore(DirectoryRunStore):
-    """A store whose post-start `running` publication always fails."""
-
     def mark_running(
         self,
         prepared_run: PreparedRun,
@@ -1735,13 +1528,6 @@ class _UnmarkableStore(DirectoryRunStore):
 def test_a_failed_running_publication_degrades_the_receipt_by_name(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Post-start degradation, so the attempt continues and finalizes.
-
-    The finalize that follows succeeds, so the record on disk reaches
-    ``finalized`` -- but the caller is still told the ``running``
-    publication never landed, by name, rather than being handed a
-    complete receipt that hides it.
-    """
     root = tmp_path / "unmarkable"
     root.mkdir()
     store = _UnmarkableStore(root=root)
@@ -1767,8 +1553,6 @@ def test_a_failed_running_publication_degrades_the_receipt_by_name(
 
 
 class _UnpreparableStore(DirectoryRunStore):
-    """A store that cannot prepare, so no attempt may start."""
-
     def prepare(self, record: PreparedRecord, /) -> PreparedRun:
         raise ExecutorFailure("preparation refused by the test")
 
@@ -1800,14 +1584,10 @@ def test_prepare_failure_prevents_the_spawn_and_raises(
     assert not marker.exists()
 
 
-# --- Measurements --------------------------------------------------------
-
-
 @requires_macos
 def test_measurements_describe_the_attempt_the_engine_observed(
     harness: Harness,
 ) -> None:
-    """Not a clock assertion: these are the invariants among the numbers."""
     completed = harness.run(
         python_command("import sys; sys.stdout.buffer.write(b'ok')"),
         stdin=b"input",
@@ -1820,14 +1600,10 @@ def test_measurements_describe_the_attempt_the_engine_observed(
     assert measurements.protocol_bytes_received == 0
 
 
-# --- Concurrency ---------------------------------------------------------
-
-
 @requires_macos
 def test_concurrent_calls_keep_their_attempts_fully_separate(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """All children overlap while records, scratch, and outputs stay distinct."""
     call_count = 8
     callers_ready = threading.Barrier(call_count + 1)
     arrivals = tuple(
@@ -1916,14 +1692,10 @@ def test_every_call_gets_a_fresh_child_and_a_distinct_attempt_id(
     )
 
 
-# --- Post-spawn machinery failure ----------------------------------------
-
-
 @requires_macos
 def test_bootstrap_launch_failure_closes_every_attempt_resource(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed ``Popen`` leaves prepared state and no owned resources."""
     scratch_paths: list[Path] = []
     original_scratch = dr_exec.execution.engine._scratch_workspace
 
@@ -1977,7 +1749,6 @@ def test_bootstrap_launch_failure_closes_every_attempt_resource(
 def test_a_started_output_worker_failure_raises_after_lifecycle_cleanup(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A dead pump cannot turn missing output into a clean completion."""
 
     def failing_run(_: object) -> None:
         raise RuntimeError("synthetic output failure")
@@ -2008,7 +1779,6 @@ def test_a_started_output_worker_failure_raises_after_lifecycle_cleanup(
 def test_an_escaped_stdin_oserror_remains_ordinary_transport_behavior(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A child closing stdin early is not executor machinery failure."""
 
     def failing_feed(*_: object) -> None:
         raise OSError(errno.EPIPE, "synthetic closed stdin")
@@ -2024,14 +1794,6 @@ def test_an_escaped_stdin_oserror_remains_ordinary_transport_behavior(
 def test_a_store_failure_after_the_spawn_still_reaps_the_direct_child(
     harness: Harness,
 ) -> None:
-    """A live child exists from the spawn on, so every raise reaps it.
-
-    `mark_running` is the first thing that runs against a live child, and
-    a store that raises an unexpected type is a machinery failure rather
-    than the recording degradation the engine absorbs. The raise must
-    still leave through teardown: `ECHILD` is the kernel's own statement
-    that nothing this parent spawned is left unreaped.
-    """
 
     class ExplodingStore(DirectoryRunStore):
         def mark_running(
@@ -2056,14 +1818,6 @@ def test_a_store_failure_after_the_spawn_still_reaps_the_direct_child(
 def test_a_thread_that_cannot_start_still_tears_down_the_group(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Thread exhaustion mid-start leaves no survivor and no zombie.
-
-    The child forks a descendant that would outlive it, then blocks on a
-    gate it never receives, so the descendant is provably alive when the
-    engine's own machinery fails. The protocol reader is the last thread
-    started, so failing that start exercises the window where earlier
-    threads are already running against descriptors the frame still owns.
-    """
     started: list[str] = []
     original = dr_exec.execution.engine._started_thread
 
@@ -2100,17 +1854,6 @@ def test_a_thread_that_cannot_start_still_tears_down_the_group(
 def test_a_partial_transport_start_leaks_no_descriptor(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every descriptor the attempt opened is closed on the failing path.
-
-    A protocol target is what makes this the interesting case: it opens
-    the forward pipe whose write end the pump would have taken and whose
-    read end the reader would have taken, and the failing start is the
-    reader's, so neither handoff completes. The count of this process's
-    own open descriptors is taken after one attempt has warmed every lazy
-    allocation and again after several more; a write end nobody owned, a
-    taken read end nobody closed, or an unclosed selector would each show
-    as a positive delta.
-    """
     original = dr_exec.execution.engine._started_thread
 
     def failing_start(
@@ -2150,25 +1893,10 @@ def test_a_partial_transport_start_leaks_no_descriptor(
     assert len(os.listdir("/dev/fd")) == before
 
 
-# --- Executor self-budgets ------------------------------------------------
-
-
 @requires_macos
 def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A helper that never reaches the payload cannot hold the call open.
-
-    The status pipe reaching EOF is what says the payload was reached, so
-    a helper stalled before `exec` gates the whole attempt. The stall here
-    is a real one -- an extra open copy of the status write end that no
-    payload will ever close -- rather than a slow child, so the budget is
-    what ends the wait and nothing else can.
-
-    The failure is `ExecutorFailure` rather than a budget outcome: this is
-    the executor's own limit on its own machinery, and a payload that
-    never ran cannot own it.
-    """
     stalls: list[int] = []
     original = dr_exec.execution.engine.launch_bootstrap
 
@@ -2217,22 +1945,6 @@ def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
 def test_a_helper_stopped_before_setsid_is_still_reaped(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Teardown before the group exists still ends the call.
-
-    The gate holds the helper at its first statement, so the startup
-    budget expires while the child is still short of `setsid`: it remains
-    in the parent's own group, where its pid names no group and every
-    group-targeted signal fails with ESRCH. Signalling only the group
-    there would leave the unbounded reap that follows waiting forever, so
-    the case asserts the executor's own failure arrives and that the
-    direct child was collected.
-
-    The parent holds both ends of the gate FIFO open for the whole run,
-    so the child's own open returns at once and it blocks in `read`.
-    That is what makes the hold survivable from the parent's side: a
-    child that teardown kills while gated never opens the FIFO, and the
-    parent still has no peer to wait for when it lets go.
-    """
     gate_path = tmp_path / "before-setsid"
     os.mkfifo(gate_path)
     gate_read = os.open(gate_path, os.O_RDONLY | os.O_NONBLOCK)
@@ -2283,7 +1995,6 @@ def test_a_helper_stopped_before_setsid_is_still_reaped(
 def test_an_unbudgeted_startup_axis_installs_no_deadline(
     harness: Harness,
 ) -> None:
-    """The default budget adds no limit, so an ordinary run is unaffected."""
     completed = harness.run(
         python_command("pass"),
         self_budgets=ExecutorSelfBudgets.unbudgeted(),
@@ -2296,7 +2007,6 @@ def test_an_unbudgeted_startup_axis_installs_no_deadline(
 def test_a_setup_failure_after_setsid_still_tears_down_the_group(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every other setup stage is past `setsid`, so the group is real."""
     signalled: list[tuple[int, int]] = []
     original = dr_exec.execution.engine.signal_process_group
 

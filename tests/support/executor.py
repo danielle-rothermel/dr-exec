@@ -1,12 +1,3 @@
-"""Job and completion builders shared by the executor test modules.
-
-Scripting a fake response means constructing a `CompletedExecution` by
-hand, and consumers will do exactly this. Keeping the builders here lets
-the fake and conformance suites stay about executor behavior rather than
-about reassembling a valid result in every case, and lets both suites
-build the *same* jobs so a parity claim compares like with like.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
@@ -42,8 +33,6 @@ from dr_exec import (
     UntrustedPythonTarget,
 )
 
-# A driver that emits one output echoing its request, used wherever a
-# Python target needs to be well-formed rather than interesting.
 ECHO_DRIVER = """
 def dr_exec_main(request, emit):
     emit({
@@ -56,8 +45,6 @@ def dr_exec_main(request, emit):
 
 @dataclass(frozen=True, slots=True)
 class ThreadCallResults[T]:
-    """Terminal values, failures, and unfinished calls from one thread batch."""
-
     values: tuple[T, ...]
     errors: tuple[Exception, ...]
     unfinished: int
@@ -69,7 +56,6 @@ def run_thread_calls[T](
     *,
     timeout: float,
 ) -> ThreadCallResults[T]:
-    """Run calls together and retain every terminal worker outcome."""
     values: list[T] = []
     errors: list[Exception] = []
     guard = Lock()
@@ -94,9 +80,6 @@ def run_thread_calls[T](
         errors=tuple(errors),
         unfinished=sum(thread.is_alive() for thread in threads),
     )
-
-
-# --- Targets and jobs ----------------------------------------------------
 
 
 def trusted_target(argv: tuple[str, ...], /) -> ExecutionTarget:
@@ -137,9 +120,6 @@ def job_for(
     )
 
 
-# --- Completions ---------------------------------------------------------
-
-
 def empty_payload_outputs() -> PayloadOutputs:
     empty = RetainedPayloadStream(
         head=b"", tail=b"", produced_bytes=0, dropped_bytes=0
@@ -148,7 +128,6 @@ def empty_payload_outputs() -> PayloadOutputs:
 
 
 def execution_result(execution_id: ExecutionId, /) -> ExecutionResult:
-    """One minimal clean-exit result for the given execution."""
     moment = datetime.now(UTC)
     return ExecutionResult(
         execution_id=execution_id,
@@ -168,7 +147,6 @@ def execution_result(execution_id: ExecutionId, /) -> ExecutionResult:
 
 
 def completion_for(job_id: JobId, /) -> CompletedExecution:
-    """A fake-receipted completion bound to one job's identity."""
     execution_id = ExecutionId(job_id=job_id, attempt_id=AttemptId(uuid4()))
     return CompletedExecution(
         result=execution_result(execution_id),
@@ -177,16 +155,10 @@ def completion_for(job_id: JobId, /) -> CompletedExecution:
 
 
 def fake_completion() -> CompletedExecution:
-    """A fake-receipted completion whose identity does not matter."""
     return completion_for(JobId(uuid4()))
 
 
 def real_receipted_completion() -> CompletedExecution:
-    """A completion carrying a production receipt.
-
-    Only the fake's receipt enforcement uses this: it is precisely the
-    value a fake must refuse, because a fake call recorded nothing.
-    """
     execution_id = ExecutionId(
         job_id=JobId(uuid4()), attempt_id=AttemptId(uuid4())
     )

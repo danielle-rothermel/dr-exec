@@ -1,5 +1,3 @@
-"""Focused rejection cases for recording boundary models."""
-
 from __future__ import annotations
 
 import json

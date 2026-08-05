@@ -1,40 +1,3 @@
-"""The one private call-scoped execution path: spawn through teardown.
-
-Every production execution follows this sequence and no other: validate
-the declaration, prepare durable state, create the scratch workspace,
-launch one fresh child through the library-owned bootstrap, exchange
-transport bytes concurrently, enforce the declared workload budgets, tear
-down the original process group and reap the direct child, finalize the
-record, and return one result.
-
-Two invariants shape the code rather than the prose. First, teardown and
-reaping happen on *every* post-spawn exit path, including a raise caused
-by machinery failure: the post-spawn body is wrapped so that returning and
-raising leave through the same lifecycle work. Second, the durable record
-is mandatory and ordered: ``prepare`` precedes the spawn, ``mark_running``
-follows only a successful spawn, and exactly one ``finalize`` runs on every
-path that produces a ``CompletedExecution`` -- including recognized
-pre-spawn outcomes, which finalize from ``prepared`` without ever launching
-a child.
-
-A machinery failure that prevents a trustworthy result raises instead of
-finalizing, and that is deliberate: join exhaustion, a bootstrap that could
-not launch, and a store or thread failure of an unexpected type all leave
-the call with no result worth recording, so the latest lifecycle state that
-was successfully published -- ``prepared`` or ``running`` -- stays as the
-durable record rather than being completed with a manufactured outcome.
-
-Recording degradation never replaces an execution outcome. A post-start
-recording failure becomes a degraded receipt naming the latest lifecycle
-state that remains valid on disk, and the result the engine computed is
-returned unchanged alongside it.
-
-Attribution is best-effort diagnosis, not causal proof. The precedence is
-pinned -- spawn absence, output budget, wall-clock budget, exit-status
-interpretation -- and a recorded output violation beats a deadline or a
-clean exit.
-"""
-
 from __future__ import annotations
 
 import errno as errno_module
@@ -138,31 +101,17 @@ from dr_exec.runtime.protocol import (
     request_identity_digest,
 )
 
-# The supported platform. macOS process-group, session, and descriptor
-# semantics are what the lifecycle claim rests on, so an unsupported
-# platform is refused at the declaration boundary rather than producing a
-# result whose containment claim does not hold there.
 SUPPORTED_PLATFORM: Final = "darwin"
 
-# The scratch workspace's directory prefix. One fresh directory per run,
-# removed on every exit path.
 SCRATCH_DIRECTORY_PREFIX: Final = "dr-exec-run-"
 
-# Transport read size. A drain detail, never a limit: retention and the
-# aggregate output budget are what bound what is kept and produced.
 _DRAIN_CHUNK_BYTES: Final = 65536
 
-# The watchdog cadence for observing a child that has no finite wall-time
-# budget. It bounds how long the reaper waits inside one poll, never how
-# long the run may take: an unbudgeted time axis makes no bounded-return
-# promise, and no elapsed time here is ever evidence about the child.
 _REAP_POLL_SECONDS: Final = 0.05
 
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedTarget:
-    """One target reduced to what the spawn and the record both need."""
-
     executable: str
     argv: tuple[str, ...]
     stdin_bytes: bytes
@@ -191,16 +140,6 @@ def _resolve_executable(
     environment: dict[str, str],
     /,
 ) -> str:
-    """Resolve argv[0] against the granted ``PATH``, and only it.
-
-    Which relative executables have a defensible meaning is a declaration
-    rule shared with the fake, so it is applied there: a relative name
-    needs a granted ``PATH``, and that ``PATH`` resolves only through
-    absolute entries. What remains here is the production-only search
-    that turns an accepted declaration into a concrete executable. A name
-    that resolves nowhere is left to the spawn, which reports absence as
-    an outcome rather than raising.
-    """
     name = argv[0]
     if Path(name).is_absolute():
         return name
@@ -210,19 +149,6 @@ def _resolve_executable(
 
 
 def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
-    """Reduce one declared target to its spawn and record evidence.
-
-    The declaration itself carries argv, stdin, source, and the request
-    payload, so only its digest reaches durable evidence; the live values
-    stay here.
-
-    The Python target is the one kind whose invocation the engine does not
-    compose: the runtime owns the fixed ``-I -c <wrapper>`` command and the
-    wrapper that embeds the declared ``driver_source`` as data, and the
-    engine only maps its transports. Its stdin is the canonical request
-    document rather than declared raw bytes, and it is the one target that
-    inherits the protected descriptor.
-    """
     digest = _canonical_declaration_digest(job.target)
     match job.target:
         case TrustedCommandTarget():
@@ -269,15 +195,8 @@ def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
 
 @contextmanager
 def _scratch_workspace() -> Iterator[Path]:
-    """Create one fresh scratch directory and remove it on every path.
+    """Use a fresh scratch directory whose cleanup is best-effort and unreported in v1."""
 
-    Cleanup runs on every exit path and never replaces an otherwise
-    trustworthy result, so removal is best effort and cannot raise out of
-    this contextmanager. V1 exposes no narration surface for the failure
-    it absorbs, which is the honest limit of the claim: cleanup is
-    attempted on every path, and a failure to remove is silent rather
-    than reported.
-    """
     directory = Path(tempfile.mkdtemp(prefix=SCRATCH_DIRECTORY_PREFIX))
     try:
         yield directory
@@ -287,8 +206,6 @@ def _scratch_workspace() -> Iterator[Path]:
 
 @dataclass(slots=True)
 class _DrainState:
-    """Everything the concurrent transport threads accumulate."""
-
     retention: PayloadRetention
     overflow: Event = field(default_factory=Event)
     protocol_result: ProtocolStreamResult | None = None
@@ -297,22 +214,6 @@ class _DrainState:
 def _feed_stdin(
     descriptor: int, payload: bytes, release_descriptor: int, /
 ) -> None:
-    """Write the declared input and close, so the child reads to EOF.
-
-    A child that exits without reading its input closes the pipe first,
-    which is an ordinary outcome rather than a machinery failure, so the
-    broken pipe is absorbed here. Writing to the raw descriptor keeps
-    every transport on the same footing: no buffered object's internal
-    lock stands between a blocked write and the descriptor behind it.
-
-    The feed is interruptible for the same reason the output pump is: a
-    payload larger than the pipe buffer only drains as fast as the child
-    reads it, and a descriptor holder that survived group teardown never
-    reads. Selecting on the release gate alongside the pipe means this
-    thread always returns to a point where it can observe the release, so
-    it abandons the rest of the payload rather than pinning the transport
-    join to a reader that will never arrive.
-    """
     selector = selectors.DefaultSelector()
     try:
         os.set_blocking(descriptor, False)
@@ -334,7 +235,6 @@ def _feed(
     release_descriptor: int,
     /,
 ) -> None:
-    """Write the payload through, or stop the moment release is signalled."""
     offset = 0
     while offset < len(payload):
         ready = {int(key.fd) for key, _ in selector.select()}
@@ -347,22 +247,7 @@ def _feed(
 
 @dataclass(slots=True)
 class _OutputPump:
-    """One selector-driven pump over every output descriptor at once.
-
-    Concurrent draining is what keeps a full pipe from deadlocking the
-    run, and one selector is what makes that draining interruptible: a
-    thread blocked inside a buffered read cannot be released by closing
-    the object it is reading, because the close waits on the same lock.
-    Selecting instead means the pump always returns to a point where it
-    can observe the release gate, so a child that escaped the process
-    group can never pin the parent to a descriptor forever.
-
-    Protocol bytes are forwarded into a second pipe rather than parsed
-    here: the protected stream's reader owns frame acquisition and its
-    finite self-budgets, and forwarding gives that reader a real EOF when
-    the pump releases -- so it, too, ends without being interrupted
-    mid-frame.
-    """
+    """Drain all child outputs concurrently and remain release-interruptible."""
 
     state: _DrainState
     stdout_descriptor: int
@@ -400,12 +285,6 @@ class _OutputPump:
         live: dict[int, StreamRetention],
         /,
     ) -> None:
-        """Drain until every output descriptor reaches EOF, or release.
-
-        Draining continues past the aggregate output bound: production
-        counts must stay exact through EOF, and under the fail policy it
-        is the engine, not this pump, that acts on the crossing.
-        """
         remaining = set(live) | (
             set()
             if self.protocol_descriptor is None
@@ -432,12 +311,6 @@ class _OutputPump:
 
 
 def _read_available(descriptor: int, /) -> bytes | None:
-    """Return what is ready, or ``None`` once the descriptor is done.
-
-    A would-block is nothing available rather than an end, so the pump
-    returns to its selector instead of retiring a descriptor that simply
-    had no bytes yet.
-    """
     try:
         chunk = os.read(descriptor, _DRAIN_CHUNK_BYTES)
     except BlockingIOError:
@@ -454,7 +327,6 @@ def _read_protocol(
     self_budgets: ExecutorSelfBudgets,
     /,
 ) -> None:
-    """Read the forwarded protected stream to its terminal outcome."""
     with os.fdopen(descriptor, "rb") as reader:
         state.protocol_result = read_protocol_stream(
             reader,
@@ -464,20 +336,6 @@ def _read_protocol(
 
 
 def _read_setup_status(descriptor: int, startup_ns: int | None, /) -> bytes:
-    """Read the setup status through EOF within the startup budget.
-
-    The status pipe reaching EOF is what says the payload was reached, so
-    this read gates the whole attempt: nothing downstream may run until
-    the helper either reports a setup failure or execs. A finite startup
-    budget is the executor's own deadline on that gate -- a helper that
-    stalls before exec cannot hold the call open past it. With no declared
-    startup budget there is no deadline, which is exactly what an
-    unbudgeted axis promises.
-
-    Ownership stays with the caller: the descriptor is neither closed nor
-    left non-blocking here, and expiry raises rather than returning a
-    truncated status that would be parsed as a payload that started.
-    """
     deadline = None if startup_ns is None else time.monotonic_ns() + startup_ns
     collected = bytearray()
     selector = selectors.DefaultSelector()
@@ -503,7 +361,6 @@ def _read_setup_status(descriptor: int, startup_ns: int | None, /) -> bytes:
 
 
 def _close_descriptors(descriptors: Iterable[int], /) -> None:
-    """Release descriptors this frame owns, exactly once each."""
     for descriptor in descriptors:
         with suppress(OSError):
             os.close(descriptor)
@@ -511,15 +368,11 @@ def _close_descriptors(descriptors: Iterable[int], /) -> None:
 
 @dataclass(slots=True)
 class _WorkerFailure:
-    """The at-most-one exception produced by a transport worker body."""
-
     error: BaseException | None = None
 
 
 @dataclass(slots=True)
 class _TransportWorker:
-    """One started transport thread plus any failure from its body."""
-
     name: str
     thread: Thread
     failure: _WorkerFailure
@@ -559,37 +412,12 @@ def _started_thread(
 
 @dataclass(frozen=True, slots=True)
 class _StopReason:
-    """Why the engine stopped waiting on a child that was still alive."""
-
     axis: BudgetAxis | None
     cancelled: bool
 
 
 @dataclass(slots=True)
 class _AttemptObservation:
-    """What the engine learned about a live child, as it learned it.
-
-    Observation accumulates here rather than being returned, because the
-    frame that owns teardown must be able to act on a partial observation:
-    a machinery failure part way through still has to know whether the
-    helper leads a process group before it signals one.
-
-    ``leads_group`` selects group signalling; it is not a confirmation of
-    leadership. Leadership is known only once a status is parsed, so the
-    default stands for the unconfirmed state as well as the confirmed
-    one, and teardown reaches the direct child on that branch rather than
-    relying on a group that may not exist yet.
-
-    ``state`` is what separates the two completions. It exists exactly
-    when the payload was reached, so a ``None`` here means the attempt
-    stopped at a setup failure that ``setup_failure`` names.
-
-    ``recording_failures`` carries the post-start publications that did
-    not land. An attempt continues through those, so they would otherwise
-    be invisible: they are what makes the caller's receipt degraded even
-    when the finalize that follows succeeds.
-    """
-
     prepared: PreparedRun
     setup_failure: SetupFailure | None = None
     leads_group: bool = True
@@ -599,13 +427,9 @@ class _AttemptObservation:
     recording_failures: tuple[RecordingFailure, ...] = ()
 
     def reached_payload(self) -> _DrainState | None:
-        """The drain state of an attempt whose payload actually ran."""
         return None if self.setup_failure is not None else self.state
 
     def latest_run(self) -> FinalizableRun:
-        """The latest handle published, which is the prepared one until
-        ``mark_running`` succeeds.
-        """
         return self.prepared if self.running is None else self.running
 
 
@@ -619,23 +443,12 @@ def _await_child(
     cancellation: CancelToken | None,
     transport_failed: Callable[[], bool],
 ) -> _StopReason | None:
-    """Observe the child until it exits or the engine must stop it.
-
-    ``None`` means the child exited on its own. Otherwise the returned
-    reason names what the engine acted on; the caller performs the
-    teardown. Each wait lasts one watchdog poll, shortened to what remains
-    of the wall-time deadline when one is declared, so a declared budget
-    is acted on at the deadline rather than a poll late -- an unbudgeted
-    time axis makes no bounded-return promise, and elapsed time is never
-    treated as evidence about the child.
-    """
     while True:
         if process.poll() is not None:
             return None
         if transport_failed():
-            # The caller tears down first, then joins and raises the
-            # captured worker exception. Returning here stops a live child
-            # without manufacturing an execution outcome from partial I/O.
+            # Tear down before surfacing the worker failure; partial I/O is
+            # not a trustworthy execution outcome.
             return None
         if fail_on_overflow and state.overflow.is_set():
             return _StopReason(axis=BudgetAxis.PAYLOAD_OUTPUT, cancelled=False)
@@ -658,55 +471,15 @@ def _tear_down(
     *,
     leads_group: bool = True,
 ) -> int:
-    """Signal the original process group, escalate, and reap the child.
+    """Reap the child and signal its original process group.
 
-    Signalling targets the group the bootstrap created, so ordinary
-    descendants go with the leader; a descendant that made its own
-    session escapes, which the containment claim already says. The direct
-    child is always reaped, so no attempt leaves a zombie behind.
-
-    The group path signals the direct child alongside the group, because
-    leadership is confirmed only once a status is parsed. A machinery
-    failure before that -- a startup budget that expires while the helper
-    is still short of ``setsid`` -- leaves the child in the parent's own
-    group, where its pid names no group at all and every group signal
-    fails with ESRCH. The group signal is what reaches ordinary
-    descendants; the direct-child signal is what keeps the reap bounded
-    when the group does not yet exist, and it is harmless once it does:
-    sending to the leader twice costs a signal the leader was already
-    receiving.
-
-    ``leads_group`` is false on the one path where the helper is known not
-    to lead a group of its own: its ``setsid`` failed, so it never left
-    the parent's group and its pid is not a group id. Signalling by that
-    number would target whatever unrelated group happens to hold it, so
-    this path reaps the direct child and signals no group -- there is no
-    original group to tear down, and the helper died before reaching the
-    payload, so it has no descendants to contain.
-
-    The group is signalled on every post-spawn path, including one where
-    the direct child already exited on its own. A leader's exit says
-    nothing about the group it led: a background descendant it forked is
-    still in that group and still holding the inherited pipes. Signalling
-    only a live leader would let an ordinary clean return leave survivors
-    behind, which is precisely the case the lifecycle claim exists to
-    exclude.
-
-    Escalation follows the same reasoning one step further. It fires when
-    the graceful signal did not end the direct child within the
-    configured termination deadline, and again after the reap if anything
-    still answers for the group -- a survivor that ignored the graceful
-    signal has already shown that waiting on it proves nothing. With no
-    declared termination budget there is no grace period to observe, so
-    the first escalation is immediate: an unbudgeted axis installs no
-    executor policy limit, and a graceful signal with no bounded grace
-    period is a wait with no end.
+    Group teardown reaches ordinary descendants but not descendants that
+    escape by creating another session with ``setsid``.
     """
+
     started_ns = time.monotonic_ns()
     if not leads_group:
-        # The same graceful-then-escalate policy, aimed at the one process
-        # this path can name: there is no group, so there is nothing else
-        # to reach.
+        # No child-owned group exists on this setup-failure path.
         with suppress(OSError):
             process.send_signal(TERMINATION_SIGNAL)
         if not _reaped_within(
@@ -723,9 +496,7 @@ def _tear_down(
         signal_process_group(process.pid, ESCALATION_SIGNAL)
         with suppress(OSError):
             process.send_signal(ESCALATION_SIGNAL)
-    # Reap before probing: an unreaped leader is still a group member, so
-    # the probe would report the group alive on the strength of the
-    # zombie the parent has simply not collected yet.
+    # Reap before probing so the leader's zombie cannot keep the group alive.
     process.wait()
     if _group_survives(process.pid):
         signal_process_group(process.pid, ESCALATION_SIGNAL)
@@ -733,14 +504,6 @@ def _tear_down(
 
 
 def _group_survives(pid: int, /) -> bool:
-    """Report whether anything still answers for the original process group.
-
-    Signal zero is the existence probe: it runs the kernel's permission
-    and membership checks and delivers nothing. A group outlives its
-    leader as long as one member remains, so this is what distinguishes
-    "the run is over" from "the leader left survivors behind". A reaped
-    leader with no survivors makes the group gone and the probe false.
-    """
     return signal_process_group(pid, 0)
 
 
@@ -749,13 +512,6 @@ def _reaped_within(
     termination_ns: int | None,
     /,
 ) -> bool:
-    """Report whether the child was reaped within its termination budget.
-
-    With no declared termination budget there is no deadline to wait out,
-    so the answer is ``False`` rather than an invented grace period: an
-    unbudgeted axis installs no executor policy limit, and a graceful
-    signal with no bounded grace period is a wait with no end.
-    """
     if termination_ns is None:
         return False
     try:
@@ -767,20 +523,6 @@ def _reaped_within(
 
 @dataclass(slots=True)
 class _Transports:
-    """The parent ends of one child's transports and their threads.
-
-    Every descriptor here belongs to this attempt, and ``close`` is what
-    guarantees none outlives it: the pump is released first so nothing is
-    reading a descriptor at the moment it goes away. A descriptor handed
-    to a thread that closes it is taken out of this frame first, so a
-    handoff that never happened -- because a thread never started -- still
-    leaves the descriptor here for ``close`` to release.
-
-    ``adopt`` is what keeps that true of threads too: a started thread is
-    registered before the next one is started, so a start that raises
-    still leaves every already-started thread joinable and releasable.
-    """
-
     stdin_write: int | None
     stdout_read: int
     stderr_read: int
@@ -793,7 +535,6 @@ class _Transports:
     threads: tuple[_TransportWorker, ...] = ()
 
     def take_stdin(self) -> int:
-        """Hand the stdin write end to the feed thread that closes it."""
         descriptor = self.stdin_write
         if descriptor is None:  # pragma: no cover - one call per attempt
             raise ExecutorFailure("the stdin transport was already taken")
@@ -801,7 +542,6 @@ class _Transports:
         return descriptor
 
     def take_protocol_reader(self) -> int:
-        """Hand the forwarded protected stream to its reader thread."""
         descriptor = self.protocol_forward_read
         if descriptor is None:  # pragma: no cover - one call per attempt
             raise ExecutorFailure("the protocol transport was already taken")
@@ -809,51 +549,21 @@ class _Transports:
         return descriptor
 
     def take_protocol_forward_write(self) -> int | None:
-        """Hand the forward pipe's write end to the pump that closes it.
-
-        Closing this end is what gives the protocol reader its EOF, and
-        the pump is the only component that can close it at the right
-        moment -- after the last forwarded byte. Until the pump holds it
-        this frame does, so a pump that never ran cannot strand the
-        reader on a write end nobody closes.
-        """
         descriptor = self.protocol_forward_write
         self.protocol_forward_write = None
         return descriptor
 
     def adopt(self, thread: _TransportWorker, /) -> None:
-        """Register one started thread as this frame's to join and release."""
         self.threads = (*self.threads, thread)
 
     def failed(self) -> bool:
-        """Report whether any started worker body has already failed."""
         return any(worker.failed for worker in self.threads)
 
     def release(self) -> None:
-        """Wake every transport thread that can block on a descriptor.
-
-        One byte is enough for all of them: nothing reads this end, so the
-        readiness it creates is permanent and every selector watching it
-        sees it, whether it is already selecting or has yet to arrive.
-        """
         with suppress(OSError):
             os.write(self.release_write, b"\0")
 
     def join(self, self_budgets: ExecutorSelfBudgets, /) -> None:
-        """Join the transport threads, or refuse to invent a result.
-
-        This only waits and raises: releasing the pump and closing the
-        parent ends belong to ``close``, which ``_run_spawned``'s
-        ``finally: transports.close()`` runs on every exit path, this
-        raise included.
-
-        After group teardown the inherited pipes should reach EOF. If a
-        finite join budget expires first, output and measurements are no
-        longer trustworthy, so the call raises rather than reporting
-        numbers it cannot stand behind. With no declared join budget there
-        is no deadline, so an escaped descriptor holder can hold the call
-        -- which is exactly what an unbudgeted join axis promises.
-        """
         join_ns = _finite_ns(self_budgets.join_time)
         deadline = None if join_ns is None else time.monotonic_ns() + join_ns
         for worker in self.threads:
@@ -871,19 +581,6 @@ class _Transports:
             worker.raise_if_failed()
 
     def close(self) -> None:
-        """Release every transport thread, wait for them, then free the ends.
-
-        The wait carries no deadline of its own: ``join_time`` is the one
-        axis that decides how long transports may hold the call, and a
-        second finite limit here would be one no declaration can spell.
-        That is only sound because release reaches every thread that can
-        block on a descriptor -- the feed and the pump both select on the
-        release gate, and the protocol reader ends when the pump closes
-        the forward pipe -- so this join terminates by construction rather
-        than by a timeout. Waiting is what makes the closes below safe: a
-        thread still holding a descriptor this frame closed would be
-        holding one the kernel may have already handed to something else.
-        """
         self.release()
         for worker in self.threads:
             worker.thread.join()
@@ -909,15 +606,6 @@ def _spawn_outcome(
     executable: str,
     /,
 ) -> ExecutionOutcome:
-    """Classify one bootstrap setup failure into its recognized outcome.
-
-    Spawn absence is ``ENOENT`` reported by the payload ``exec`` and
-    nothing else. The reporting stage is load-bearing here: an earlier
-    setup step can fail with the same errno for an unrelated reason -- a
-    missing scratch directory, say -- and reporting that as a missing
-    executable would name the wrong thing absent. Every other setup
-    failure preserves its errno as a machine-attributed spawn failure.
-    """
     if (
         failure.stage == SETUP_STAGE_EXEC
         and failure.errno == errno_module.ENOENT
@@ -930,21 +618,12 @@ def _spawn_outcome(
 
 
 def _exit_outcome(returncode: int, /) -> ExecutionOutcome:
-    """Interpret one reaped exit status as data, never as a verdict."""
     if returncode < 0:
         return SignaledOutcome(signal_number=-returncode)
     return ExitedOutcome(exit_code=returncode)
 
 
 def _attribute(outcome: ExecutionOutcome, /) -> ExecutionAttribution:
-    """Classify one outcome's owner from the evidence, best effort.
-
-    ``owner`` is a diagnostic classification, not causal proof and not a
-    retry guarantee. Where the evidence does not distinguish a payload
-    fault from an executor one -- an ordinary nonzero exit is the common
-    case -- the classification stays with the payload that produced it,
-    and where there is no failure at all the owner is explicitly none.
-    """
     match outcome:
         case ExitedOutcome():
             return ExecutionAttribution(
@@ -976,14 +655,7 @@ def _attribute(outcome: ExecutionOutcome, /) -> ExecutionAttribution:
                 detail=f"the payload exceeded its {outcome.axis} budget",
             )
         case ProtocolFailedOutcome():
-            # An oversized frame is the executor's own finite self-budget
-            # stopping the stream, so it is attributed to the executor
-            # rather than to the payload: an executor limit must not
-            # masquerade as a payload crash. Every other protocol code
-            # describes a stream the payload actually emitted -- bad
-            # bytes, a frame out of position, a mismatched identity, a
-            # repeated sequence, or a stream that simply stopped -- and
-            # stays with the payload that produced it.
+            # Executor self-budget exhaustion outranks payload attribution.
             return ExecutionAttribution(
                 owner=FailureOwner.EXECUTOR
                 if outcome.failure_code is ProtocolFailureCode.OVERSIZED_FRAME
@@ -998,7 +670,6 @@ def _attribute(outcome: ExecutionOutcome, /) -> ExecutionAttribution:
 
 
 def _empty_payload_outputs() -> PayloadOutputs:
-    """The payload evidence of an attempt whose child never ran."""
     empty = RetainedPayloadStream(
         head=b"",
         tail=b"",
@@ -1016,20 +687,6 @@ def _degraded_from(
     *,
     prior_failures: tuple[RecordingFailure, ...] = (),
 ) -> RealRecordReceipt:
-    """Finalize, absorbing a machinery failure into a degraded receipt.
-
-    ``RunStore.finalize`` already answers with a receipt for the failures
-    it owns. What is absorbed here is the residual: a store whose
-    finalization raises at all still must not replace the execution
-    outcome, so the raise becomes degradation rather than the call's
-    result.
-
-    ``prior_failures`` are the post-start publications that already
-    degraded before this finalize. They are carried into the receipt
-    whether or not the finalize itself succeeds, because a record that
-    reached ``finalized`` by way of a publication that never landed is
-    still a degraded record, and the caller can only know that from here.
-    """
     try:
         receipt = store.finalize(run, result)
     except ExecutorFailure:
@@ -1057,12 +714,6 @@ def _degraded_receipt(
     prior_failures: tuple[RecordingFailure, ...] = (),
     /,
 ) -> RealRecordReceipt:
-    """Name the latest state the handle proves, without touching disk.
-
-    The store's own degraded receipt consults the record; this one cannot,
-    because the store is the thing that just failed. A handle proves only
-    a lower bound on what was published, so it is the claim made here.
-    """
     return DegradedRecordReceipt(
         execution_id=run.execution_id,
         record_dir=run.record_dir,
@@ -1082,14 +733,6 @@ def _degraded_receipt(
 
 @dataclass(frozen=True, slots=True)
 class _EngineCall:
-    """One call-scoped attempt. Nothing here outlives the call.
-
-    Every mutable process, scratch, recording, and I/O value is created
-    inside ``run`` and referenced only from its frame, so concurrent calls
-    in one parent share nothing but the immutable runtime, store, and
-    self-budgets they were handed.
-    """
-
     runtime: Runtime
     run_store: RunStore
     self_budgets: ExecutorSelfBudgets
@@ -1101,15 +744,6 @@ class _EngineCall:
         *,
         cancellation: CancelToken | None,
     ) -> CompletedExecution:
-        """Execute one job and return its one completion.
-
-        Validation and platform refusal happen before anything durable
-        exists. Every path that returns a completion finalizes exactly
-        once; a machinery failure that leaves no trustworthy result raises
-        instead, leaving the latest published lifecycle state on disk. From
-        the spawn onward every exit path, returning or raising, tears down
-        the group and reaps the child.
-        """
         _validate_platform()
         target = _target_of(job, self.runtime)
         validate_input_budget(job, target.stdin_bytes)
@@ -1170,12 +804,6 @@ class _EngineCall:
         outcome: ExecutionOutcome,
         /,
     ) -> CompletedExecution:
-        """Record one recognized pre-child outcome without a spawn.
-
-        The attempt never had a child, so its measurements describe an
-        empty window at the moment the outcome was recognized rather than
-        a fabricated execution.
-        """
         moment = _now()
         result = ExecutionResult(
             execution_id=prepared.execution_id,
@@ -1209,13 +837,6 @@ class _EngineCall:
         scratch: Path,
         cancellation: CancelToken | None,
     ) -> CompletedExecution:
-        """Launch the child and carry the attempt through teardown.
-
-        The pipes are created here and every descriptor is accounted for:
-        the parent's copies of the child ends are closed as soon as the
-        child holds its own, and every parent end is closed by
-        ``_Transports.close`` on every exit path, return or raise.
-        """
         stdin_read, stdin_write = os.pipe()
         stdout_read, stdout_write = os.pipe()
         stderr_read, stderr_write = os.pipe()
@@ -1262,16 +883,12 @@ class _EngineCall:
                 status_write=status_write,
             )
         except OSError as error:
-            # No child exists, so nothing needs teardown; what does need
-            # doing is releasing every descriptor this frame owns, both
-            # ends included, before the machinery failure leaves.
             _close_descriptors(child_ends)
             transports.close()
             raise ExecutorFailure(
                 "could not start the execution bootstrap"
             ) from error
-        # The child holds its own copies now, so the parent's copies of
-        # the child ends must go: otherwise nothing ever sees EOF.
+        # Parent copies of child ends would suppress EOF.
         _close_descriptors(child_ends)
         try:
             return self._carry_attempt(
@@ -1300,25 +917,6 @@ class _EngineCall:
         started_ns: int,
         cancellation: CancelToken | None,
     ) -> CompletedExecution:
-        """Everything between a live child and a finalized record.
-
-        The whole body is inside the ``try`` whose ``finally`` tears down
-        and reaps, because a live child exists from the moment this is
-        entered: a machinery failure anywhere here -- a store that raises
-        an unexpected type, a thread that cannot start, a startup budget
-        that expires -- leaves through the same lifecycle work an ordinary
-        return does. Teardown is what the ``finally`` owns and nothing
-        else does; the descriptors are owned one frame out, by
-        ``_run_spawned``'s ``finally: transports.close()``.
-
-        The setup status is read first: until the status pipe reaches EOF
-        the payload has not been reached, so nothing downstream can
-        confuse a setup failure with a payload that exited immediately.
-        A setup failure still tears down and reaps -- the helper is a
-        real child either way -- and joins the transports through the
-        declared ``join_time`` before it completes, so that axis is the
-        only thing that ever bounds a transport wait.
-        """
         observation = _AttemptObservation(prepared=prepared)
         try:
             self._observe_attempt(
@@ -1385,13 +983,6 @@ class _EngineCall:
         started_ns: int,
         cancellation: CancelToken | None,
     ) -> None:
-        """Record what the live child did, into the caller's observation.
-
-        Nothing is returned, because the caller must be able to tear down
-        and complete from a partial observation: whatever this reached
-        before a machinery failure is already recorded where the caller
-        can see it.
-        """
         setup_failure = parse_setup_status(
             _read_setup_status(
                 transports.status_read,
@@ -1400,8 +991,7 @@ class _EngineCall:
         )
         if setup_failure is not None:
             observation.setup_failure = setup_failure
-            # A helper whose ``setsid`` failed never left the parent's
-            # group, so its pid is not a group id to signal.
+            # A failed ``setsid`` leaves no child-owned group to signal.
             observation.leads_group = (
                 setup_failure.stage != SETUP_STAGE_SESSION
             )
@@ -1410,12 +1000,7 @@ class _EngineCall:
             retention=PayloadRetention.for_budget(job.budgets.payload_output)
         )
         observation.state = state
-        # Draining comes first, before any further parent-side work. The
-        # status pipe reaches EOF at the payload's ``exec``, so the payload
-        # is already running and already able to fill a pipe buffer; any
-        # parent step taken before the transports are live blocks the child
-        # in the kernel and charges that stall to the payload's wall-clock
-        # budget. ``mark_running`` in particular is a durable publish.
+        # Start drains before durable publication can stall a live payload.
         self._start_transports(target, transports, state)
         self._mark_running(observation, process, started_at)
         observation.stop = _await_child(
@@ -1434,15 +1019,6 @@ class _EngineCall:
         started_at: datetime,
         /,
     ) -> None:
-        """Publish the ``running`` manifest, degrading rather than failing.
-
-        This is a post-start publication: its failure is recording
-        degradation, so the attempt continues from the prepared handle,
-        which remains the latest valid state on disk. Continuing is not
-        forgetting -- the failure is accumulated on the observation so the
-        caller's receipt names it, because a degradation the caller cannot
-        read is one that did not happen as far as the caller knows.
-        """
         try:
             observation.running = self.run_store.mark_running(
                 observation.prepared,
@@ -1465,25 +1041,7 @@ class _EngineCall:
         state: _DrainState,
         /,
     ) -> None:
-        """Feed input and drain every output channel concurrently.
-
-        Sequential handling of these pipes deadlocks as soon as one fills,
-        so the input feed and the output pump run at once and neither
-        waits on the other. A thread that closes the descriptor it was
-        handed takes it out of ``transports`` first; everything else is
-        closed once, by ``_Transports.close``.
-
-        Starting a thread is the one step here that can fail on its own --
-        a parent that cannot allocate another OS thread raises -- so each
-        start is published before the next is attempted, and a descriptor
-        is handed over only once its thread is running. A partial start
-        therefore leaves every started thread joinable and every
-        descriptor owned by exactly one closer.
-        """
         payload = target.stdin_bytes
-        # The feed thread takes the stdin write end, because closing it
-        # is what gives the child its EOF; handing ownership over is what
-        # keeps that close from also happening in ``close``.
         self._adopt_started(
             transports,
             lambda descriptor: _feed_stdin(
@@ -1492,8 +1050,6 @@ class _EngineCall:
             "dr-exec-stdin",
             take=transports.take_stdin,
         )
-        # The pump closes the forward pipe's write end when it stops, which
-        # is what gives the protocol reader its EOF.
         self._adopt_started(
             transports,
             lambda descriptor: _OutputPump(
@@ -1528,13 +1084,6 @@ class _EngineCall:
         *,
         take: Callable[[], DescriptorT],
     ) -> None:
-        """Start one transport thread and register it before returning.
-
-        The descriptor is taken before the start, because the thread body
-        needs it, and released here if the start fails: an unstarted
-        thread closes nothing, and the descriptor is already out of
-        ``transports``, so this is the only remaining closer.
-        """
         descriptor = take()
         try:
             transports.adopt(_started_thread(lambda: body(descriptor), name))
@@ -1557,16 +1106,6 @@ class _EngineCall:
         protocol: ProtocolStreamResult | None,
         /,
     ) -> ExecutionOutcome:
-        """Select one outcome from the recorded evidence, by precedence.
-
-        The pinned order after teardown is spawn absence, output budget,
-        wall-clock budget, then exit-status interpretation. Spawn absence
-        never reaches here -- it is settled before the child is awaited --
-        so this is the rest of the ladder, with a recorded output
-        violation beating both the deadline and a clean exit. A protocol
-        failure is read after the child's own status because it describes
-        a stream that the child's exit already ended.
-        """
         if state.retention.overflowed:
             return BudgetExceededOutcome(axis=BudgetAxis.PAYLOAD_OUTPUT)
         if stop is not None and stop.axis is BudgetAxis.WALL_TIME:
@@ -1596,13 +1135,6 @@ class _EngineCall:
         protocol_bytes_received: int,
         recording_failures: tuple[RecordingFailure, ...] = (),
     ) -> CompletedExecution:
-        """Assemble the result and finalize the record exactly once.
-
-        Duration spans the spawn through the reap on the monotonic clock,
-        with parent setup excluded and teardown measured separately. Any
-        post-start recording degradation the attempt already absorbed is
-        carried into the receipt alongside whatever the finalize reports.
-        """
         result = ExecutionResult(
             execution_id=run.execution_id,
             outcome=outcome,
@@ -1646,10 +1178,6 @@ def run_execution(
     self_budgets: ExecutorSelfBudgets,
     cancellation: CancelToken | None = None,
 ) -> CompletedExecution:
-    """The one private entry point into the engine.
-
-    Public entry points delegate here; nothing else in v1 spawns a child.
-    """
     return _EngineCall(
         runtime=runtime,
         run_store=run_store,

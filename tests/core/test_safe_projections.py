@@ -1,5 +1,3 @@
-"""Secret-free environment evidence and identity-document round trips."""
-
 from __future__ import annotations
 
 from dr_serialize import IdentityDocument

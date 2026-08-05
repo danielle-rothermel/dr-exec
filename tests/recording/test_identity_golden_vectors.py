@@ -1,12 +1,3 @@
-"""Golden vectors pinning identity documents and their digests.
-
-Identity documents and digests are persisted identity: every byte and
-every hexadecimal character here is the contract. A failure means stored
-identity changed meaning; resolve it by reverting the drift or by a
-deliberate standing-contract and schema-version revision, never by
-regenerating the expected values.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -263,7 +254,6 @@ def test_environment_value_digest_ignores_declaration_order() -> None:
 
 
 def test_environment_value_digest_separates_names_from_values() -> None:
-    """Concatenation-style digests collide; the canonical payload must not."""
     split_early = EnvGrant.fixed({"A": "1", "AB": "2"})
     split_late = EnvGrant.fixed({"A": "1A", "B": "2"})
     assert _canonical_env_values_digest(
@@ -287,11 +277,6 @@ def test_env_grant_record_is_secret_free() -> None:
 
 
 def test_env_grant_names_use_canonical_not_local_ordering() -> None:
-    """Persisted names order by canonical JSON text, not code point.
-
-    These two orderings coincide for ASCII and diverge otherwise, so a
-    non-ASCII name is the only thing that distinguishes them.
-    """
     names = ("Z", "é", "a")
     grant = EnvGrant(
         kind=EnvGrantKind.OVERLAY,

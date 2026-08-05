@@ -1,5 +1,3 @@
-"""Identity contract for the isolated host Python runtime."""
-
 from __future__ import annotations
 
 from pathlib import PurePosixPath

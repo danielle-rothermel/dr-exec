@@ -1,5 +1,3 @@
-"""Protected-protocol golden vectors, taxonomy, and finite budget edges."""
-
 from __future__ import annotations
 
 import hashlib
@@ -74,9 +72,6 @@ def _stream(digest: Sha256Digest, output_count: int, /) -> bytes:
     )
     frames.append(ProtocolComplete(version=1, output_count=output_count))
     return b"".join(encode_frame(frame) for frame in frames)
-
-
-# --- Golden wire vectors -------------------------------------------------
 
 
 def test_the_prelude_frame_has_exactly_its_pinned_bytes() -> None:
@@ -163,9 +158,6 @@ def test_non_ascii_output_payloads_survive_the_round_trip() -> None:
     assert result.outputs[0].payload == {"text": "é中\U0001f600"}
 
 
-# --- Valid streams -------------------------------------------------------
-
-
 @pytest.mark.parametrize("output_count", [0, 1, 5])
 def test_a_well_formed_stream_yields_its_outputs_in_order(
     output_count: int,
@@ -179,9 +171,6 @@ def test_a_well_formed_stream_yields_its_outputs_in_order(
     assert [document.payload for document in result.outputs] == [
         {"index": index} for index in range(output_count)
     ]
-
-
-# --- Failure taxonomy ----------------------------------------------------
 
 
 def test_invalid_utf8_is_a_malformed_frame() -> None:
@@ -312,13 +301,6 @@ def test_every_raw_frame_requires_an_explicit_version(frame: bytes) -> None:
 def test_a_malformed_embedded_document_is_malformed_not_an_escape(
     document: bytes,
 ) -> None:
-    """A bad identity document stays inside the closed frame taxonomy.
-
-    The frame itself is canonical and well-formed JSON, so only the
-    embedded document's shape is invalid. The shared validator's error
-    must be translated rather than escaping the reader, and every output
-    accepted before the bad frame must survive.
-    """
     digest = Sha256Digest("c" * 64)
     accepted = _output_document(0)
     stream = (
@@ -404,13 +386,6 @@ def test_a_frame_after_completion_is_unexpected() -> None:
 
 
 def test_partial_bytes_after_completion_are_unexpected() -> None:
-    """Post-completion is the more specific of the two applicable rows.
-
-    Trailing bytes with no terminating LF satisfy both the missing-LF and
-    the bytes-after-completion prohibitions. Once a stream has completed,
-    nothing further is admissible at all, so whether the trailing bytes
-    happen to be LF-terminated must not change the classification.
-    """
     digest = Sha256Digest("a" * 64)
     result = _read(_stream(digest, 0) + b"x", request_id_sha256=digest)
     assert result.failure is not None
@@ -550,9 +525,6 @@ def test_a_completion_count_mismatch_is_an_incomplete_stream(
     assert len(result.outputs) == 1
 
 
-# --- Finite self-budget edges -------------------------------------------
-
-
 def _frame_byte_budget(max_bytes: int, /) -> ExecutorSelfBudgets:
     return ExecutorSelfBudgets(
         protocol_frame_bytes=FiniteByteLimit(max_bytes=max_bytes)
@@ -606,13 +578,6 @@ def test_an_oversized_frame_is_refused_without_being_acquired() -> None:
 
 
 class _TrickleReader(io.RawIOBase):
-    """A reader that yields one byte per call.
-
-    Frame boundaries and budget edges must not depend on how the transport
-    happens to chunk its bytes, so the pathological split is exercised
-    directly rather than assumed away.
-    """
-
     def __init__(self, data: bytes) -> None:
         self._data = data
         self._position = 0
@@ -826,9 +791,6 @@ def _nested_stream(digest: Sha256Digest, depth: int, /) -> bytes:
     )
 
 
-# One output frame nesting a payload four objects deep is exactly six
-# structural levels: the frame object, the document object, and the four
-# payload objects.
 _NESTED_PAYLOAD_DEPTH = 4
 _NESTED_FRAME_DEPTH = 6
 
@@ -846,12 +808,6 @@ def test_a_frame_exactly_at_the_depth_budget_is_accepted() -> None:
 
 
 def test_a_frame_one_level_over_the_depth_budget_is_oversized() -> None:
-    """Depth is a configured finite limit, so overflow is oversized.
-
-    A frame that overflows a declared depth budget is well-formed JSON;
-    only the caller's limit rejects it, which is the ``OVERSIZED_FRAME``
-    row of the taxonomy rather than the malformed-payload row.
-    """
     digest = Sha256Digest("a" * 64)
     result = _read(
         _nested_stream(digest, _NESTED_PAYLOAD_DEPTH),
@@ -862,9 +818,6 @@ def test_a_frame_one_level_over_the_depth_budget_is_oversized() -> None:
     )
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.OVERSIZED_FRAME
-
-
-# --- Unbudgeted axes carry no hidden finite limit ------------------------
 
 
 def test_an_unbudgeted_frame_axis_accepts_a_frame_of_any_size() -> None:
@@ -897,11 +850,6 @@ def test_an_unbudgeted_count_axis_accepts_many_outputs() -> None:
 
 
 def _raw_nested_stream(digest: Sha256Digest, payload_depth: int, /) -> bytes:
-    """Assemble nested frame bytes without an ``IdentityDocument``.
-
-    Building the document through the library would recurse in its own
-    deep-copy snapshot, which is not what these cases are about.
-    """
     payload = b'{"n":' * payload_depth + b"0" + b"}" * payload_depth
     output = (
         b'{"document":{"payload":' + payload + b","
@@ -915,9 +863,6 @@ def _raw_nested_stream(digest: Sha256Digest, payload_depth: int, /) -> bytes:
     )
 
 
-# The frame object and the document object sit above the nested payload,
-# so the deepest payload the structural ceiling admits is two levels
-# shallower than the ceiling itself.
 _DEEPEST_ACCEPTED_PAYLOAD = STRUCTURAL_DEPTH_CEILING - 2
 
 
@@ -926,7 +871,6 @@ def test_the_structural_depth_compatibility_boundary_is_200() -> None:
 
 
 def test_an_unbudgeted_depth_axis_reaches_the_structural_ceiling() -> None:
-    """No *budget* narrows an unbudgeted axis below the pinned ceiling."""
     digest = Sha256Digest("a" * 64)
     result = _read(
         _raw_nested_stream(digest, _DEEPEST_ACCEPTED_PAYLOAD),
@@ -963,14 +907,6 @@ def test_literal_frame_depth_200_is_accepted_at_an_exact_finite_budget() -> (
 def test_depth_past_the_structural_ceiling_is_oversized_not_malformed(
     payload_depth: int,
 ) -> None:
-    """One classification for depth overflow, at every depth past it.
-
-    Without a dr-exec-owned ceiling the pinned Pydantic parser is what
-    rejects these bytes, and it reports a malformed frame -- so identical
-    over-deep input would be `OVERSIZED_FRAME` under a small finite budget
-    and `MALFORMED_FRAME` when unbudgeted. Protocol failure codes are
-    persisted, so that split is observable drift, not cosmetics.
-    """
     digest = Sha256Digest("a" * 64)
     result = _read(
         _raw_nested_stream(digest, payload_depth),
@@ -991,15 +927,6 @@ def test_depth_past_the_structural_ceiling_is_oversized_not_malformed(
 def test_depth_past_the_ceiling_is_oversized_under_a_larger_budget(
     payload_depth: int,
 ) -> None:
-    """A budget above the ceiling does not change the classification.
-
-    A declaration may legally spell a `json_depth` budget larger than the
-    structural ceiling. The ceiling still bounds the shared decoder, so a
-    frame nested between the ceiling and that budget is `OVERSIZED_FRAME`
-    exactly as it is when unbudgeted or under a small budget -- rather
-    than reaching the parser behind the decoder and reporting a malformed
-    frame.
-    """
     digest = Sha256Digest("a" * 64)
     budget = 1200
     assert payload_depth < budget
@@ -1015,7 +942,6 @@ def test_depth_past_the_ceiling_is_oversized_under_a_larger_budget(
 
 
 def test_a_budget_above_the_ceiling_still_accepts_frames_beneath_it() -> None:
-    """Clamping narrows nothing the ceiling already admits."""
     digest = Sha256Digest("a" * 64)
     result = _read(
         _raw_nested_stream(digest, _DEEPEST_ACCEPTED_PAYLOAD),

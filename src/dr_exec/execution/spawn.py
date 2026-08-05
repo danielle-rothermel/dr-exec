@@ -1,25 +1,3 @@
-"""The library-owned spawn bootstrap and its parent-side launch.
-
-One fresh Python process stands between the parent and the payload. The
-parent never forks itself: it starts ``<helper> -I -c <bootstrap-source>``
-with ``close_fds=True`` and only the intended pipe ends plus a private
-close-on-exec status pipe. That helper -- not a pre-exec callback, and not
-any caller or package Python running after a fork inside the parent --
-creates the fresh session, changes to the scratch directory, duplicates
-the intended ends onto fds 0 through 3, and ``exec``s the declared command
-directly.
-
-The status pipe is how setup failure crosses the boundary. The helper
-writes one canonical status line and exits before ``exec``; a successful
-``exec`` closes that close-on-exec pipe untouched, so the parent observes
-EOF on an empty pipe. That makes "the payload started" and "setup failed,
-with its errno" distinguishable without a race, which is what separates
-spawn absence from a payload that exited immediately.
-
-Descendants that create their own session escape the process group this
-bootstrap establishes, and nothing here claims otherwise.
-"""
-
 from __future__ import annotations
 
 import json
@@ -30,9 +8,6 @@ import sys
 from dataclasses import dataclass
 from typing import Final
 
-# Child-observable spawn literals: the helper's invocation shape, the
-# status-line keys, and the setup stages the helper can report. Changing
-# one is a standing-contract revision, not an implementation detail.
 SPAWN_HELPER_ARGUMENTS: Final = ("-I", "-c")
 STATUS_STAGE_KEY: Final = "stage"
 STATUS_ERRNO_KEY: Final = "errno"
@@ -41,23 +16,13 @@ SETUP_STAGE_CHDIR: Final = "chdir"
 SETUP_STAGE_DESCRIPTORS: Final = "descriptors"
 SETUP_STAGE_EXEC: Final = "exec"
 
-# The helper's exit code when it reports a setup failure instead of
-# reaching exec. The status line, not this code, is what the parent
-# classifies on; the code exists so a helper that dies before writing a
-# line stays distinguishable from a payload that exited zero.
 SETUP_FAILURE_EXIT_CODE: Final = 127
 
-# The payload's descriptor numbers, in the order the helper installs
-# them. fd 3 is executor-owned and is never part of an environment grant.
 PAYLOAD_STDIN_DESCRIPTOR: Final = 0
 PAYLOAD_STDOUT_DESCRIPTOR: Final = 1
 PAYLOAD_STDERR_DESCRIPTOR: Final = 2
 PAYLOAD_PROTOCOL_DESCRIPTOR: Final = 3
 
-# The helper body, stdlib-only and self-contained. It reads only the
-# module globals the parent renders above it and never inspects argv or
-# the environment: the environment it starts in is already exactly the
-# grant the payload receives, because the parent installed it at spawn.
 _HELPER_BODY = '''
 import json as _dr_exec_json
 import os as _dr_exec_os
@@ -137,13 +102,6 @@ def spawn_bootstrap_source(
     descriptor_map: tuple[tuple[int, int], ...],
     status_descriptor: int,
 ) -> str:
-    """Render the helper source for one concrete child invocation.
-
-    Every value is embedded through ``repr`` as inert data, so a declared
-    argv or scratch path can never become helper syntax. The pinned
-    literals are rendered from the module constants, which are their one
-    source, so the child can only observe one spelling of each.
-    """
     bindings: dict[str, object] = {
         "_DR_EXEC_EXECUTABLE": executable,
         "_DR_EXEC_ARGV": list(argv),
@@ -165,20 +123,15 @@ def spawn_bootstrap_source(
 
 @dataclass(frozen=True, slots=True)
 class SetupFailure:
-    """One bootstrap setup failure, reported before the payload exec."""
+    """Bootstrap setup failure reported before payload exec."""
 
     stage: str
     errno: int | None
 
 
 def parse_setup_status(line: bytes, /) -> SetupFailure | None:
-    """Classify what the helper's status pipe held at EOF.
+    """Treat malformed nonempty status as setup failure, never success."""
 
-    Empty means the payload ``exec`` succeeded and closed the pipe.
-    Anything else is a setup failure; an unparseable line is still a
-    failure -- reported without an errno rather than mistaken for a
-    successful start.
-    """
     if not line:
         return None
     try:
@@ -204,13 +157,8 @@ def launch_bootstrap(
     descriptor_map: tuple[tuple[int, int], ...],
     status_write: int,
 ) -> subprocess.Popen[bytes]:
-    """Start one bootstrap helper with exactly the intended descriptors.
+    """Launch with only the explicitly mapped descriptors inherited."""
 
-    ``close_fds=True`` plus an explicit ``pass_fds`` list keeps every
-    other parent descriptor out of the child; the helper places the
-    passed ends on fds 0 through 3 itself. The parent's own descriptor
-    numbers are never mutated, and no pre-exec callback runs.
-    """
     source = spawn_bootstrap_source(
         executable=executable,
         argv=argv,
@@ -231,12 +179,6 @@ def launch_bootstrap(
 
 
 def signal_process_group(pid: int, number: int, /) -> bool:
-    """Signal the child's original process group, best effort.
-
-    ``False`` means the group is already gone, which is the ordinary
-    outcome of escalating against a child that exited on its own between
-    the decision and the signal.
-    """
     try:
         os.killpg(pid, number)
     except (ProcessLookupError, PermissionError, OSError):

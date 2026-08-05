@@ -1,18 +1,9 @@
-"""Fixed isolated-host interpreter probe.
-
-One `-I` probe per runtime construction reports the interpreter facts that
-make up runtime identity. The probe claims nothing about the integrity of
-the host interpreter or its installed package closure.
-"""
-
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
 
-# The probe source is a child-observable literal: its exact keys are the
-# runtime identity payload keys and are pinned by golden vectors.
 PROBE_SOURCE = (
     "import json,platform,sys;"
     "print(json.dumps({"
@@ -33,12 +24,6 @@ class InterpreterProbeError(RuntimeError):
 
 
 def probe_interpreter(executable: Path, /) -> dict[str, str]:
-    """Run the fixed `-I` probe once and return its reported facts.
-
-    The probe inherits no caller environment beyond the parent's and uses
-    no shell. It installs no time or byte limit of its own: those axes are
-    unbudgeted, and the executor manufactures no hidden finite limit.
-    """
     argv = (str(executable), *PROBE_ARGUMENTS)
     try:
         completed = subprocess.run(

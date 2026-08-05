@@ -30,13 +30,6 @@ class RuntimeRecord(ContractModel):
 
     @model_validator(mode="after")
     def fields_must_match_identity(self) -> RuntimeRecord:
-        """Validate the runtime identity and bind the fields to it.
-
-        Parsing the payload is the identity's own validation, and the
-        payload's ``resolved_executable`` is already a normalized
-        absolute POSIX path, so requiring the field to equal it is the
-        single check that establishes both.
-        """
         payload = _isolated_host_runtime_identity_payload(self.id_doc)
         if self.kind.value != payload.kind:
             raise ValueError("runtime kind does not match identity")
@@ -54,16 +47,13 @@ class PreparedPythonProcess:
 
 @dataclass(frozen=True, slots=True)
 class IsolatedHostPythonRuntime:
-    """One resolved host interpreter, probed once at construction.
+    """Resolved host Python invoked with ``-I``.
 
-    Runtime identity includes the resolved absolute executable path, so
-    equal interpreter builds reached through different paths compare as
-    distinct runtimes.
+    The probe describes the host interpreter; it does not verify interpreter
+    bytes, installed packages, or runtime closure.
     """
 
     executable: Path
-    # Fully derived from the resolved executable, so it carries no
-    # comparison information and stays out of equality and hashing.
     _runtime_record: RuntimeRecord = field(
         init=False, repr=False, compare=False
     )
@@ -96,15 +86,6 @@ class IsolatedHostPythonRuntime:
         target: UntrustedPythonTarget,
         /,
     ) -> PreparedPythonProcess:
-        """Prepare the fixed isolated invocation for one Python target.
-
-        The command is always ``<executable> -I -c <wrapper-source>``. That
-        wrapper source is one OS-level argv element and carries the consumer's
-        ``driver_source`` as inert data within the wrapper representation. The
-        payload sees CPython's own ``sys.argv`` with no domain source argument;
-        the wrapper intentionally evaluates the embedded driver, but no shell
-        interprets either source string.
-        """
         return PreparedPythonProcess(
             argv=(
                 self.executable.as_posix(),
@@ -116,7 +97,6 @@ class IsolatedHostPythonRuntime:
         )
 
     def describe(self) -> RuntimeRecord:
-        """Return the runtime record retained from construction."""
         return self._runtime_record
 
 

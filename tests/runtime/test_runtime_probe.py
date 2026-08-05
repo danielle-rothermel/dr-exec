@@ -1,10 +1,3 @@
-"""Isolated-host runtime: the fixed `-I` probe, prepare, and describe.
-
-Probe tests spawn real interpreters. They synchronize on the probe's
-terminal outcome -- a returned record or a raised error -- never on
-elapsed time.
-"""
-
 from __future__ import annotations
 
 import os
@@ -73,7 +66,6 @@ def test_probe_runs_isolated_from_ambient_python_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`-I` must defeat a sitecustomize planted on PYTHONPATH."""
     (tmp_path / "sitecustomize.py").write_text(
         "raise SystemExit(9)\n", encoding="utf-8"
     )
@@ -154,7 +146,6 @@ def test_runtime_identity_binds_the_resolved_executable_path(
     tmp_path: Path,
     host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
-    """Equal builds at different paths are deliberately distinct runtimes."""
     aliased = tmp_path / "aliased-python"
     aliased.symlink_to(Path(sys.executable).resolve())
     assert IsolatedHostPythonRuntime(aliased).describe() == (
@@ -191,7 +182,6 @@ def test_prepare_and_repeated_describe_do_not_reprobe(
     request_document: IdentityDocument,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Runtime facts are probed once, at construction, and never again."""
 
     def _forbidden(_: Path) -> dict[str, str]:
         raise AssertionError("prepare and describe must not re-probe")
@@ -213,13 +203,6 @@ def test_prepare_embeds_driver_source_as_inert_data(
     host_runtime: IsolatedHostPythonRuntime,
     request_document: IdentityDocument,
 ) -> None:
-    """Quotes, backslashes, and newlines never become wrapper syntax.
-
-    Only the binding line is evaluated here: the rest of the wrapper opens
-    the protected descriptor and reads the request, so it belongs in a
-    real child. What this asserts is that the hostile text survives as one
-    inert string literal instead of executing as wrapper syntax.
-    """
     hostile = "'\"\\\n" + "import os\nos._exit(3)\n"
     target = UntrustedPythonTarget(
         driver_source=hostile,
