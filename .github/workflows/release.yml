@@ -54,6 +54,7 @@ jobs:
           python-version: "3.13"
           enable-cache: false
       - run: scripts/pre-check.sh dist
+      - run: SKIP=pre-check uv run pre-commit run --all-files
       # Publishes via PyPI Trusted Publishing (OIDC) — no API token.
       # Requires this repo/workflow to be registered as a (pending)
       # publisher for the dr-exec project on pypi.org.

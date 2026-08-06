@@ -74,7 +74,7 @@ are also represented but unenforced. V1 exposes no narration surface."""
 rationale = """
 Representing an axis preserves the declaration vocabulary, but representation \
 alone does not bound an operation or provide a bounded-return guarantee."""
-date = "2026-08-05"
+date = "2026-08-06"
 
 [[contracts]]
 title = "Lifecycle reach ends at the original process group"
@@ -132,7 +132,7 @@ calls create no production record."""
 rationale = """
 Lifecycle ordering preserves recoverable experimental evidence while keeping \
 recording health distinct from what the child did."""
-date = "2026-08-05"
+date = "2026-08-06"
 
 [[contracts]]
 title = "Executor calls are concurrently isolated"

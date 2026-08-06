@@ -405,7 +405,12 @@ def _load_record(record_dir: Path, /) -> RunRecord:
 
 
 def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:
-    directory = _directory(record_dir)
+    try:
+        directory = _directory(record_dir)
+    except DocumentDirectoryError as error:
+        raise RecordLoadError(
+            f"could not verify sidecars for the run record at {record_dir}"
+        ) from error
     for expected_name, artifact, stream in (
         (
             STDOUT_SIDECAR_NAME,

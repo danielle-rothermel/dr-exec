@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Adopted the managed SQLite cache lifecycle in documentation and tests.
 - Preserved dr-exec error and lifecycle boundaries across the storage
   integration.
+- Enforced the repository's static pre-commit hooks in CI and release
+  validation.
 
 ## [0.1.3] - 2026-08-05
 

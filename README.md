@@ -312,6 +312,10 @@ class RunStore(Protocol):
     def load(self, record_dir: Path, /) -> RunRecord: ...
 ```
 
+`DirectoryRunStore` publishes canonical lifecycle manifests within fixed
+structural byte and depth ceilings, then loads them through bounded,
+descriptor-pinned reads before validating the record and its sidecars.
+
 ## Scheduling
 
 Finite batches and asynchronous streams share one capacity model. Capacity
