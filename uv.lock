@@ -59,7 +59,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dr-serialize", specifier = "==0.1.2" },
-    { name = "dr-store", specifier = "==0.1.4" },
+    { name = "dr-store", specifier = "==0.1.5" },
     { name = "pydantic", specifier = "==2.13.4" },
 ]
 
@@ -85,14 +85,14 @@ wheels = [
 
 [[package]]
 name = "dr-store"
-version = "0.1.4"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dr-serialize" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2e/1d/e7005c47eb628c4014ce1e2e0cf513e1844a09bda0a61da6c5370eafe7ba/dr_store-0.1.4.tar.gz", hash = "sha256:f5369d5142f896c40ca6a2fbd8c3be6b52ed3b3ed6d792ad25a887b811713e17", size = 20895, upload-time = "2026-08-06T08:35:56.182Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/34/c0a439f8ad4463e96ed3c889a459314068d8f1731860813fbcd551d8cd8c/dr_store-0.1.5.tar.gz", hash = "sha256:7405adb32a3cc776d56cb7ad508f3326903649b0bc02c4111d7679dca43e1d7b", size = 23589, upload-time = "2026-08-06T14:06:30.45Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/35/4f8dfd7fd5b61207bb0d5a498ba1c34c2f036f1dadc4bd98947917da7ac0/dr_store-0.1.4-py3-none-any.whl", hash = "sha256:fff9a403563fcd2fd83161e776eb02f41c07d176ff1218aa8e0ef36c76f69c15", size = 29218, upload-time = "2026-08-06T08:35:55.056Z" },
+    { url = "https://files.pythonhosted.org/packages/02/e1/1a03c5f6d2c8851561cc931a130b16cfd528e72f4fc660ae8cb0ee0de5ed/dr_store-0.1.5-py3-none-any.whl", hash = "sha256:5f4f3b429372f99b60a536bfbfc4dbde2487e39cb4fdcff7cfa6062b421a5b73", size = 32329, upload-time = "2026-08-06T14:06:29.399Z" },
 ]
 
 [[package]]
