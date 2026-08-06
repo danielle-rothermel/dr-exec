@@ -105,22 +105,15 @@ def python_target(echo: str = "ran", /) -> ExecutionTarget:
     )
 
 
-def runtime_identity_document(
-    resolved_executable: str = "/usr/bin/python3.13",
+def cache_scope_identity_document(
+    scope: str = "default",
     /,
 ) -> IdentityDocument:
-    """A declared isolated-host runtime identity for cache-key tests."""
+    """An opaque caller-owned identity for cache-key tests."""
     return build_identity_document(
-        schema="dr_exec.isolated_host_python_runtime",
+        schema="dr_exec.test_cache_scope",
         schema_version=1,
-        payload={
-            "kind": "isolated_host_python",
-            "resolved_executable": resolved_executable,
-            "implementation": "cpython",
-            "python_version": "3.13.0",
-            "cache_tag": "cpython-313",
-            "platform": "macosx-15-arm64",
-        },
+        payload={"scope": scope},
     )
 
 

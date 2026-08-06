@@ -1,21 +1,14 @@
-"""Durable memoization of execution outcomes over an inner executor.
-
-A cache hit certifies the *same declared runtime*: the resolved
-interpreter path, version, and platform recorded in the isolated-host
-runtime identity document. It does not certify that interpreter,
-standard-library, or installed package bytes match what was on the host
-when the entry was written; a host that swaps what lives at a resolved
-path produces a stale hit this design cannot detect.
-"""
+"""Caller-scoped durable replay of execution outcomes."""
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Literal, cast
 
 from dr_serialize import (
     IdentityDocument,
     Jsonable,
     SerializationError,
+    Sha256Digest,
     canonical_json_bytes,
     json_hash,
 )
@@ -25,9 +18,14 @@ from pydantic import ValidationError
 from dr_exec.capabilities.protocols import Executor
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.kinds import FailureOwner
-from dr_exec.declarations.models import ExecutionJob
+from dr_exec.core.model import ContractModel
+from dr_exec.core.names import JobId
+from dr_exec.declarations.models import Budgets, EnvGrantRecord, ExecutionJob
 from dr_exec.declarations.validation import validate_declaration
-from dr_exec.recording.identity import _canonical_declaration_digest
+from dr_exec.recording.identity import (
+    _build_env_grant_record,
+    _canonical_declaration_digest,
+)
 from dr_exec.recording.models import (
     BudgetExceededOutcome,
     CachedRecordReceipt,
@@ -36,8 +34,8 @@ from dr_exec.recording.models import (
     ExitedOutcome,
 )
 
-# Changing what the key covers or what the value means is a version
-# bump: old entries stop being addressable instead of being reread.
+# Changing what the key covers is a namespace and payload-version bump:
+# old entries stop being addressable instead of being reinterpreted.
 CACHE_KEY_NAMESPACE = "dr_exec.caching_executor.key.v1"
 CACHE_VALUE_SCHEMA = "dr_exec.caching_executor.execution_result.v1"
 
@@ -46,21 +44,32 @@ CACHE_VALUE_SCHEMA = "dr_exec.caching_executor.execution_result.v1"
 _RETRIABLE_OWNERS = frozenset({FailureOwner.EXECUTOR, FailureOwner.MACHINE})
 
 
+class _CacheKeyPayload(ContractModel):
+    key_version: Literal[1] = 1
+    target_declaration_sha256: Sha256Digest
+    env: EnvGrantRecord
+    budgets: Budgets
+    cache_scope_identity_sha256: Sha256Digest
+    cache_budget_exceeded: bool
+
+
 class CachingExecutor:
     """Executor wrapper replaying stored completions for repeat runs.
 
-    The key pairs the canonical declaration digest with the declared
-    runtime identity hash; the environment grant and workload budgets
-    are not part of the v1 key. Only exited outcomes are stored —
-    budget-exceeded outcomes only behind ``cache_budget_exceeded``, and
-    retriable-class attributions never. A hit replays the stored result
-    under a cached receipt and certifies the same declared runtime, not
-    verified interpreter or package bytes. Reads are best-effort: any
-    storage fault or invalid entry is a miss that falls through to the
-    inner executor. A binding conflict on a deterministic key is a
-    nondeterminism signal; the first stored entry wins. There is no
-    TTL, eviction, or delete: invalidation is by key-namespace and
-    value-schema versioning only.
+    The key covers the target declaration, environment grant, workload
+    budgets, cache policy, and a caller-owned cache-scope identity. The
+    caller is responsible for changing that opaque scope when relevant
+    executor, runtime, command, or ambient inputs change, and for using
+    this wrapper only when results are deterministic within that scope.
+    The scope does not prove what runtime or executor the inner uses.
+
+    Only exited outcomes are stored. Budget-exceeded outcomes are stored
+    only behind ``cache_budget_exceeded``, and retriable-class
+    attributions are never stored or replayed. Missing, mismatched,
+    corrupt, and otherwise unverifiable records are misses. Operational
+    backend failures may propagate. A binding conflict keeps the first
+    stored entry. There is no TTL, eviction, or delete: invalidation is
+    by key-namespace and value-schema versioning only.
     """
 
     def __init__(
@@ -69,12 +78,12 @@ class CachingExecutor:
         /,
         *,
         cache: RecordCache,
-        runtime_identity: IdentityDocument,
+        cache_scope_identity: IdentityDocument,
         cache_budget_exceeded: bool = False,
     ) -> None:
         self._inner = inner
         self._cache = cache
-        self._runtime_identity = runtime_identity
+        self._cache_scope_identity = cache_scope_identity
         self._cache_budget_exceeded = cache_budget_exceeded
 
     def run(
@@ -85,14 +94,25 @@ class CachingExecutor:
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         validate_declaration(job)
-        key = _cache_key(job, runtime_identity=self._runtime_identity)
-        replayed = _replayed_completion(
-            self._cache.get(key, schema=CACHE_VALUE_SCHEMA), key
+        key = _cache_key(
+            job,
+            cache_scope_identity=self._cache_scope_identity,
+            cache_budget_exceeded=self._cache_budget_exceeded,
         )
-        if replayed is not None:
-            return replayed
+        replayed = _replayed_result(
+            self._cache.get(key, schema=CACHE_VALUE_SCHEMA)
+        )
+        if replayed is not None and _is_cacheable(
+            replayed,
+            cache_budget_exceeded=self._cache_budget_exceeded,
+        ):
+            return _cached_completion(
+                replayed,
+                key,
+                requested_job_id=job.job_id,
+            )
         completed = self._inner.run(job, cancellation=cancellation)
-        if _is_stored(
+        if _is_cacheable(
             completed.result,
             cache_budget_exceeded=self._cache_budget_exceeded,
         ):
@@ -104,7 +124,8 @@ class CachingExecutor:
         try:
             self._cache.put(key, CACHE_VALUE_SCHEMA, record)
         except StoreError:
-            # A cache that cannot store degrades cost, not correctness.
+            # Recognized store failures are non-fatal. Backend-specific
+            # operational exceptions may propagate.
             pass
 
 
@@ -112,43 +133,55 @@ def _cache_key(
     job: ExecutionJob,
     /,
     *,
-    runtime_identity: IdentityDocument,
+    cache_scope_identity: IdentityDocument,
+    cache_budget_exceeded: bool = False,
 ) -> str:
-    payload: Jsonable = {
-        "key_version": 1,
-        "declaration_sha256": str(_canonical_declaration_digest(job.target)),
-        "runtime_identity_sha256": str(
-            json_hash(runtime_identity.to_json_dict())
+    payload = _CacheKeyPayload(
+        target_declaration_sha256=_canonical_declaration_digest(job.target),
+        env=_build_env_grant_record(job.env),
+        budgets=job.budgets,
+        cache_scope_identity_sha256=json_hash(
+            cache_scope_identity.to_json_dict()
         ),
-    }
-    return derive_cache_key(CACHE_KEY_NAMESPACE, payload)
+        cache_budget_exceeded=cache_budget_exceeded,
+    )
+    projection = cast("Jsonable", payload.model_dump(mode="json"))
+    return derive_cache_key(CACHE_KEY_NAMESPACE, projection)
 
 
-def _replayed_completion(
+def _replayed_result(
     hit: CacheHit | None,
-    key: str,
     /,
-) -> CompletedExecution | None:
-    """Rebuild a completion from a stored record, or miss on any fault."""
+) -> ExecutionResult | None:
+    """Parse a stored result, or miss on an unverifiable record."""
     if hit is None:
         return None
     try:
-        result = ExecutionResult.model_validate_json(
+        return ExecutionResult.model_validate_json(
             canonical_json_bytes(hit.record), strict=True
         )
     except (SerializationError, ValidationError):
-        # A mismatched or corrupt entry reads as a miss, never raises.
         return None
+
+
+def _cached_completion(
+    result: ExecutionResult,
+    key: str,
+    /,
+    *,
+    requested_job_id: JobId,
+) -> CompletedExecution:
     return CompletedExecution(
         result=result,
         record_receipt=CachedRecordReceipt(
-            execution_id=result.execution_id,
+            requested_job_id=requested_job_id,
+            source_execution_id=result.execution_id,
             cache_key=key,
         ),
     )
 
 
-def _is_stored(
+def _is_cacheable(
     result: ExecutionResult,
     /,
     *,

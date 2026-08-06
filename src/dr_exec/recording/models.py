@@ -28,7 +28,7 @@ from dr_exec.core.model import (
     IdentityDocumentField,
     UtcDatetime,
 )
-from dr_exec.core.names import ExecutionId
+from dr_exec.core.names import ExecutionId, JobId
 from dr_exec.declarations.models import Budgets, EnvGrantRecord
 from dr_exec.recording.identity import (
     _validate_executor_config_identity,
@@ -399,13 +399,15 @@ class FakeRecordReceipt(ContractModel):
 class CachedRecordReceipt(ContractModel):
     """Receipt for a completion replayed from a cache entry.
 
-    A replayed completion names the entry it came from and claims no
-    record directory: no process ran and nothing durable was written by
-    the replaying call.
+    ``requested_job_id`` identifies the call served by the replay, while
+    ``source_execution_id`` identifies the prior attempt whose result is
+    returned. The receipt claims no record directory: no process ran and
+    nothing durable was written by the replaying call.
     """
 
     kind: Literal[RecordReceiptKind.CACHED] = RecordReceiptKind.CACHED
-    execution_id: ExecutionId
+    requested_job_id: JobId
+    source_execution_id: ExecutionId
     cache_key: str
 
 
@@ -425,7 +427,12 @@ class CompletedExecution(ContractModel):
 
     @model_validator(mode="after")
     def execution_ids_must_match(self) -> CompletedExecution:
-        if self.result.execution_id != self.record_receipt.execution_id:
+        receipt_execution_id = (
+            self.record_receipt.source_execution_id
+            if isinstance(self.record_receipt, CachedRecordReceipt)
+            else self.record_receipt.execution_id
+        )
+        if self.result.execution_id != receipt_execution_id:
             raise ValueError("result and record receipt execution IDs differ")
         return self
 

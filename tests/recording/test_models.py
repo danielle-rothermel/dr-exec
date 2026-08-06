@@ -30,6 +30,7 @@ from dr_exec import (
     RetainedPayloadStream,
     RetainedPayloadStreamRecord,
 )
+from dr_exec.capabilities import CachedRecordReceipt
 
 VALID_DIGEST = "a" * 64
 STARTED_AT = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
@@ -219,3 +220,18 @@ def test_completed_execution_binds_result_and_receipt_ids(
 
     with pytest.raises(ValidationError, match="execution IDs differ"):
         CompletedExecution(result=result, record_receipt=receipt)
+
+
+def test_cached_completion_binds_result_to_source_not_requested_job() -> None:
+    source_execution_id = _execution_id(1)
+    receipt = CachedRecordReceipt(
+        requested_job_id=_execution_id(3).job_id,
+        source_execution_id=_execution_id(5),
+        cache_key="dr_exec.test_cache_key",
+    )
+
+    with pytest.raises(ValidationError, match="execution IDs differ"):
+        CompletedExecution(
+            result=_result(source_execution_id),
+            record_receipt=receipt,
+        )

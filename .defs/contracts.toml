@@ -179,20 +179,25 @@ only resource reused across jobs."""
 date = "2026-08-05"
 
 [[contracts]]
-title = "Cached completions replay declared identity without new evidence"
+title = "Cached completions replay caller-scoped declared inputs"
 statement = """
-`CachingExecutor` memoizes completions keyed by the canonical declaration \
-digest paired with the declared runtime identity hash, both versioned. It \
-stores exited outcomes, stores budget-exceeded outcomes only behind an \
-explicit opt-in, and never stores retriable-class (executor- or \
-machine-attributed) failures. A hit replays the stored result under a \
-distinct cached receipt and certifies the same declared runtime, not \
-verified interpreter or package bytes. Reads are best-effort: any storage \
-fault or invalid entry is a miss that falls through to the inner executor, \
-and a conflicting write keeps the first stored entry. There is no TTL, \
-eviction, or delete; invalidation is by key and schema versioning only."""
+`CachingExecutor` uses a versioned key covering the target declaration, \
+environment grant, workload budgets, cache policy, and an opaque caller-owned \
+cache scope; job identity is excluded so equivalent submissions can share an \
+entry. The caller changes that scope when relevant executor, runtime, command, \
+or ambient inputs change and uses caching only for jobs it treats as \
+deterministic within the scope. The scope does not prove the inner executor's \
+runtime or implementation. The executor stores exited outcomes, stores \
+budget-exceeded outcomes only behind an explicit opt-in, and neither stores nor \
+replays retriable-class outcomes. A hit returns the source result under a \
+distinct receipt identifying the requested job, source execution, and cache \
+entry. Missing, mismatched, corrupt, or otherwise unverifiable records are \
+misses. Operational backend failures may propagate from reads or writes, and a \
+conflicting write keeps the first stored entry. There is no TTL, eviction, or \
+delete; invalidation is by key and schema versioning only."""
 rationale = """
-Memoization must never make a transient fault permanent or present a replay \
-as fresh process evidence, and a broken cache may degrade cost but not \
-correctness."""
+Explicit job inputs prevent known cross-declaration aliasing, while caller-owned \
+scope makes the remaining determinism assumption visible without claiming that \
+dr-exec can infer ambient state. Source and request identities keep replay \
+provenance distinct from new process evidence."""
 date = "2026-08-06"

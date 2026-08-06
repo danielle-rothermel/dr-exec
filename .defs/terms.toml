@@ -154,9 +154,10 @@ exported_symbols = [
 name = "cached completion"
 definition = """
 A completed execution replayed from a durable cache entry keyed by the \
-canonical declaration digest and the declared runtime identity hash. Its \
-distinct receipt names the entry it came from, and a hit certifies the same \
-declared runtime, not verified interpreter or package bytes."""
+execution target, environment grant, workload budgets, cache policy, and an \
+opaque caller-owned cache scope. Its distinct receipt identifies both the \
+current requested job and the source execution whose result is replayed. The \
+cache scope partitions entries but does not prove executor or runtime state."""
 exported_symbols = [
   "dr_exec.capabilities.CachedRecordReceipt",
   "dr_exec.capabilities.CachingExecutor",
