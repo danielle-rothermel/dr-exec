@@ -1,262 +1,179 @@
-# Binding contracts for dr-exec. Each entry has a present-tense statement,
-# rationale, and the date the rule was established or substantively revised.
+[[contracts]]
+title = "Production execution is local and macOS-only"
+statement = """
+dr-exec v1 production execution runs one machine-local child per job on macOS \
+through one direct-argv execution path. It invokes no shell, remote executor, \
+or in-process evaluator."""
+rationale = """
+One qualified platform and one lifecycle owner keep spawning, transport, \
+budget enforcement, teardown, attribution, and recording on the same path."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Execution is local, process-level, and argv-only"
+title = "Trust is explicit and containment claims are narrow"
 statement = """
-dr-exec executes machine-local child processes from validated argument vectors; \
-it never invokes a shell, treats the far side of ssh as caller domain, or \
-provides in-process evaluation as an executor mode."""
+Each target explicitly identifies trusted or untrusted payload content. \
+Untrusted execution uses process-boundary-only containment: a distinct \
+invocation, session, and process group, with the invoking user's filesystem, \
+network, credentials, and process-spawning reach unchanged. It is neither an \
+operating-system sandbox nor a hermetic interpreter and package closure."""
 rationale = """
-The executor can guarantee lifecycle, reaping, and containment only on its own \
-machine and across a real process boundary. Shell interpretation adds an \
-unnecessary language and injection surface, while remote orchestration and \
-in-process evaluation have different ownership boundaries."""
-date = "2026-07-31"
+Binary identity does not establish payload trust, and process organization \
+must not be presented as a restriction on what the payload can access."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Payload trust and containment are explicit"
+title = "Inherited state and scratch space are call-local"
 statement = """
-Every run declares whether its payload is trusted or untrusted; an untrusted \
-payload runs only with an explicitly acknowledged containment profile, and \
-the executor never infers trust from the executable that receives it."""
+A child receives environment values only through its explicit grant, uses a \
+fresh per-run scratch directory as its working directory, and inherits only \
+the descriptors required by its target transport. Scratch cleanup is attempted \
+on every exit path but is best-effort and silent."""
 rationale = """
-Known binaries can execute model-authored prompts or commands, so binary \
-identity is not evidence of content trust. Requiring a call-site declaration \
-makes accidental uncontained execution a detectable error instead of an \
-implicit downgrade."""
-date = "2026-07-31"
+Explicit state keeps concurrent attempts independent. Cleanup failure cannot \
+replace an otherwise trustworthy result, and v1 has no narration surface on \
+which to report it."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Inherited state is granted, not ambient"
+title = "Isolated host Python is not a verified runtime closure"
 statement = """
-A child receives no parent environment, working directory, or open file \
-descriptors unless the caller grants them explicitly; each run otherwise uses \
-fresh state and an isolated scratch workspace, and concurrent runs share no \
-mutable workspace by default."""
+The v1 Python runtime resolves an absolute host interpreter, records reported \
+runtime facts, and invokes it with isolated Python startup. It does not verify \
+the interpreter, standard library, or installed package bytes and makes no \
+hermetic package-closure claim."""
 rationale = """
-Ambient inheritance leaks credentials and machine-specific inputs and lets \
-concurrent or prior runs affect results. Explicit named or overlay grants make \
-each dependency visible; overlay exclusions are verified before spawn rather \
-than trusted as documentation."""
-date = "2026-07-31"
+Isolated startup controls important Python-level ambient inputs without \
+claiming integrity or reproducibility that host-managed files do not provide."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Untrusted Python runs in a declared hermetic runtime"
+title = "Finite workload budgets name enforced limits"
 statement = """
-Every untrusted Python run declares its interpreter and importable package set \
-as inputs and uses a hermetic runtime by default, so no undeclared host input \
-participates in execution."""
+V1 enforces finite workload limits only for wall time, input bytes, and \
+aggregate captured payload output. Memory, CPU time, process count, file size, \
+open-file count, and disk axes are represented but must remain explicitly \
+unbudgeted. Input overflow is rejected before spawn; wall-time overflow stops \
+the run; output overflow follows the declared fail or marked-truncation policy."""
 rationale = """
-Environment and workspace isolation alone do not control which interpreter or \
-packages execute payload code. Making the runtime part of the declaration keeps \
-machine-local installations from silently changing results while allowing a \
-caller to grant a non-hermetic input visibly when the use case requires it."""
-date = "2026-07-31"
+A finite declaration is truthful only when a v1 component enforces it. \
+Unsupported protection remains visible as absent rather than being recorded as \
+a guarantee that does not exist."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Budgets come from declared meaning"
+title = "Self-budgets are enforced only at owned v1 boundaries"
 statement = """
-Every resource axis is visibly budgeted or visibly unbudgeted: wall-clock and \
-CPU limits are declared only; output caps are contract-derived or per-run \
-machine-scale aggregates; RAM and disk have per-run aggregate machine-scale \
-protection by default; process, file-size, and open-file limits are declared \
-only; startup, termination, narration-volume, and record-volume executor \
-self-budgets have built-in defaults; and per-item result size is declared by \
-the protocol. \
-Per-run machine protection never implicitly multiplies across concurrent runs, \
-and every active budget crosses the process boundary in the same declared \
-contract object rather than in parallel constants."""
+Executor self-budgets default to explicitly unbudgeted. V1 enforces finite \
+startup, termination, and join time, plus protocol frame bytes, total bytes, \
+output count, and JSON depth. Manifest bytes, narration bytes, recording-failure \
+count, and failure-detail bytes are represented but have no v1 enforcement \
+point; v1 exposes no narration surface."""
 rationale = """
-Interior defaults guess at research workloads and manufacture failures, while \
-unstated absence hides exposure. Contract budgets reflect downstream meaning, \
-machine protection turns chaotic capacity failures into attributed outcomes, \
-and executor self-budgets keep operations such as startup and teardown from \
-hanging. Batch- and fleet-level protection must be declared independently of \
-per-run limits, and parallel parent and child constants inevitably drift."""
-date = "2026-07-31"
+Representing an axis preserves the declaration vocabulary, but representation \
+alone does not bound an operation or provide a bounded-return guarantee."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Budget enforcement remains attributable and observable"
+title = "Lifecycle reach ends at the original process group"
 statement = """
-Input bounds are validated before spawn; deadline overflow fails, output \
-overflow follows a caller-declared fail-or-visible-truncate policy, budget \
-consumption and overflow remain distinguishable in results and records, and \
-narration- or record-volume exhaustion is reported and degrades observability \
-rather than the run."""
+An attempt that completes bootstrap session setup leads a fresh session and \
+process group. Every post-spawn exit path tears down and reaps the direct child; \
+after completed session setup teardown targets the original group, while \
+failures before `setsid` or during session setup receive direct-child teardown \
+only. A descendant that creates another session can leave the original group \
+and survive. V1 provides no supervised or long-lived-child surface and no fleet \
+abstraction."""
 rationale = """
-Time cannot be truncated, silent output loss corrupts evidence, and spawning \
-work already known to exceed an input contract wastes resources. A budget kill \
-must not masquerade as a payload crash, and executor observability must not \
-compete with payload output for the same accounting."""
-date = "2026-07-31"
+Process-group teardown reaches ordinary descendants after session setup, and \
+direct-child teardown prevents zombies when setup fails, but neither can \
+honestly promise containment of session escapees."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Call-scoped lifecycle completes before return"
+title = "Payload output is captured before durable finalization"
 statement = """
-For every call-scoped run, dr-exec concurrently feeds input and drains output, \
-observes the child through exit, performs group-targeted termination and \
-escalation on every exit path, ensures the entire child process tree is gone, \
-and reaps the direct child before the call returns."""
+V1 captures raw stdout and stderr in memory, retaining deterministic head and \
+tail segments with exact produced and dropped byte counts. The run store writes \
+those retained bytes to sidecars during finalization. V1 provides no payload \
+output streaming, spooling, or stdio-passthrough mode."""
 rationale = """
-Sequential pipe handling can deadlock, leader-only signals leave descendants, \
-and unreaped children become zombies. Lifecycle rigor is one executor \
-responsibility shared by trusted and untrusted payloads rather than behavior \
-each caller reimplements."""
-date = "2026-07-31"
+One capture model keeps output evidence deterministic and distinct from the \
+protected structured protocol. Sidecars are durable finalization artifacts, \
+not live output transports."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Completed runs are data with one failure owner"
+title = "Recognized outcomes are data without caller policy"
 statement = """
-Every completed execution attempt produces a run result, including recognized \
-outcomes such as spawn absence where no child ran; only executor machinery \
-failure that prevents a trustworthy result produces none. Spawn absence \
-remains distinct from other spawn failures, exit interpretation is caller \
-policy with a report-only default, and every failure receives exactly one \
-evidence-based attribution without blaming payload by elimination; only \
-evidence-attributed channel failures form the retriable class. Aggregating \
-trusted-tool calls preserves per-call durable artifacts and collects ordinary \
-statuses without failing fast."""
+Every trustworthy recognized attempt produces one structured result; a \
+parent-side machinery failure that prevents a trustworthy result raises. Exit \
+status remains uninterpreted data, and failure attribution is a best-effort \
+single-owner diagnosis from available evidence. V1 defines no exit-policy, \
+retry, or channel-attribution contract."""
 rationale = """
-Using exceptions or sentinel values for ordinary exits collapses spawn \
-absence, crash, kill, timeout, overflow, and nonzero exit into unusable \
-control flow. Raw outcome data plus explicit policy keeps domain \
-interpretation with the caller while preserving retry and debugging evidence."""
-date = "2026-07-31"
+Separating observation from domain policy preserves spawn, signal, budget, \
+protocol, cancellation, and ordinary exit distinctions without promising \
+causal proof or retry safety."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Output delivery modes are explicit"
+title = "Production attempts have durable lifecycle records"
 statement = """
-Payload output is delivered only through a declared captured, streamed, \
-spooled, or stdio-passthrough mode; payload-written artifact paths are recorded \
-as outputs but never treated as an executor delivery mode, and executor \
-narration never shares a payload output stream."""
+A production attempt prepares its record before spawn, publishes running state \
+only after a successful spawn, and finalizes every recognized result. Recording \
+degradation is reported through the receipt with the latest valid durable state \
+and does not replace the execution outcome. Fake calls create no production \
+record."""
 rationale = """
-Different workloads need different memory, latency, and operator-facing \
-properties. Treating these modes explicitly keeps permissive output affordable, \
-prevents protocol corruption, and avoids confusing files created by payload \
-code with bytes transported by the executor."""
-date = "2026-07-31"
+Lifecycle ordering preserves recoverable experimental evidence while keeping \
+recording health distinct from what the child did."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Every run is durably and faithfully observable"
+title = "Executor calls are concurrently isolated"
 statement = """
-Every run attempts a durable record from live execution through completion, \
-including invocation, grants, budgets, timestamps, outcome, attribution, and \
-output locations; narration is verbose by default and separate from payload \
-output, capture is altered only by visibly recorded budget truncation, and \
-recording or narration failure is itself reported and executor-attributed \
-without failing the run it observes."""
+Every `Executor.run()` implementation is safe for concurrent isolated calls. \
+The scheduler invokes one executor instance from multiple worker threads, so \
+each call owns independent mutable attempt state."""
 rationale = """
-Research runs are experiments: an unrecorded intermediate or silently edited \
-stream cannot be recovered. Quiet defaults and executor-side redaction were \
-rejected because noise is filterable but missing information is permanent, \
-and only callers have the domain knowledge to redact safely after capture."""
-date = "2026-07-31"
+The scheduler's capacity model depends on overlapping calls, not executor \
+cloning or external serialization."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Containment cost follows a declared sharing boundary"
+title = "Fake execution preserves only shared caller contracts"
 statement = """
-Containment setup and teardown attach to an explicitly declared outer \
-dimension boundary and amortize across the work inside it; enforcement limits \
-are not reservations, and the paved execution path keeps overhead \
-proportionate to the protected work."""
+`FakeExecutor.run()` uses shared declaration validation, returns only fake \
+receipts and creates no durable state, and captures exact calls thread-safely. \
+It performs no host checks, spawning, or containment behavior."""
 rationale = """
-Paying process or sandbox setup per millisecond-scale item can make rigorous \
-execution unusable, while reserving every worst-case limit destroys \
-concurrency. Callers otherwise rationally bypass the safe path, so \
-amortization is a correctness obligation rather than optional optimization."""
-date = "2026-07-31"
+The fake preserves declaration and concurrency semantics without implying \
+production platform support, durable evidence, or containment."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "A batch preserves dimensional identity and partial work"
+title = "Structured Python output uses one protected protocol"
 statement = """
-A batch is a declared cross-product of dimensions with explicit sharing \
-boundaries; every item has exactly one dimension-indexed result, item failures \
-remain data scoped to their sub-batch, malformed or missing protocol results \
-are executor failures, the driver echoes request identity before results are \
-trusted, and each result leaves the child incrementally so later failure cannot \
-erase completed work."""
+An untrusted Python child receives one canonical request followed by EOF and \
+emits a versioned, request-bound canonical-NDJSON stream on a protected \
+descriptor. Complete accepted protocol outputs remain structured data and are \
+not decoded from, mixed with, or truncated like stdout and stderr."""
 rationale = """
-A flat list loses failure and sharing structure, while whole-array protocols \
-discard paid-for work when a child dies. Request echo and exact accounting \
-detect stale, duplicate, unknown, or shape-invalid responses at the boundary; \
-driver failures belong to the executor even though the driver runs beside the \
-payload."""
-date = "2026-07-31"
+One separate grammar makes identity binding, framing, byte accounting, exact \
+completion, and partial-output preservation deterministic."""
+date = "2026-08-05"
 
 [[contracts]]
-title = "Containment profiles are mechanism-independent and fail closed"
+title = "Scheduling bounds resident work and reuses no child"
 statement = """
-A containment profile declares filesystem read and write, network, environment, \
-process-spawning, resources, and known limits independently of enforcement \
-mechanism and child lifetime; undeclared reach is denied, unavailable promised \
-containment refuses execution, and containment constrains reach rather than \
-payload structure."""
+The host-local scheduler keeps admitted and completed-but-undelivered jobs \
+within one shared capacity bound, backpressures its source, and delivers \
+completions in completion order. Every production job executes in a fresh \
+child. V1 provides no warm-child reuse, dimension model, or cross-product \
+batching."""
 rationale = """
-Callers must depend on a stable reach contract rather than Docker, sandbox, or \
-platform vocabulary. Silent fallback makes a declared security boundary false, \
-and structural source gating does not control what arbitrary executable content \
-can touch."""
-date = "2026-07-31"
-
-[[contracts]]
-title = "Supervised children retain visible ownership and identity"
-statement = """
-Every long-lived child has an accountable owner whose supervision can be \
-persisted, reattached, and commanded by another local process; liveness verifies \
-process identity, exit is surfaced promptly with attribution, replacement \
-creates a visibly new child in the same slot, and no handle silently changes \
-which process it names."""
-rationale = """
-Fire-and-forget processes become unobservable and unkillable when their spawner \
-exits, bare pid probes permit reuse to impersonate a child, and silent \
-replacement hides loss of in-memory state. Stable slot identity and changing \
-process identity answer different questions and must remain distinct."""
-date = "2026-07-31"
-
-[[contracts]]
-title = "Supervision separates interaction, drain, and stop"
-statement = """
-Each supervised interaction has declared budgets and protocol cancellation, \
-feeds input and drains output concurrently, and exposes output incrementally. \
-Drain stops new work under its own budget and escalates on exhaustion to stop \
-with truncation recorded and attributed; stop terminates the full process tree \
-and reaps the child. Cancellation-budget exhaustion escalates visibly to \
-process termination attributed to the channel, and known external deadlines \
-trigger shutdown with enough headroom to preserve teardown and the final record."""
-rationale = """
-Killing a process is not the same operation as cancelling one request, and \
-abandoning paid-for in-flight work cannot be the only shutdown path. Explicit \
-escalation prevents indefinite waits while retaining evidence about whether \
-the request, channel, process, or external environment forced termination."""
-date = "2026-07-31"
-
-[[contracts]]
-title = "A fleet is one declared slot map"
-statement = """
-A worker fleet binds a declared slot map to discovered or declared resources; \
-spawn, drain, and stop are collective operations with per-slot results, \
-every supervised contract applies to each slot without reduction, slot failures \
-remain data while fleet-level faults raise, aggregate health and work state are \
-durably queryable, restart policy depends on remaining work, and each slot is \
-visibly filled, retired, or failed."""
-rationale = """
-A caller-side loop over unrelated children cannot express fleet-level faults, \
-aggregate health, hardware-relative shape, or intentional wind-down. Stable \
-slots let the same declaration adapt to available resources without confusing \
-an intentionally empty position with a dead worker."""
-date = "2026-07-31"
-
-[[contracts]]
-title = "The library owns its contract-enforcing fake"
-statement = """
-dr-exec ships the executor fake used by consumers; the fake applies the same \
-declaration validation as production and exposes declarations for assertion, \
-while spawn-path correctness remains dr-exec's own test responsibility."""
-rationale = """
-Consumer-authored doubles drift whenever budgets, grants, or containment change \
-and often leave real spawn paths untested accidentally. One library-owned fake \
-keeps consumer logic tests aligned without making consumers duplicate lifecycle \
-tests or making integration oracles tautological."""
-date = "2026-07-31"
+One resident bound prevents unbounded intake while keeping domain dimensions \
+and completeness outside execution infrastructure. Scheduling capacity is the \
+only resource reused across jobs."""
+date = "2026-08-05"

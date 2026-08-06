@@ -1,7 +1,29 @@
-"""Public dr-exec v1 capability and data-contract surface."""
-
-from dr_exec.cancel import CancelToken
-from dr_exec.declare import (
+from dr_exec.capabilities.fake import FakeExecutor
+from dr_exec.capabilities.protocols import Executor, RunStore, Runtime
+from dr_exec.core.cancel import CancelToken
+from dr_exec.core.errors import (
+    DeclarationError,
+    ExecutorFailure,
+    RecordLoadError,
+)
+from dr_exec.core.kinds import (
+    BudgetAxis,
+    CapacitySource,
+    ContainmentProfile,
+    EnvGrantKind,
+    ExecutionPoolState,
+    ExecutionTargetKind,
+    FailureOwner,
+    LimitKind,
+    OutcomeKind,
+    OutputOverflowPolicy,
+    ProtocolFailureCode,
+    RecordReceiptKind,
+    RecordState,
+    RuntimeKind,
+)
+from dr_exec.core.names import AttemptId, ExecutionId, JobId
+from dr_exec.declarations.models import (
     Budgets,
     ByteBudget,
     CountBudget,
@@ -25,38 +47,8 @@ from dr_exec.declare import (
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
-from dr_exec.errors import DeclarationError, ExecutorFailure, RecordLoadError
-from dr_exec.executor import ProcessExecutor
-from dr_exec.fake import FakeExecutor
-from dr_exec.kinds import (
-    BudgetAxis,
-    CapacitySource,
-    ContainmentProfile,
-    EnvGrantKind,
-    ExecutionPoolState,
-    ExecutionTargetKind,
-    FailureOwner,
-    LimitKind,
-    OutcomeKind,
-    OutputOverflowPolicy,
-    ProtocolFailureCode,
-    RecordReceiptKind,
-    RecordState,
-    RuntimeKind,
-)
-from dr_exec.names import AttemptId, ExecutionId, JobId
-from dr_exec.pool import (
-    AutoPoolCapacity,
-    EffectivePoolCapacity,
-    ExecutionCompletion,
-    ExecutionPool,
-    ExecutionPoolConfig,
-    ExecutionSubmission,
-    FixedPoolCapacity,
-    PoolCapacity,
-)
-from dr_exec.protocols import Executor, RunStore, Runtime
-from dr_exec.record import (
+from dr_exec.execution.executor import ProcessExecutor
+from dr_exec.recording.models import (
     BudgetExceededOutcome,
     BudgetExceededOutcomeRecord,
     CancelledOutcome,
@@ -103,16 +95,26 @@ from dr_exec.record import (
     UntrustedCommandTargetRecord,
     UntrustedPythonTargetRecord,
 )
-from dr_exec.runtime import (
-    IsolatedHostPythonRuntime,
-    PreparedPythonProcess,
-    RuntimeRecord,
-)
-from dr_exec.store import (
+from dr_exec.recording.store import (
     DirectoryRunStore,
     FinalizableRun,
     PreparedRun,
     RunningRun,
+)
+from dr_exec.runtime.host import (
+    IsolatedHostPythonRuntime,
+    PreparedPythonProcess,
+    RuntimeRecord,
+)
+from dr_exec.scheduling.pool import (
+    AutoPoolCapacity,
+    EffectivePoolCapacity,
+    ExecutionCompletion,
+    ExecutionPool,
+    ExecutionPoolConfig,
+    ExecutionSubmission,
+    FixedPoolCapacity,
+    PoolCapacity,
 )
 
 __all__ = [

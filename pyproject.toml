@@ -1,15 +1,17 @@
 [project]
 name = "dr-exec"
-version = "0.1.1"
+version = "0.1.2"
 description = "Contract-driven local process execution"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Danielle Rothermel", email = "danielle.rothermel@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "dr-serialize==0.1.1",
-    "dr-store>=0.1.1",
+    "dr-serialize==0.1.2",
+    "dr-store==0.1.2",
     "pydantic==2.13.4",
 ]
 
@@ -19,6 +21,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.0",
     "pytest>=8.4.2",
     "ruff>=0.16.1",
     "ty>=0.0.65",
@@ -31,6 +34,12 @@ line-length = 79
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
+markers = [
+    "integration: crosses a filesystem, runtime, or process boundary",
+    "subprocess: starts, probes, or supervises a real child process",
+    "platform_macos: qualifies behavior supported only on macOS",
+    "serial_fork: calls os.fork directly and must run outside xdist workers",
+]
 
 [tool.ty.src]
 include = ["scripts", "src", "tests"]

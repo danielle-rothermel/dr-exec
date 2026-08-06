@@ -5,6 +5,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-05
+
+### Changed
+
+- Reorganized the package and tests around declarations, execution, recording,
+  scheduling, core, runtime, and capabilities while preserving the ordered
+  root API and pinned persisted encodings.
+- Required explicit protocol-frame versions and strengthened declaration,
+  record-loading, provenance, lifecycle, and scheduler validation.
+- Pinned `dr-serialize` and `dr-store` at 0.1.2.
+- Replaced superseded planning documents with the forward-facing README,
+  repository definitions, and focused future plans.
+- Switched `dr-serialize` and `dr-store` development and release resolution
+  to PyPI.
+- Added MIT package metadata and artifact checks that require the license in
+  both distributions.
+- Made asynchronous pool delivery cancellation-safe across dependent sources,
+  concurrent streams, and drain or abort while preserving buffered results.
+- Rejected slash-relative command executables that cannot retain their meaning
+  after the child enters its scratch workspace.
+
+### Added
+
+- Dedicated Depot-backed macOS qualification in CI.
+- Repository-wide pre-commit and CI checks for formatting, linting, typing,
+  tests, definitions, and built distributions.
+- Schema-backed terms validation and complete `.defs` Pages publication.
+
 ## [0.1.1] - 2026-08-05
 
 Initial release: the complete dr-exec v1.
