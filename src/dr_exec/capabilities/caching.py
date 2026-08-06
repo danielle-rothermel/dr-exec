@@ -96,6 +96,8 @@ class CachingExecutor:
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         validate_declaration(job)
+        if cancellation is not None and cancellation.cancelled:
+            return self._inner.run(job, cancellation=cancellation)
         key = _cache_key(
             job,
             cache_scope_identity=self._cache_scope_identity,
@@ -104,9 +106,13 @@ class CachingExecutor:
         replayed = _replayed_result(
             self._cache.get(key, schema=_CacheFormat.VALUE_SCHEMA)
         )
-        if replayed is not None and _is_cacheable(
-            replayed,
-            cache_budget_exceeded=self._cache_budget_exceeded,
+        if (
+            replayed is not None
+            and _is_cacheable(
+                replayed,
+                cache_budget_exceeded=self._cache_budget_exceeded,
+            )
+            and not (cancellation is not None and cancellation.cancelled)
         ):
             return _cached_completion(
                 replayed,

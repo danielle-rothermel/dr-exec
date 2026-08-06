@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from dr_serialize import build_identity_document
 from dr_store import (
+    CacheHit,
     MemoryBackend,
     ObjectStore,
     RecordCache,
@@ -181,6 +182,50 @@ def test_a_hit_replays_the_stored_result_without_delegating() -> None:
     assert second.record_receipt.cache_key == _cache_key(
         second_job, cache_scope_identity=cache_scope_identity_document()
     )
+
+
+def test_an_already_cancelled_call_bypasses_a_warm_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
+    cache = fresh_cache()
+    executor = caching_over_fake(fake, cache=cache)
+    executor.run(job())
+    monkeypatch.setattr(
+        cache,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail("cancelled call read cache"),
+    )
+    token = CancelToken()
+    token.cancel()
+
+    completed = executor.run(job(), cancellation=token)
+
+    assert len(fake.calls) == 2
+    assert isinstance(completed.record_receipt, FakeRecordReceipt)
+
+
+def test_cancellation_observed_during_a_cache_read_bypasses_the_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
+    cache = fresh_cache()
+    executor = caching_over_fake(fake, cache=cache)
+    executor.run(job())
+    token = CancelToken()
+    read = cache.get
+
+    def cancel_after_read(key: str, /, *, schema: str) -> CacheHit | None:
+        hit = read(key, schema=schema)
+        token.cancel()
+        return hit
+
+    monkeypatch.setattr(cache, "get", cancel_after_read)
+
+    completed = executor.run(job(), cancellation=token)
+
+    assert len(fake.calls) == 2
+    assert isinstance(completed.record_receipt, FakeRecordReceipt)
 
 
 @pytest.mark.integration

@@ -17,6 +17,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Updated `dr-store` to 0.1.3 for the record-cache capability.
+- Made an already-cancelled cached call defer to the inner executor instead of
+  replaying a warm result.
 
 ## [0.1.2] - 2026-08-05
 

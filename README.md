@@ -371,7 +371,10 @@ class ExecutionPool:
 Consumers can program against the small `Executor`, `Runtime`, and `RunStore`
 Protocols while selecting concrete implementations separately. The optional
 caching wrapper replays eligible results within a caller-owned scope; the
-selected cache backend defines how long entries persist.
+selected cache backend defines how long entries persist. Replayed results retain
+their source execution identity, while the receipt identifies the current job.
+An already-cancelled call bypasses replay and remains the inner executor's
+responsibility.
 
 ```python
 class FakeExecutor:
