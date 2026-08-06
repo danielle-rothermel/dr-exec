@@ -12,7 +12,7 @@ from dr_store import (
     MemoryBackend,
     ObjectStore,
     RecordCache,
-    SqliteBackend,
+    SqliteRecordCache,
     StoreError,
 )
 from support.executor import (
@@ -234,12 +234,14 @@ def test_a_reopened_cache_replays_the_complete_result(tmp_path: Path) -> None:
     first_fake = FakeExecutor(
         responder=lambda _job, _cancellation: replay_evidence_completion()
     )
-    first_cache = RecordCache(ObjectStore(SqliteBackend(cache_path)))
-    first = caching_over_fake(first_fake, cache=first_cache).run(job())
+    with SqliteRecordCache(cache_path) as first_cache:
+        first = caching_over_fake(first_fake, cache=first_cache).run(job())
 
     second_fake = FakeExecutor()
-    reopened_cache = RecordCache(ObjectStore(SqliteBackend(cache_path)))
-    second = caching_over_fake(second_fake, cache=reopened_cache).run(job())
+    with SqliteRecordCache(cache_path) as reopened_cache:
+        second = caching_over_fake(second_fake, cache=reopened_cache).run(
+            job()
+        )
 
     assert isinstance(first.record_receipt, FakeRecordReceipt)
     assert len(first_fake.calls) == 1

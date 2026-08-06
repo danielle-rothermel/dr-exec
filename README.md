@@ -312,6 +312,10 @@ class RunStore(Protocol):
     def load(self, record_dir: Path, /) -> RunRecord: ...
 ```
 
+`DirectoryRunStore` publishes canonical lifecycle manifests within fixed
+structural byte and depth ceilings, then loads them through bounded,
+descriptor-pinned reads before validating the record and its sidecars.
+
 ## Scheduling
 
 Finite batches and asynchronous streams share one capacity model. Capacity
@@ -406,6 +410,23 @@ class CachingExecutor:
         *,
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution: ...
+```
+
+`CachingExecutor` does not own or close an injected cache; the caller owns its
+lifecycle. For a persistent SQLite cache, keep the wrapper within the managed
+cache scope:
+
+```python
+from dr_exec.capabilities import CachingExecutor
+from dr_store import SqliteRecordCache
+
+with SqliteRecordCache("cache.sqlite3") as cache:
+    executor = CachingExecutor(
+        inner,
+        cache=cache,
+        cache_scope_identity=cache_scope_identity,
+    )
+    completed = executor.run(job)
 ```
 
 ```python

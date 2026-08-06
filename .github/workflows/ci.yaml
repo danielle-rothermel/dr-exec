@@ -28,6 +28,7 @@ jobs:
           version: "0.11.25"
           python-version: ${{ matrix.python-version }}
       - run: scripts/pre-check.sh
+      - run: SKIP=pre-check uv run pre-commit run --all-files
 
   macos-qualification:
     runs-on: depot-macos-15

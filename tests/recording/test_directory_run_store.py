@@ -21,7 +21,10 @@ from dr_store import (
     AllocationError,
     DocumentDirectory,
     DocumentDirectoryError,
+    DocumentPublishError,
     ManifestPublishError,
+    PublicationStage,
+    ReplacementState,
     SidecarSummary,
     SidecarWriter,
 )
@@ -93,7 +96,6 @@ from dr_exec.recording.store import (
     STDERR_SIDECAR_NAME,
     STDOUT_SIDECAR_NAME,
     STRUCTURAL_MANIFEST_BYTE_CEILING,
-    _read_size_preflighted_manifest_bytes,
 )
 
 if TYPE_CHECKING:
@@ -260,6 +262,16 @@ def _manifest_bytes(record_dir: Path) -> bytes:
     return (record_dir / MANIFEST_NAME).read_bytes()
 
 
+def _container_depth(value: Jsonable, /) -> int:
+    if isinstance(value, dict):
+        return 1 + max(
+            (_container_depth(item) for item in value.values()), default=0
+        )
+    if isinstance(value, list):
+        return 1 + max((_container_depth(item) for item in value), default=0)
+    return 0
+
+
 class _FinalizeFaultWriter:
     def __init__(
         self, writer: SidecarWriter, *, fault: bool, errno: int
@@ -327,9 +339,16 @@ def _install_finalization_fault(
             try:
                 raise OSError(error_number, os.strerror(error_number))
             except OSError as error:
-                raise ManifestPublishError(
-                    "injected manifest publication fault"
-                ) from error
+                try:
+                    raise DocumentPublishError(
+                        _directory.path / MANIFEST_NAME,
+                        PublicationStage.WRITE_TEMP,
+                        replacement_state=ReplacementState.NOT_REPLACED,
+                    ) from error
+                except DocumentPublishError as document_error:
+                    raise ManifestPublishError(
+                        "injected manifest publication fault"
+                    ) from document_error
 
         monkeypatch.setattr(DocumentDirectory, "publish", publish)
     else:
@@ -516,6 +535,22 @@ def test_prepare_publishes_a_complete_prepared_record(
     assert run.record_dir.parent == store.root
     assert run.record_dir.name.startswith(f"{RECORD_DIRECTORY_PREFIX}-")
     assert store.load(run.record_dir) == prepared_record
+
+
+def test_a_relative_root_is_normalized_for_the_store_and_allocated_run(
+    tmp_path: Path,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    relative_root = Path("records")
+    relative_root.mkdir()
+    store = DirectoryRunStore(root=relative_root)
+
+    run = store.prepare(_prepared_record(execution_id))
+
+    assert store.root == tmp_path / relative_root
+    assert run.record_dir.parent == store.root
 
 
 def test_mark_running_publishes_the_process_bearing_record(
@@ -1365,21 +1400,24 @@ def test_the_manifest_byte_ceiling_is_exactly_pinned() -> None:
     assert STRUCTURAL_MANIFEST_BYTE_CEILING == 256 * 1024 * 1024
 
 
-def test_load_rejects_a_statically_oversized_manifest_before_reading_it(
+def test_load_rejects_an_oversized_manifest(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    manifest_path = run.record_dir / MANIFEST_NAME
-    with manifest_path.open("r+b") as manifest:
-        manifest.truncate(STRUCTURAL_MANIFEST_BYTE_CEILING + 1)
-    assert manifest_path.stat().st_size == STRUCTURAL_MANIFEST_BYTE_CEILING + 1
+    stored = _manifest_bytes(run.record_dir)
+    monkeypatch.setattr(
+        dr_exec.recording.store,
+        "STRUCTURAL_MANIFEST_BYTE_CEILING",
+        len(stored) - 1,
+    )
 
-    with pytest.raises(RecordLoadError, match="exceeds"):
+    with pytest.raises(RecordLoadError):
         store.load(run.record_dir)
 
 
-def test_a_static_manifest_exactly_at_the_byte_ceiling_is_read_whole(
+def test_a_manifest_exactly_at_the_byte_ceiling_is_accepted(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
     monkeypatch: pytest.MonkeyPatch,
@@ -1392,8 +1430,41 @@ def test_a_static_manifest_exactly_at_the_byte_ceiling_is_read_whole(
         len(stored),
     )
 
-    assert _read_size_preflighted_manifest_bytes(run.record_dir) == stored
     assert store.load(run.record_dir).state == RecordState.PREPARED
+
+
+def test_a_manifest_exactly_at_the_depth_ceiling_is_accepted(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_record = _prepared_record(execution_id)
+    run = store.prepare(prepared_record)
+    manifest = json.loads(_manifest_bytes(run.record_dir))
+    monkeypatch.setattr(
+        dr_exec.recording.store,
+        "STRUCTURAL_DEPTH_CEILING",
+        _container_depth(manifest),
+    )
+
+    assert store.load(run.record_dir) == prepared_record
+
+
+def test_load_rejects_a_manifest_over_the_depth_ceiling(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    manifest = json.loads(_manifest_bytes(run.record_dir))
+    monkeypatch.setattr(
+        dr_exec.recording.store,
+        "STRUCTURAL_DEPTH_CEILING",
+        _container_depth(manifest) - 1,
+    )
+
+    with pytest.raises(RecordLoadError):
+        store.load(run.record_dir)
 
 
 def test_load_rejects_a_missing_manifest(
@@ -1405,6 +1476,52 @@ def test_load_rejects_a_missing_manifest(
 
     with pytest.raises(RecordLoadError, match="could not read"):
         store.load(run.record_dir)
+
+
+def test_load_rejects_an_external_manifest_symlink(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    tmp_path: Path,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    manifest_path = run.record_dir / MANIFEST_NAME
+    external_path = tmp_path / "external-record.json"
+    external_path.write_bytes(manifest_path.read_bytes())
+    manifest_path.unlink()
+    manifest_path.symlink_to(external_path)
+
+    with pytest.raises(RecordLoadError) as raised:
+        store.load(run.record_dir)
+
+    assert isinstance(raised.value.__cause__, DocumentDirectoryError)
+
+
+def test_load_translates_directory_disappearance_during_sidecar_verification(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    store.finalize(run, _result(execution_id))
+    load_record = dr_exec.recording.store._load_record
+
+    def load_then_remove_directory(record_dir: Path) -> object:
+        record = load_record(record_dir)
+        for entry in record_dir.iterdir():
+            entry.unlink()
+        record_dir.rmdir()
+        return record
+
+    monkeypatch.setattr(
+        dr_exec.recording.store,
+        "_load_record",
+        load_then_remove_directory,
+    )
+
+    with pytest.raises(RecordLoadError) as raised:
+        store.load(run.record_dir)
+
+    assert isinstance(raised.value.__cause__, DocumentDirectoryError)
 
 
 @pytest.mark.parametrize(
