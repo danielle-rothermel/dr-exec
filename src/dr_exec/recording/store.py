@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
 
-from dr_serialize import Jsonable, SerializationError, Sha256Digest
+from dr_serialize import (
+    Jsonable,
+    JsonByteLimitError,
+    SerializationError,
+    Sha256Digest,
+    canonical_json_bytes,
+)
 from dr_store import DocumentDirectory, DocumentDirectoryError, SidecarSummary
 from pydantic import TypeAdapter, ValidationError
 
@@ -15,8 +21,6 @@ from dr_exec.core.kinds import RecordState
 from dr_exec.core.model import (
     STRUCTURAL_DEPTH_CEILING,
     ContractModel,
-    NonCanonicalBytesError,
-    require_canonical_json_bytes,
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.recording.models import (
@@ -170,13 +174,23 @@ def _recording_failure(
     error: Exception,
     /,
 ) -> RecordingFailure:
-    cause = error.__cause__
-    errno = getattr(cause, "errno", None)
     return RecordingFailure(
         operation=operation,
-        errno=errno if isinstance(errno, int) else None,
+        errno=_explicit_cause_chain_errno(error),
         detail=type(error).__name__,
     )
+
+
+def _explicit_cause_chain_errno(error: BaseException, /) -> int | None:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        error_number = getattr(current, "errno", None)
+        if isinstance(error_number, int):
+            return error_number
+        current = current.__cause__
+    return None
 
 
 def _write_sidecar(
@@ -201,6 +215,9 @@ class DirectoryRunStore:
 
     root: Path
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root", self.root.absolute())
+
     def prepare(
         self,
         record: PreparedRecord,
@@ -211,6 +228,8 @@ class DirectoryRunStore:
                 self.root,
                 prefix=RECORD_DIRECTORY_PREFIX,
                 manifest_name=MANIFEST_NAME,
+                manifest_max_bytes=STRUCTURAL_MANIFEST_BYTE_CEILING,
+                manifest_max_depth=STRUCTURAL_DEPTH_CEILING,
             )
             directory.publish(_manifest_payload(record))
         return PreparedRun(
@@ -345,42 +364,38 @@ def _durable_state(run: FinalizableRun, /) -> RecordState:
 
 
 def _directory(record_dir: Path, /) -> DocumentDirectory:
-    return DocumentDirectory(record_dir, MANIFEST_NAME)
-
-
-def _read_size_preflighted_manifest_bytes(record_dir: Path, /) -> bytes:
-    manifest_path = record_dir / MANIFEST_NAME
-    try:
-        if manifest_path.stat().st_size > STRUCTURAL_MANIFEST_BYTE_CEILING:
-            raise RecordLoadError(
-                f"run record manifest at {record_dir} exceeds "
-                f"{STRUCTURAL_MANIFEST_BYTE_CEILING} bytes"
-            )
-        return manifest_path.read_bytes()
-    except OSError as error:
-        raise RecordLoadError(
-            f"could not read the run record at {record_dir}"
-        ) from error
+    return DocumentDirectory(
+        record_dir,
+        MANIFEST_NAME,
+        manifest_max_bytes=STRUCTURAL_MANIFEST_BYTE_CEILING,
+        manifest_max_depth=STRUCTURAL_DEPTH_CEILING,
+    )
 
 
 def _load_record(record_dir: Path, /) -> RunRecord:
-    """Load through a static size preflight and canonical validation.
-
-    Stat and read are separate: concurrent replacement or growth can exceed
-    the preflighted size, so v1 does not claim a race-safe memory bound.
-    """
-
-    manifest_bytes = _read_size_preflighted_manifest_bytes(record_dir)
     try:
-        require_canonical_json_bytes(
-            manifest_bytes,
-            max_bytes=len(manifest_bytes),
-            max_depth=STRUCTURAL_DEPTH_CEILING,
-        )
-    except (SerializationError, NonCanonicalBytesError) as error:
-        raise RecordLoadError(
-            f"run record at {record_dir} is not canonical JSON bytes"
-        ) from error
+        manifest = _directory(record_dir).read_manifest()
+    except DocumentDirectoryError as error:
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, JsonByteLimitError):
+                message = (
+                    f"run record manifest at {record_dir} exceeds "
+                    f"{STRUCTURAL_MANIFEST_BYTE_CEILING} bytes"
+                )
+                break
+            if isinstance(current, (SerializationError, ValueError)):
+                message = (
+                    f"run record at {record_dir} is not canonical JSON bytes"
+                )
+                break
+            current = current.__cause__
+        else:
+            message = f"could not read the run record at {record_dir}"
+        raise RecordLoadError(message) from error
+    manifest_bytes = canonical_json_bytes(manifest)
     try:
         return _RUN_RECORD_ADAPTER.validate_json(manifest_bytes, strict=True)
     except ValidationError as error:
