@@ -396,9 +396,25 @@ class FakeRecordReceipt(ContractModel):
     execution_id: ExecutionId
 
 
+class CachedRecordReceipt(ContractModel):
+    """Receipt for a completion replayed from a cache entry.
+
+    A replayed completion names the entry it came from and claims no
+    record directory: no process ran and nothing durable was written by
+    the replaying call.
+    """
+
+    kind: Literal[RecordReceiptKind.CACHED] = RecordReceiptKind.CACHED
+    execution_id: ExecutionId
+    cache_key: str
+
+
 type RealRecordReceipt = CompleteRecordReceipt | DegradedRecordReceipt
 type RecordReceipt = Annotated[
-    CompleteRecordReceipt | DegradedRecordReceipt | FakeRecordReceipt,
+    CompleteRecordReceipt
+    | DegradedRecordReceipt
+    | FakeRecordReceipt
+    | CachedRecordReceipt,
     Field(discriminator="kind"),
 ]
 
@@ -417,6 +433,7 @@ class CompletedExecution(ContractModel):
 __all__ = [
     "BudgetExceededOutcome",
     "BudgetExceededOutcomeRecord",
+    "CachedRecordReceipt",
     "CancelledOutcome",
     "CancelledOutcomeRecord",
     "CompleteRecordReceipt",

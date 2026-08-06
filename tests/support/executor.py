@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Lock, Thread
 from uuid import uuid4
 
-from dr_serialize import build_identity_document
+from dr_serialize import IdentityDocument, build_identity_document
 
 from dr_exec import (
     AttemptId,
@@ -102,6 +102,25 @@ def python_target(echo: str = "ran", /) -> ExecutionTarget:
             payload={"echo": echo},
         ),
         containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+    )
+
+
+def runtime_identity_document(
+    resolved_executable: str = "/usr/bin/python3.13",
+    /,
+) -> IdentityDocument:
+    """A declared isolated-host runtime identity for cache-key tests."""
+    return build_identity_document(
+        schema="dr_exec.isolated_host_python_runtime",
+        schema_version=1,
+        payload={
+            "kind": "isolated_host_python",
+            "resolved_executable": resolved_executable,
+            "implementation": "cpython",
+            "python_version": "3.13.0",
+            "cache_tag": "cpython-313",
+            "platform": "macosx-15-arm64",
+        },
     )
 
 

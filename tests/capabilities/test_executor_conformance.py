@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from dr_store import MemoryBackend, ObjectStore, RecordCache
 from support.executor import (
     fake_completion,
     job_for,
     python_target,
+    runtime_identity_document,
     trusted_target,
     untrusted_command_target,
 )
@@ -29,6 +31,7 @@ from dr_exec import (
     RecordReceiptKind,
     TrustedCommandTarget,
 )
+from dr_exec.capabilities import CachingExecutor
 
 if TYPE_CHECKING:
     from dr_exec.capabilities.protocols import Executor
@@ -58,6 +61,14 @@ def build_fake_executor(_root: Path, /) -> FakeExecutor:
     )
 
 
+def build_caching_fake_executor(root: Path, /) -> CachingExecutor:
+    return CachingExecutor(
+        build_fake_executor(root),
+        cache=RecordCache(ObjectStore(MemoryBackend())),
+        runtime_identity=runtime_identity_document(),
+    )
+
+
 EXECUTOR_IMPLEMENTATIONS = [
     pytest.param(
         "process",
@@ -70,6 +81,7 @@ EXECUTOR_IMPLEMENTATIONS = [
         id="process",
     ),
     pytest.param("fake", id="fake"),
+    pytest.param("caching-fake", id="caching-fake"),
 ]
 
 
@@ -79,6 +91,8 @@ def executor(request: pytest.FixtureRequest, tmp_path: Path) -> Executor:
         runtime = request.getfixturevalue("host_runtime")
         assert isinstance(runtime, IsolatedHostPythonRuntime)
         return build_process_executor(tmp_path, runtime)
+    if request.param == "caching-fake":
+        return build_caching_fake_executor(tmp_path)
     return build_fake_executor(tmp_path)
 
 
@@ -223,7 +237,12 @@ def test_each_executor_enforces_its_own_receipt_kind(
 ) -> None:
     receipt = executor.run(valid_absolute_command()).record_receipt
 
-    if isinstance(executor, FakeExecutor):
+    if isinstance(executor, CachingExecutor):
+        # A fresh cache misses, so the wrapper passes the inner fake
+        # receipt through unchanged.
+        assert isinstance(receipt, FakeRecordReceipt)
+        assert receipt.kind is RecordReceiptKind.NOT_APPLICABLE
+    elif isinstance(executor, FakeExecutor):
         assert isinstance(receipt, FakeRecordReceipt)
         assert receipt.kind is RecordReceiptKind.NOT_APPLICABLE
     else:

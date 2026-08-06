@@ -177,3 +177,22 @@ One resident bound prevents unbounded intake while keeping domain dimensions \
 and completeness outside execution infrastructure. Scheduling capacity is the \
 only resource reused across jobs."""
 date = "2026-08-05"
+
+[[contracts]]
+title = "Cached completions replay declared identity without new evidence"
+statement = """
+`CachingExecutor` memoizes completions keyed by the canonical declaration \
+digest paired with the declared runtime identity hash, both versioned. It \
+stores exited outcomes, stores budget-exceeded outcomes only behind an \
+explicit opt-in, and never stores retriable-class (executor- or \
+machine-attributed) failures. A hit replays the stored result under a \
+distinct cached receipt and certifies the same declared runtime, not \
+verified interpreter or package bytes. Reads are best-effort: any storage \
+fault or invalid entry is a miss that falls through to the inner executor, \
+and a conflicting write keeps the first stored entry. There is no TTL, \
+eviction, or delete; invalidation is by key and schema versioning only."""
+rationale = """
+Memoization must never make a transient fault permanent or present a replay \
+as fresh process evidence, and a broken cache may degrade cost but not \
+correctness."""
+date = "2026-08-06"

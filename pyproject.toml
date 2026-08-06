@@ -19,6 +19,11 @@ dependencies = [
 requires = ["uv_build>=0.11.25,<0.12.0"]
 build-backend = "uv_build"
 
+# dr-store's record cache is unreleased; pin the exact reviewed commit.
+# Re-pin to a released dr-store version before merging.
+[tool.uv.sources]
+dr-store = { git = "https://github.com/danielle-rothermel/dr-store", rev = "8656db5e5428c6ce637cd5b223bac8b4396604f3" }
+
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.0",

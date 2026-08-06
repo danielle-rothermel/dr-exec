@@ -59,7 +59,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dr-serialize", specifier = "==0.1.2" },
-    { name = "dr-store", specifier = "==0.1.2" },
+    { name = "dr-store", git = "https://github.com/danielle-rothermel/dr-store?rev=8656db5e5428c6ce637cd5b223bac8b4396604f3" },
     { name = "pydantic", specifier = "==2.13.4" },
 ]
 
@@ -86,13 +86,9 @@ wheels = [
 [[package]]
 name = "dr-store"
 version = "0.1.2"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/danielle-rothermel/dr-store?rev=8656db5e5428c6ce637cd5b223bac8b4396604f3#8656db5e5428c6ce637cd5b223bac8b4396604f3" }
 dependencies = [
     { name = "dr-serialize" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ec/10/58e5595b059ca6386198c26229c94a04807c7a988fbf2630208776074739/dr_store-0.1.2.tar.gz", hash = "sha256:b34789803b7418af2b01875cb7a0b5d39548a08b204e944ce6e946d9ba1a7fb5", size = 12382, upload-time = "2026-08-05T22:32:01.909Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/03/5473d46d0136f3b29c316dba51f4c829b93bb9149cdb25da6ab3fcecfa29/dr_store-0.1.2-py3-none-any.whl", hash = "sha256:0eb3cccbf9ccee44c16d0c740c6907a437bc6a8eb02da0be77ef44e45b04fdb5", size = 17329, upload-time = "2026-08-05T22:32:00.628Z" },
 ]
 
 [[package]]
