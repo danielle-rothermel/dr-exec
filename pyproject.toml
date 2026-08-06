@@ -19,10 +19,6 @@ dependencies = [
 requires = ["uv_build>=0.11.25,<0.12.0"]
 build-backend = "uv_build"
 
-# Use the local dr-store checkout while its record cache is under development.
-[tool.uv.sources]
-dr-store = { path = "../dr-store" }
-
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.0",
