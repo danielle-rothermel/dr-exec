@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from dr_store import MemoryBackend, ObjectStore, RecordCache
 from support.executor import (
+    cache_scope_identity_document,
+    completion_for,
     fake_completion,
     job_for,
     python_target,
@@ -29,6 +32,7 @@ from dr_exec import (
     RecordReceiptKind,
     TrustedCommandTarget,
 )
+from dr_exec.capabilities import CachedRecordReceipt, CachingExecutor
 
 if TYPE_CHECKING:
     from dr_exec.capabilities.protocols import Executor
@@ -58,6 +62,14 @@ def build_fake_executor(_root: Path, /) -> FakeExecutor:
     )
 
 
+def build_caching_fake_executor(root: Path, /) -> CachingExecutor:
+    return CachingExecutor(
+        build_fake_executor(root),
+        cache=RecordCache(ObjectStore(MemoryBackend())),
+        cache_scope_identity=cache_scope_identity_document(),
+    )
+
+
 EXECUTOR_IMPLEMENTATIONS = [
     pytest.param(
         "process",
@@ -70,6 +82,7 @@ EXECUTOR_IMPLEMENTATIONS = [
         id="process",
     ),
     pytest.param("fake", id="fake"),
+    pytest.param("caching-fake", id="caching-fake"),
 ]
 
 
@@ -79,6 +92,8 @@ def executor(request: pytest.FixtureRequest, tmp_path: Path) -> Executor:
         runtime = request.getfixturevalue("host_runtime")
         assert isinstance(runtime, IsolatedHostPythonRuntime)
         return build_process_executor(tmp_path, runtime)
+    if request.param == "caching-fake":
+        return build_caching_fake_executor(tmp_path)
     return build_fake_executor(tmp_path)
 
 
@@ -218,12 +233,39 @@ def test_every_executor_accepts_the_same_supported_declarations(
     executor.run(declaration())
 
 
+@pytest.mark.parametrize("declaration", VALID_DECLARATIONS)
+def test_caching_executor_preserves_supported_declarations_on_a_warm_hit(
+    declaration: Callable[[], ExecutionJob],
+) -> None:
+    inner = FakeExecutor(
+        responder=lambda job, _cancellation: completion_for(job.job_id)
+    )
+    executor = CachingExecutor(
+        inner,
+        cache=RecordCache(ObjectStore(MemoryBackend())),
+        cache_scope_identity=cache_scope_identity_document(),
+    )
+    source_job = declaration()
+    requested_job = declaration()
+
+    source = executor.run(source_job)
+    replayed = executor.run(requested_job)
+
+    assert inner.calls == (source_job,)
+    assert replayed.result == source.result
+    assert isinstance(replayed.record_receipt, CachedRecordReceipt)
+    assert replayed.record_receipt.requested_job_id == requested_job.job_id
+    assert replayed.record_receipt.source_execution_id == (
+        source.result.execution_id
+    )
+
+
 def test_each_executor_enforces_its_own_receipt_kind(
     executor: Executor,
 ) -> None:
     receipt = executor.run(valid_absolute_command()).record_receipt
 
-    if isinstance(executor, FakeExecutor):
+    if isinstance(executor, (CachingExecutor, FakeExecutor)):
         assert isinstance(receipt, FakeRecordReceipt)
         assert receipt.kind is RecordReceiptKind.NOT_APPLICABLE
     else:

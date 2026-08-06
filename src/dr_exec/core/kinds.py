@@ -92,6 +92,7 @@ class RecordReceiptKind(StrEnum):
     COMPLETE = "complete"
     DEGRADED = "degraded"
     NOT_APPLICABLE = "not_applicable"
+    CACHED = "cached"
 
 
 @verify(UNIQUE)

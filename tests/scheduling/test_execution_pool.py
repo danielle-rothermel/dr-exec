@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import AsyncIterator, Generator, Iterable, Iterator
+from collections.abc import (
+    AsyncIterator,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from typing import TYPE_CHECKING
 
 import pytest
@@ -76,16 +82,28 @@ def batch_of(
 
 class RecordingSource:
     def __init__(
-        self, submissions: Iterable[ExecutionSubmission[int]], /
+        self,
+        submissions: Iterable[ExecutionSubmission[int]],
+        /,
+        *,
+        pull_gates: Mapping[int, threading.Event] | None = None,
     ) -> None:
         self._items = list(submissions)
         self.pulled = 0
         self._pull_events = [threading.Event() for _ in self._items]
+        self._pull_gates = {} if pull_gates is None else dict(pull_gates)
 
     async def __aiter__(self) -> AsyncIterator[ExecutionSubmission[int]]:
         for index, item in enumerate(self._items):
             self.pulled += 1
             self._pull_events[index].set()
+            pull_number = index + 1
+            if gate := self._pull_gates.get(pull_number):
+                await asyncio.to_thread(
+                    wait_for,
+                    gate,
+                    what=f"source pull {pull_number} to yield",
+                )
             yield item
 
     def await_pulled(self, count: int, /) -> None:
@@ -95,12 +113,18 @@ class RecordingSource:
         )
 
 
-def recording_source(batch: list[ExecutionJob], /) -> RecordingSource:
+def recording_source(
+    batch: list[ExecutionJob],
+    /,
+    *,
+    pull_gates: Mapping[int, threading.Event] | None = None,
+) -> RecordingSource:
     return RecordingSource(
         [
             ExecutionSubmission(job=job, context=index)
             for index, job in enumerate(batch)
-        ]
+        ],
+        pull_gates=pull_gates,
     )
 
 
@@ -265,7 +289,8 @@ def test_intake_advances_only_while_the_resident_bound_has_room() -> None:
 def test_a_stalled_consumer_stops_the_source_advancing() -> None:
     executor, responder = gated_executor()
     batch = jobs(6)
-    source = recording_source(batch)
+    third_may_yield = threading.Event()
+    source = recording_source(batch, pull_gates={3: third_may_yield})
     pool = fixed_pool(executor, 2)
     stalled = threading.Event()
     resume = threading.Event()
@@ -288,14 +313,13 @@ def test_a_stalled_consumer_stops_the_source_advancing() -> None:
     wait_for(stalled, what="the consumer to stall holding two completions")
     source.await_pulled(3)
 
-    # The explicit third-pull event proves that the one refill started before
-    # the consumer stalled. A fourth pull would require another delivered
-    # completion, which the stalled consumer has not requested.
-    assert source.pulled == 3
-
-    resume.set()
-    responder.release_all(batch)
-    join(streamer)
+    try:
+        assert source.pulled == 3
+    finally:
+        third_may_yield.set()
+        resume.set()
+        responder.release_all(batch)
+        join(streamer)
 
     assert sorted(collected) == list(range(len(batch)))
     assert source.pulled == len(batch)
@@ -1083,21 +1107,20 @@ def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
             assert scheduler is not None
             scheduler._notify_change = None
             try:
-                await asyncio.to_thread(
-                    responder.release_successes, first.job_id, second.job_id
-                )
-                await asyncio.to_thread(
-                    _await_scheduler_publication,
+                # Hold the owning loop while worker-thread gates advance so
+                # the consumer cannot take the completions being buffered.
+                responder.release_successes(first.job_id, second.job_id)
+                _await_scheduler_publication(
                     scheduler,
                     first.job_id,
                     second.job_id,
                 )
-                await asyncio.to_thread(responder.break_the_pool)
-                await asyncio.to_thread(_await_scheduler_break, scheduler)
+                responder.break_the_pool()
+                _await_scheduler_break(scheduler)
             finally:
                 scheduler._notify_change = pool._notify_scheduler_change
                 pool._wake_streams()
-            may_proceed.set()
+                may_proceed.set()
             await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
 
     with pytest.raises(ExecutorFailure, match="the execution pool broke") as e:

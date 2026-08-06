@@ -30,19 +30,50 @@ does not verify interpreter, standard-library, or package bytes.
 - **[Scheduling](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/scheduling)**
   runs finite batches and asynchronous streams through a shared capacity bound
   with completion-order delivery and intake backpressure.
-- **Infra**
-  - **[Core](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/core)**
-    supplies shared names, enums, cancellation, errors, identity helpers, and
-    contract-model foundations.
-  - **[Runtime](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/runtime)**
-    prepares isolated Python invocations and protects structured protocol
-    messages from payload output.
-  - **[Capabilities](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/capabilities)**
-    defines the executor, runtime, and run-store boundaries together with the
-    library-owned fake executor.
+- **[Capabilities](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/capabilities)**
+  supplies the executor, runtime, and run-store boundaries together with the
+  library-owned fake and caller-scoped caching executors.
+- **[Runtime](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/runtime)**
+  prepares isolated Python invocations and protects structured protocol
+  messages from payload output.
+- **[Core](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/core)**
+  supplies shared names, enums, cancellation, errors, identity helpers, and
+  contract-model foundations.
 
 The abbreviated signatures below show the durable public contract shapes;
 `...` marks validation and implementation detail intentionally left out.
+
+## Core
+
+Core owns the nominal identities and closed enums shared across functional
+areas. Their types keep job, attempt, outcome, receipt, and protocol concepts
+distinct at both Python and serialization boundaries.
+
+```python
+JobId = NewType("JobId", CanonicalUuid)
+AttemptId = NewType("AttemptId", CanonicalUuid)
+
+
+class ExecutionId(ContractModel):
+    job_id: JobId
+    attempt_id: AttemptId
+```
+
+```python
+@verify(UNIQUE)
+class RecordReceiptKind(StrEnum):
+    COMPLETE = "complete"
+    DEGRADED = "degraded"
+    NOT_APPLICABLE = "not_applicable"
+    CACHED = "cached"
+
+
+class CancelToken:
+    def cancel(self) -> None: ...
+
+    @property
+    def cancelled(self) -> bool: ...
+```
 
 ## Declarations
 
@@ -116,6 +147,37 @@ V1 accepts finite workload limits only for wall time, input bytes, and
 aggregate captured payload output. Memory, CPU time, process count, file size,
 open-file count, and disk limits must remain explicitly unbudgeted.
 
+## Runtime
+
+The runtime boundary turns an untrusted Python target into an invocation and a
+recorded runtime description. The v1 implementation resolves and probes a host
+interpreter, then invokes it with isolated Python startup controls.
+
+```python
+class Runtime(Protocol):
+    def prepare(
+        self,
+        target: UntrustedPythonTarget,
+        /,
+    ) -> PreparedPythonProcess: ...
+
+    def describe(self) -> RuntimeRecord: ...
+```
+
+```python
+@dataclass(frozen=True, slots=True)
+class IsolatedHostPythonRuntime:
+    executable: Path
+
+    def prepare(
+        self,
+        target: UntrustedPythonTarget,
+        /,
+    ) -> PreparedPythonProcess: ...
+
+    def describe(self) -> RuntimeRecord: ...
+```
+
 ## Execution
 
 All execution crosses the same small capability boundary. Production uses
@@ -169,8 +231,8 @@ class ProcessExecutor:
 ## Recording
 
 Per-job outcomes are closed typed data rather than raw process status or
-synthetic return codes. Each completed execution also identifies whether
-durable recording completed, degraded, or was not applicable.
+synthetic return codes. Each completed execution also carries a receipt for a
+complete or degraded durable record, a fake result, or a cached replay.
 
 ```python
 class OutcomeKind(StrEnum):
@@ -208,6 +270,16 @@ class ExecutionResult(ContractModel):
 class CompletedExecution(ContractModel):
     result: ExecutionResult
     record_receipt: RecordReceipt
+```
+
+```python
+type RecordReceipt = Annotated[
+    CompleteRecordReceipt
+    | DegradedRecordReceipt
+    | FakeRecordReceipt
+    | CachedRecordReceipt,
+    Field(discriminator="kind"),
+]
 ```
 
 The store boundary makes the durable lifecycle explicit: a run is prepared,
@@ -292,6 +364,56 @@ class ExecutionPool:
     async def drain(self) -> None: ...
 
     async def abort(self) -> None: ...
+```
+
+## Capabilities
+
+Consumers can program against the small `Executor`, `Runtime`, and `RunStore`
+Protocols while selecting concrete implementations separately. The optional
+caching wrapper replays eligible results within a caller-owned scope; the
+selected cache backend defines how long entries persist. Replayed results retain
+their source execution identity, while the receipt identifies the current job.
+An already-cancelled call bypasses replay and remains the inner executor's
+responsibility.
+
+```python
+class FakeExecutor:
+    def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution: ...
+```
+
+```python
+class CachingExecutor:
+    def __init__(
+        self,
+        inner: Executor,
+        /,
+        *,
+        cache: RecordCache,
+        cache_scope_identity: IdentityDocument,
+        cache_budget_exceeded: bool = False,
+    ) -> None: ...
+
+    def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution: ...
+```
+
+```python
+class CachedRecordReceipt(ContractModel):
+    kind: Literal[RecordReceiptKind.CACHED] = ...
+    requested_job_id: JobId
+    source_execution_id: ExecutionId
+    cache_key: str
 ```
 
 ## Development
