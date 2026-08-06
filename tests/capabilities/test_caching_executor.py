@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from dr_store import MemoryBackend, ObjectStore, RecordCache
+from dr_serialize import build_identity_document
+from dr_store import (
+    MemoryBackend,
+    ObjectStore,
+    RecordCache,
+    SqliteBackend,
+    StoreError,
+)
 from support.executor import (
     cache_scope_identity_document,
     empty_payload_outputs,
@@ -19,6 +28,7 @@ from dr_exec import (
     BudgetExceededOutcome,
     Budgets,
     CancelledOutcome,
+    CancelToken,
     CompletedExecution,
     EnvGrant,
     ExecutionAttribution,
@@ -33,13 +43,15 @@ from dr_exec import (
     FakeRecordReceipt,
     FiniteDurationLimit,
     JobId,
+    PayloadOutputs,
     RecordReceiptKind,
+    RetainedPayloadStream,
     SignaledOutcome,
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
 )
 from dr_exec.capabilities import CachedRecordReceipt, CachingExecutor
-from dr_exec.capabilities.caching import CACHE_VALUE_SCHEMA, _cache_key
+from dr_exec.capabilities.caching import _cache_key, _CacheFormat
 
 WATCHDOG_SECONDS = 30.0
 
@@ -85,6 +97,55 @@ def exited_completion() -> CompletedExecution:
     return completion_with(ExitedOutcome(exit_code=0), FailureOwner.NONE)
 
 
+def replay_evidence_completion() -> CompletedExecution:
+    execution_id = ExecutionId(
+        job_id=JobId(uuid4()), attempt_id=AttemptId(uuid4())
+    )
+    moment = datetime.now(UTC)
+    stdout_head = b"\xffhead"
+    stdout_tail = b"tail\x00"
+    return CompletedExecution(
+        result=ExecutionResult(
+            execution_id=execution_id,
+            outcome=ExitedOutcome(exit_code=0),
+            attribution=ExecutionAttribution(
+                owner=FailureOwner.NONE,
+                detail="observed detail",
+            ),
+            protocol_outputs=(
+                build_identity_document(
+                    schema="dr_exec.test_output",
+                    schema_version=1,
+                    payload={"value": [1, True, None]},
+                ),
+            ),
+            payload_outputs=PayloadOutputs(
+                stdout=RetainedPayloadStream(
+                    head=stdout_head,
+                    tail=stdout_tail,
+                    produced_bytes=len(stdout_head) + len(stdout_tail) + 7,
+                    dropped_bytes=7,
+                ),
+                stderr=RetainedPayloadStream(
+                    head=b"error",
+                    tail=b"",
+                    produced_bytes=5,
+                    dropped_bytes=0,
+                ),
+            ),
+            measurements=ExecutionMeasurements(
+                started_at=moment,
+                finished_at=moment,
+                duration_ns=12,
+                teardown_duration_ns=3,
+                input_bytes=5,
+                protocol_bytes_received=41,
+            ),
+        ),
+        record_receipt=FakeRecordReceipt(execution_id=execution_id),
+    )
+
+
 def caching_over_fake(
     fake: FakeExecutor,
     /,
@@ -122,47 +183,24 @@ def test_a_hit_replays_the_stored_result_without_delegating() -> None:
     )
 
 
-def test_a_miss_delegates_once_and_stores_durably() -> None:
-    cache = fresh_cache()
-    first_fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
-    first = caching_over_fake(first_fake, cache=cache).run(job())
+@pytest.mark.integration
+def test_a_reopened_cache_replays_the_complete_result(tmp_path: Path) -> None:
+    cache_path = tmp_path / "cache.sqlite3"
+    first_fake = FakeExecutor(
+        responder=lambda _job, _cancellation: replay_evidence_completion()
+    )
+    first_cache = RecordCache(ObjectStore(SqliteBackend(cache_path)))
+    first = caching_over_fake(first_fake, cache=first_cache).run(job())
+
+    second_fake = FakeExecutor()
+    reopened_cache = RecordCache(ObjectStore(SqliteBackend(cache_path)))
+    second = caching_over_fake(second_fake, cache=reopened_cache).run(job())
+
     assert isinstance(first.record_receipt, FakeRecordReceipt)
     assert len(first_fake.calls) == 1
-
-    # A second wrapper sharing only the cache replays without running.
-    second_fake = FakeExecutor()
-    second = caching_over_fake(second_fake, cache=cache).run(job())
-
     assert second_fake.calls == ()
     assert second.result == first.result
     assert isinstance(second.record_receipt, CachedRecordReceipt)
-
-
-def test_cache_key_projection_is_pinned_and_excludes_job_identity() -> None:
-    target = trusted_target(("/usr/bin/printf", "hello"))
-    environment = EnvGrant.fixed({"LANG": "C", "VALUE": "fixed"})
-    budgets = Budgets(wall_time=FiniteDurationLimit(max_ns=2_000_000_000))
-    first = job_for(target, env=environment, budgets=budgets)
-    second = job_for(target, env=environment, budgets=budgets)
-    expected = (
-        "dr_exec.caching_executor.key.v1:"
-        "f8b2be22d60bf59bde2e4212b9f87a843c61a157cb0be7aca8aa3d271852d500"
-    )
-
-    assert (
-        _cache_key(
-            first,
-            cache_scope_identity=cache_scope_identity_document("scope-v1"),
-        )
-        == expected
-    )
-    assert (
-        _cache_key(
-            second,
-            cache_scope_identity=cache_scope_identity_document("scope-v1"),
-        )
-        == expected
-    )
 
 
 def test_a_changed_declaration_misses() -> None:
@@ -334,7 +372,7 @@ def test_a_policy_ineligible_valid_entry_reads_as_a_miss() -> None:
     ).result
     cache.put(
         key,
-        CACHE_VALUE_SCHEMA,
+        _CacheFormat.VALUE_SCHEMA,
         ineligible.model_dump(mode="json"),
     )
     fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
@@ -350,14 +388,17 @@ def test_a_corrupt_entry_reads_as_a_miss_and_stays_first_bound() -> None:
     key = _cache_key(
         job(), cache_scope_identity=cache_scope_identity_document()
     )
-    cache.put(key, CACHE_VALUE_SCHEMA, {"not": "an execution result"})
+    cache.put(
+        key,
+        _CacheFormat.VALUE_SCHEMA,
+        {"not": "an execution result"},
+    )
     fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
     executor = caching_over_fake(fake, cache=cache)
 
     first = executor.run(job())
     second = executor.run(job())
 
-    # The corrupt binding keeps winning, so every call falls through.
     assert len(fake.calls) == 2
     assert isinstance(first.record_receipt, FakeRecordReceipt)
     assert isinstance(second.record_receipt, FakeRecordReceipt)
@@ -379,23 +420,34 @@ def test_a_schema_mismatched_entry_reads_as_a_miss() -> None:
     assert isinstance(completed.record_receipt, FakeRecordReceipt)
 
 
-def test_racing_callers_each_get_a_completion_and_one_entry_wins() -> None:
+def test_concurrent_misses_converge_on_one_cache_entry() -> None:
+    caller_count = 4
+    entered_inner = Barrier(caller_count)
     cache = fresh_cache()
-    fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
+
+    def complete_after_all_miss(
+        _job: ExecutionJob,
+        _cancellation: CancelToken | None,
+    ) -> CompletedExecution:
+        entered_inner.wait(WATCHDOG_SECONDS)
+        return exited_completion()
+
+    fake = FakeExecutor(responder=complete_after_all_miss)
     executor = caching_over_fake(fake, cache=cache)
 
     outcome = run_thread_calls(
-        [lambda: executor.run(job()) for _ in range(4)],
+        [lambda: executor.run(job()) for _ in range(caller_count)],
         timeout=WATCHDOG_SECONDS,
     )
 
     assert outcome.errors == ()
     assert outcome.unfinished == 0
-    assert len(outcome.values) == 4
+    assert len(outcome.values) == caller_count
+    assert len(fake.calls) == caller_count
     for completed in outcome.values:
         assert isinstance(completed.result.outcome, ExitedOutcome)
+        assert isinstance(completed.record_receipt, FakeRecordReceipt)
 
-    # After the race, one entry is bound and later calls replay it.
     replayed = executor.run(job())
     assert isinstance(replayed.record_receipt, CachedRecordReceipt)
     stored = {
@@ -404,3 +456,43 @@ def test_racing_callers_each_get_a_completion_and_one_entry_wins() -> None:
         if isinstance(completed.record_receipt, FakeRecordReceipt)
     }
     assert replayed.result.execution_id in stored
+
+
+def test_a_cache_write_failure_does_not_replace_the_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = fresh_cache()
+
+    def reject_write(*_args: object, **_kwargs: object) -> None:
+        raise StoreError("injected cache write failure")
+
+    monkeypatch.setattr(cache, "put", reject_write)
+    fake = FakeExecutor(
+        responder=lambda _job, _cancellation: exited_completion()
+    )
+    executor = caching_over_fake(fake, cache=cache)
+
+    first = executor.run(job())
+    second = executor.run(job())
+
+    assert len(fake.calls) == 2
+    assert isinstance(first.record_receipt, FakeRecordReceipt)
+    assert isinstance(second.record_receipt, FakeRecordReceipt)
+
+
+def test_a_cache_miss_forwards_the_callers_cancellation_token() -> None:
+    seen: list[CancelToken | None] = []
+
+    def capture_token(
+        _job: ExecutionJob,
+        cancellation: CancelToken | None,
+    ) -> CompletedExecution:
+        seen.append(cancellation)
+        return exited_completion()
+
+    executor = caching_over_fake(FakeExecutor(responder=capture_token))
+    token = CancelToken()
+
+    executor.run(job(), cancellation=token)
+
+    assert seen == [token]

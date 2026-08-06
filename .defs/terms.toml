@@ -153,11 +153,12 @@ exported_symbols = [
 [[terms]]
 name = "cached completion"
 definition = """
-A completed execution replayed from a durable cache entry keyed by the \
+A completed execution replayed from a stored cache entry keyed by the \
 execution target, environment grant, workload budgets, cache policy, and an \
 opaque caller-owned cache scope. Its distinct receipt identifies both the \
 current requested job and the source execution whose result is replayed. The \
-cache scope partitions entries but does not prove executor or runtime state."""
+cache scope partitions entries but does not prove executor or runtime state; \
+entry persistence is defined by the selected cache backend."""
 exported_symbols = [
   "dr_exec.capabilities.CachedRecordReceipt",
   "dr_exec.capabilities.CachingExecutor",

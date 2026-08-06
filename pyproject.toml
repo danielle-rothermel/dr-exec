@@ -1,6 +1,6 @@
 [project]
 name = "dr-exec"
-version = "0.1.2"
+version = "0.1.3"
 description = "Contract-driven local process execution"
 readme = "README.md"
 license = "MIT"

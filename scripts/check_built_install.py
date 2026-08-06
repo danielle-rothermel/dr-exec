@@ -4,6 +4,7 @@ from pathlib import Path
 from sys import argv
 
 import dr_exec
+from dr_exec.capabilities import CachedRecordReceipt, CachingExecutor
 
 EXPECTED_ROOT_EXPORT_COUNT = 108
 
@@ -29,9 +30,10 @@ def main() -> None:
     if missing_exports:
         raise ValueError(f"missing root exports: {missing_exports!r}")
 
+    capability_exports = (CachedRecordReceipt, CachingExecutor)
     print(
         f"Validated {len(exports)} root exports from installed wheel at "
-        f"{package_file}."
+        f"{package_file}, plus {len(capability_exports)} capability exports."
     )
 
 

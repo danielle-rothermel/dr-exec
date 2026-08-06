@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-05
+
+### Added
+
+- Added caller-scoped execution-result caching through `CachingExecutor`, with
+  explicit outcome eligibility and backend-owned persistence.
+- Added cached receipts that distinguish the requested job from the source
+  execution whose result is replayed.
+
+### Changed
+
+- Updated `dr-store` to 0.1.3 for the record-cache capability.
+
 ## [0.1.2] - 2026-08-05
 
 ### Changed

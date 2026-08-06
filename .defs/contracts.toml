@@ -189,12 +189,13 @@ or ambient inputs change and uses caching only for jobs it treats as \
 deterministic within the scope. The scope does not prove the inner executor's \
 runtime or implementation. The executor stores exited outcomes, stores \
 budget-exceeded outcomes only behind an explicit opt-in, and neither stores nor \
-replays retriable-class outcomes. A hit returns the source result under a \
-distinct receipt identifying the requested job, source execution, and cache \
-entry. Missing, mismatched, corrupt, or otherwise unverifiable records are \
-misses. Operational backend failures may propagate from reads or writes, and a \
-conflicting write keeps the first stored entry. There is no TTL, eviction, or \
-delete; invalidation is by key and schema versioning only."""
+replays executor- or machine-attributed outcomes. A hit returns the source \
+result under a distinct receipt identifying the requested job, source \
+execution, and cache entry. Missing, mismatched, corrupt, or otherwise \
+unverifiable records are misses. Operational backend failures may propagate \
+from reads or writes, and a conflicting write keeps the first stored entry. \
+There is no TTL, eviction, or delete; invalidation is by key and schema \
+versioning only. Entry persistence is defined by the selected cache backend."""
 rationale = """
 Explicit job inputs prevent known cross-declaration aliasing, while caller-owned \
 scope makes the remaining determinism assumption visible without claiming that \

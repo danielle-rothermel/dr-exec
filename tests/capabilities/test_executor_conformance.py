@@ -265,12 +265,7 @@ def test_each_executor_enforces_its_own_receipt_kind(
 ) -> None:
     receipt = executor.run(valid_absolute_command()).record_receipt
 
-    if isinstance(executor, CachingExecutor):
-        # A fresh cache misses, so the wrapper passes the inner fake
-        # receipt through unchanged.
-        assert isinstance(receipt, FakeRecordReceipt)
-        assert receipt.kind is RecordReceiptKind.NOT_APPLICABLE
-    elif isinstance(executor, FakeExecutor):
+    if isinstance(executor, (CachingExecutor, FakeExecutor)):
         assert isinstance(receipt, FakeRecordReceipt)
         assert receipt.kind is RecordReceiptKind.NOT_APPLICABLE
     else:

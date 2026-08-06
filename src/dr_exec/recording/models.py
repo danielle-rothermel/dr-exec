@@ -397,13 +397,7 @@ class FakeRecordReceipt(ContractModel):
 
 
 class CachedRecordReceipt(ContractModel):
-    """Receipt for a completion replayed from a cache entry.
-
-    ``requested_job_id`` identifies the call served by the replay, while
-    ``source_execution_id`` identifies the prior attempt whose result is
-    returned. The receipt claims no record directory: no process ran and
-    nothing durable was written by the replaying call.
-    """
+    """Identify the request and source execution of a cache replay."""
 
     kind: Literal[RecordReceiptKind.CACHED] = RecordReceiptKind.CACHED
     requested_job_id: JobId

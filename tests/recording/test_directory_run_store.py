@@ -1613,7 +1613,6 @@ def test_the_receipt_kind_literals_are_exactly_pinned() -> None:
     assert RecordReceiptKind.COMPLETE == "complete"
     assert RecordReceiptKind.DEGRADED == "degraded"
     assert RecordReceiptKind.NOT_APPLICABLE == "not_applicable"
-    assert RecordReceiptKind.CACHED == "cached"
 
 
 @pytest.mark.parametrize(

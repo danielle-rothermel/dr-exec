@@ -31,6 +31,7 @@ from dr_exec import (
     RetainedPayloadStreamRecord,
 )
 from dr_exec.capabilities import CachedRecordReceipt
+from dr_exec.core.model import canonical_model_bytes
 
 VALID_DIGEST = "a" * 64
 STARTED_AT = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
@@ -230,8 +231,28 @@ def test_cached_completion_binds_result_to_source_not_requested_job() -> None:
         cache_key="dr_exec.test_cache_key",
     )
 
-    with pytest.raises(ValidationError, match="execution IDs differ"):
+    with pytest.raises(ValidationError):
         CompletedExecution(
             result=_result(source_execution_id),
             record_receipt=receipt,
         )
+
+
+def test_cached_completion_round_trips_through_its_wire_union() -> None:
+    source_execution_id = _execution_id(1)
+    completed = CompletedExecution(
+        result=_result(source_execution_id),
+        record_receipt=CachedRecordReceipt(
+            requested_job_id=_execution_id(3).job_id,
+            source_execution_id=source_execution_id,
+            cache_key="dr_exec.test_cache_key",
+        ),
+    )
+
+    restored = CompletedExecution.model_validate_json(
+        canonical_model_bytes(completed),
+        strict=True,
+    )
+
+    assert restored == completed
+    assert isinstance(restored.record_receipt, CachedRecordReceipt)

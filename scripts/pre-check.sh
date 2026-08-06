@@ -53,6 +53,16 @@ trap on_exit EXIT
 
 cd -- "${repository_root}"
 
+if [[ "$#" -gt 1 ]]; then
+    printf 'Usage: %s [dist]\n' "$0" >&2
+    exit 2
+fi
+publish_artifacts="${1:-}"
+if [[ -n "${publish_artifacts}" && "${publish_artifacts}" != "dist" ]]; then
+    printf 'Usage: %s [dist]\n' "$0" >&2
+    exit 2
+fi
+
 uv sync --locked --no-sources
 uv run ruff format --check .
 uv run ruff check .
@@ -80,9 +90,18 @@ if [[ "$(dirname -- "${temporary_root}")" != "${temporary_parent}" \
     exit 1
 fi
 
-artifact_directory="${temporary_root}/dist"
 requirements_file="${temporary_root}/requirements.txt"
 wheel_environment="${temporary_root}/wheel-environment"
+if [[ -z "${publish_artifacts}" ]]; then
+    artifact_directory="${temporary_root}/dist"
+else
+    artifact_directory="${repository_root}/dist"
+    if [[ -e "${artifact_directory}" || -L "${artifact_directory}" ]]; then
+        printf 'Refusing to overwrite existing artifact path: %s\n' \
+            "${artifact_directory}" >&2
+        exit 1
+    fi
+fi
 mkdir -- "${artifact_directory}"
 uv build --out-dir "${artifact_directory}"
 uv run python scripts/check_distribution.py "${artifact_directory}"

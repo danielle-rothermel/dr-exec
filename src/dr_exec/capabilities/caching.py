@@ -1,7 +1,6 @@
-"""Caller-scoped durable replay of execution outcomes."""
-
 from __future__ import annotations
 
+from enum import UNIQUE, StrEnum, verify
 from typing import Literal, cast
 
 from dr_serialize import (
@@ -34,14 +33,20 @@ from dr_exec.recording.models import (
     ExitedOutcome,
 )
 
-# Changing what the key covers is a namespace and payload-version bump:
-# old entries stop being addressable instead of being reinterpreted.
-CACHE_KEY_NAMESPACE = "dr_exec.caching_executor.key.v1"
-CACHE_VALUE_SCHEMA = "dr_exec.caching_executor.execution_result.v1"
 
-# Attributions dr-exec treats as the retriable class: caching either
-# would make a transient or unexplained fault permanent.
-_RETRIABLE_OWNERS = frozenset({FailureOwner.EXECUTOR, FailureOwner.MACHINE})
+@verify(UNIQUE)
+class _CacheFormat(StrEnum):
+    # Bump a value when its corresponding shape changes. Members are named
+    # contract constants, never an iterable payload source.
+    KEY_NAMESPACE = "dr_exec.caching_executor.key.v1"
+    VALUE_SCHEMA = "dr_exec.caching_executor.execution_result.v1"
+
+
+# Reusing infrastructure-attributed results could preserve a transient or
+# unexplained failure beyond the conditions that produced it.
+_NON_CACHEABLE_OWNERS = frozenset(
+    {FailureOwner.EXECUTOR, FailureOwner.MACHINE}
+)
 
 
 class _CacheKeyPayload(ContractModel):
@@ -54,7 +59,7 @@ class _CacheKeyPayload(ContractModel):
 
 
 class CachingExecutor:
-    """Executor wrapper replaying stored completions for repeat runs.
+    """Replay deterministic completions within a caller-owned cache scope.
 
     The key covers the target declaration, environment grant, workload
     budgets, cache policy, and a caller-owned cache-scope identity. The
@@ -63,13 +68,10 @@ class CachingExecutor:
     this wrapper only when results are deterministic within that scope.
     The scope does not prove what runtime or executor the inner uses.
 
-    Only exited outcomes are stored. Budget-exceeded outcomes are stored
-    only behind ``cache_budget_exceeded``, and retriable-class
-    attributions are never stored or replayed. Missing, mismatched,
-    corrupt, and otherwise unverifiable records are misses. Operational
-    backend failures may propagate. A binding conflict keeps the first
-    stored entry. There is no TTL, eviction, or delete: invalidation is
-    by key-namespace and value-schema versioning only.
+    Exited outcomes are stored; budget-exceeded outcomes require an opt-in;
+    executor- and machine-attributed outcomes are excluded. Persistence is
+    whatever the injected cache backend provides. Missing or unverifiable
+    records are misses, and operational backend failures may propagate.
     """
 
     def __init__(
@@ -100,7 +102,7 @@ class CachingExecutor:
             cache_budget_exceeded=self._cache_budget_exceeded,
         )
         replayed = _replayed_result(
-            self._cache.get(key, schema=CACHE_VALUE_SCHEMA)
+            self._cache.get(key, schema=_CacheFormat.VALUE_SCHEMA)
         )
         if replayed is not None and _is_cacheable(
             replayed,
@@ -122,7 +124,7 @@ class CachingExecutor:
     def _store(self, key: str, result: ExecutionResult, /) -> None:
         record = cast("Jsonable", result.model_dump(mode="json"))
         try:
-            self._cache.put(key, CACHE_VALUE_SCHEMA, record)
+            self._cache.put(key, _CacheFormat.VALUE_SCHEMA, record)
         except StoreError:
             # Recognized store failures are non-fatal. Backend-specific
             # operational exceptions may propagate.
@@ -146,14 +148,13 @@ def _cache_key(
         cache_budget_exceeded=cache_budget_exceeded,
     )
     projection = cast("Jsonable", payload.model_dump(mode="json"))
-    return derive_cache_key(CACHE_KEY_NAMESPACE, projection)
+    return derive_cache_key(_CacheFormat.KEY_NAMESPACE, projection)
 
 
 def _replayed_result(
     hit: CacheHit | None,
     /,
 ) -> ExecutionResult | None:
-    """Parse a stored result, or miss on an unverifiable record."""
     if hit is None:
         return None
     try:
@@ -187,17 +188,17 @@ def _is_cacheable(
     *,
     cache_budget_exceeded: bool,
 ) -> bool:
-    if result.attribution.owner in _RETRIABLE_OWNERS:
+    if result.attribution.owner in _NON_CACHEABLE_OWNERS:
         return False
     match result.outcome:
         case ExitedOutcome():
             return True
         case BudgetExceededOutcome():
-            # Budget overflow is load-dependent: replaying one asserts
-            # something about the host, not about the payload.
+            # A budget outcome may depend on runtime conditions, so callers
+            # must opt in to treating it as repeatable within their scope.
             return cache_budget_exceeded
         case _:
             return False
 
 
-__all__ = ["CACHE_KEY_NAMESPACE", "CACHE_VALUE_SCHEMA", "CachingExecutor"]
+__all__ = ["CachingExecutor"]

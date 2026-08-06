@@ -109,7 +109,6 @@ def cache_scope_identity_document(
     scope: str = "default",
     /,
 ) -> IdentityDocument:
-    """An opaque caller-owned identity for cache-key tests."""
     return build_identity_document(
         schema="dr_exec.test_cache_scope",
         schema_version=1,
