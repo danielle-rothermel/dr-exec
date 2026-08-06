@@ -77,6 +77,9 @@ type ExecutionTarget = Annotated[
 ]
 ```
 
+Command executables are either absolute paths or separator-free names resolved
+only through an explicitly granted `PATH` whose entries are absolute.
+
 Environment access and resource limits are data carried by the job alongside
 the target, so the executor receives the complete declaration at one boundary.
 

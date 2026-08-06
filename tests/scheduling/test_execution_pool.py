@@ -31,6 +31,7 @@ from dr_exec.scheduling.scheduler import (
     SchedulerBroken,
     _AdmissionResult,
     _Admitted,
+    _Completion,
     _ExecutionScheduler,
 )
 
@@ -79,11 +80,19 @@ class RecordingSource:
     ) -> None:
         self._items = list(submissions)
         self.pulled = 0
+        self._pull_events = [threading.Event() for _ in self._items]
 
     async def __aiter__(self) -> AsyncIterator[ExecutionSubmission[int]]:
-        for item in self._items:
+        for index, item in enumerate(self._items):
             self.pulled += 1
+            self._pull_events[index].set()
             yield item
+
+    def await_pulled(self, count: int, /) -> None:
+        wait_for(
+            self._pull_events[count - 1],
+            what=f"the source to pull submission {count}",
+        )
 
 
 def recording_source(batch: list[ExecutionJob], /) -> RecordingSource:
@@ -277,10 +286,11 @@ def test_a_stalled_consumer_stops_the_source_advancing() -> None:
     responder.await_arrival_count(2)
     responder.release(batch[0].job_id, batch[1].job_id)
     wait_for(stalled, what="the consumer to stall holding two completions")
+    source.await_pulled(3)
 
-    # Reaching the stall is itself the evidence that the first refill
-    # happened; any further pull would require the loop to advance past
-    # the stalled body, which is exactly what backpressure prevents.
+    # The explicit third-pull event proves that the one refill started before
+    # the consumer stalled. A fourth pull would require another delivered
+    # completion, which the stalled consumer has not requested.
     assert source.pulled == 3
 
     resume.set()
@@ -289,6 +299,98 @@ def test_a_stalled_consumer_stops_the_source_advancing() -> None:
 
     assert sorted(collected) == list(range(len(batch)))
     assert source.pulled == len(batch)
+
+
+def test_a_source_can_wait_for_its_prior_completion_before_yielding_more() -> (
+    None
+):
+    batch = jobs(2)
+    first_delivered = asyncio.Event()
+    pool = fixed_pool(immediate_executor(), 2)
+    collected: list[int] = []
+
+    async def dependent_source() -> AsyncIterator[ExecutionSubmission[int]]:
+        yield ExecutionSubmission(job=batch[0], context=0)
+        await first_delivered.wait()
+        yield ExecutionSubmission(job=batch[1], context=1)
+
+    async def stream() -> None:
+        async with pool:
+            async for completion in pool.run_stream(dependent_source()):
+                collected.append(completion.context)
+                if completion.context == 0:
+                    first_delivered.set()
+
+    asyncio.run(asyncio.wait_for(stream(), WATCHDOG_SECONDS))
+
+    assert collected == [0, 1]
+
+
+def test_cancelling_a_waiting_stream_does_not_take_its_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waiter_entered = threading.Event()
+    blocking_waiter_entered = threading.Event()
+    blocking_waiter_returned = threading.Event()
+
+    class _ObservedScheduler(_ExecutionScheduler[object]):
+        def take_completion(self) -> _Completion[object] | None:
+            blocking_waiter_entered.set()
+            waiter_entered.set()
+            completion = super().take_completion()
+            blocking_waiter_returned.set()
+            return completion
+
+        def take_completion_nowait(self) -> _Completion[object] | None:
+            completion = super().take_completion_nowait()
+            if completion is None and self.has_residents():
+                waiter_entered.set()
+            return completion
+
+    monkeypatch.setattr(
+        "dr_exec.scheduling.pool._ExecutionScheduler", _ObservedScheduler
+    )
+    executor, responder = gated_executor()
+    only = jobs(1)[0]
+    pool = fixed_pool(executor, 1)
+    collected: list[int] = []
+
+    async def cancel_then_recover() -> None:
+        async with pool:
+            abandoned = asyncio.create_task(
+                consume(pool.run_stream(submissions_of([only])))
+            )
+            await asyncio.to_thread(responder.await_arrival, only.job_id)
+            await asyncio.to_thread(
+                wait_for,
+                waiter_entered,
+                what="the stream to wait for its completion",
+            )
+            abandoned.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await abandoned
+
+            responder.release(only.job_id)
+            scheduler = pool._scheduler
+            assert scheduler is not None
+            if blocking_waiter_entered.is_set():
+                await asyncio.to_thread(
+                    wait_for,
+                    blocking_waiter_returned,
+                    what="the cancelled blocking waiter to return",
+                )
+            else:
+                await asyncio.to_thread(
+                    _await_scheduler_publication, scheduler, only.job_id
+                )
+
+            await _collect_contexts(
+                pool.run_stream(submissions_of([])), collected
+            )
+
+    asyncio.run(cancel_then_recover())
+
+    assert collected == [0]
 
 
 def test_capacity_is_reached_by_genuinely_overlapping_executor_calls() -> None:
@@ -325,6 +427,7 @@ def test_results_are_delivered_in_completion_order(
     batch = jobs(3)
     pool = fixed_pool(executor, 4)
     collected: list[int] = []
+    delivered = [threading.Event() for _ in batch]
 
     parked = threading.Event()
     may_finish_source = threading.Event()
@@ -343,17 +446,19 @@ def test_results_are_delivered_in_completion_order(
         async with pool:
             async for completion in pool.run_stream(parking_source()):
                 collected.append(completion.context)
+                delivered[completion.context].set()
 
     streamer = in_thread(lambda: asyncio.run(stream()))
 
     responder.await_arrival_count(3)
     wait_for(parked, what="the completion-order source to park")
-    scheduler = pool._scheduler
-    assert scheduler is not None
     for index in finish_order:
         responder.release(batch[index].job_id)
         responder.await_executor_returned(batch[index].job_id)
-        _await_scheduler_publication(scheduler, batch[index].job_id)
+        wait_for(
+            delivered[index],
+            what=f"completion {index} to reach the stream consumer",
+        )
 
     may_finish_source.set()
     join(streamer)
@@ -559,6 +664,82 @@ def test_drain_lets_admitted_work_finish_uncancelled() -> None:
     assert pool.state is ExecutionPoolState.CLOSED
 
 
+@pytest.mark.parametrize("close_kind", ["drain", "abort"])
+def test_cancelling_a_close_still_finishes_pool_cleanup(
+    close_kind: str,
+) -> None:
+    executor, responder = gated_executor(
+        cancellation_aware=close_kind == "abort"
+    )
+    only = jobs(1)[0]
+    pool = fixed_pool(executor, 1)
+
+    async def cancel_close() -> None:
+        await pool.__aenter__()
+        scheduler = pool._scheduler
+        assert scheduler is not None
+        assert scheduler.admit(only, None) is _AdmissionResult.ADMITTED
+        await asyncio.to_thread(responder.await_arrival, only.job_id)
+
+        close = pool.drain if close_kind == "drain" else pool.abort
+        closing = asyncio.create_task(close())
+        await asyncio.to_thread(_await_closed_intake, scheduler)
+        closing.cancel()
+        if close_kind == "drain":
+            responder.release(only.job_id)
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+
+    asyncio.run(cancel_close())
+
+    assert responder.executor_returned_gate(only.job_id).is_set()
+    responder.assert_no_watchers()
+    assert pool.state is ExecutionPoolState.CLOSED
+    assert pool._closed
+    assert pool._shutdown_complete
+
+
+def test_drain_preserves_completions_for_an_active_stream() -> None:
+    executor, responder = gated_executor()
+    batch = jobs(2)
+    pool = fixed_pool(executor, 2)
+    first_delivered = asyncio.Event()
+    resume = asyncio.Event()
+    collected: list[int] = []
+
+    async def collect_slowly() -> None:
+        async for completion in pool.run_stream(submissions_of(batch)):
+            collected.append(completion.context)
+            if len(collected) == 1:
+                first_delivered.set()
+                await resume.wait()
+
+    async def drain_around_the_stream() -> None:
+        async with pool:
+            consumer = asyncio.create_task(collect_slowly())
+            await asyncio.to_thread(responder.await_arrival_count, 2)
+            responder.release_all(batch)
+            await asyncio.wait_for(first_delivered.wait(), WATCHDOG_SECONDS)
+            scheduler = pool._scheduler
+            assert scheduler is not None
+            await asyncio.to_thread(
+                _await_ready_count,
+                scheduler,
+                1,
+            )
+
+            await pool.drain()
+            with scheduler._condition:
+                assert len(scheduler._ready) == 1
+            resume.set()
+            await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
+
+    asyncio.run(drain_around_the_stream())
+
+    assert sorted(collected) == [0, 1]
+    assert pool.state is ExecutionPoolState.CLOSED
+
+
 def test_exceptional_context_exit_preserves_the_error_and_awaits_abort() -> (
     None
 ):
@@ -757,6 +938,18 @@ def _await_scheduler_publication(
             )
 
 
+def _await_ready_count(
+    scheduler: _ExecutionScheduler[object], count: int, /
+) -> None:
+    with scheduler._condition:
+        if not scheduler._condition.wait_for(
+            lambda: len(scheduler._ready) == count, WATCHDOG_SECONDS
+        ):
+            raise AssertionError(
+                f"watchdog fired waiting for {count} buffered completions"
+            )
+
+
 def _await_scheduler_break[T](scheduler: _ExecutionScheduler[T], /) -> None:
     with scheduler._condition:
         if not scheduler._condition.wait_for(
@@ -888,17 +1081,22 @@ def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
             )
             scheduler = pool._scheduler
             assert scheduler is not None
-            await asyncio.to_thread(
-                responder.release_successes, first.job_id, second.job_id
-            )
-            await asyncio.to_thread(
-                _await_scheduler_publication,
-                scheduler,
-                first.job_id,
-                second.job_id,
-            )
-            await asyncio.to_thread(responder.break_the_pool)
-            await asyncio.to_thread(_await_scheduler_break, scheduler)
+            scheduler._notify_change = None
+            try:
+                await asyncio.to_thread(
+                    responder.release_successes, first.job_id, second.job_id
+                )
+                await asyncio.to_thread(
+                    _await_scheduler_publication,
+                    scheduler,
+                    first.job_id,
+                    second.job_id,
+                )
+                await asyncio.to_thread(responder.break_the_pool)
+                await asyncio.to_thread(_await_scheduler_break, scheduler)
+            finally:
+                scheduler._notify_change = pool._notify_scheduler_change
+                pool._wake_streams()
             may_proceed.set()
             await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
 
@@ -1106,7 +1304,9 @@ def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
     async def race_for_the_last_slot() -> None:
         async with pool:
             pool._scheduler = _PeakRecordingScheduler(
-                executor=immediate_executor(), capacity=capacity
+                executor=immediate_executor(),
+                capacity=capacity,
+                notify_change=pool._notify_scheduler_change,
             )
             streams = [
                 asyncio.create_task(

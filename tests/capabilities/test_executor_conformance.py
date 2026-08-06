@@ -94,6 +94,20 @@ def untrusted_relative_executable_without_granted_path() -> ExecutionJob:
     return job_for(untrusted_command_target(("dr-exec-test-relative",)))
 
 
+def relative_executable_with_separator() -> ExecutionJob:
+    return job_for(
+        trusted_target(("bin/dr-exec-test-relative",)),
+        env=EnvGrant.fixed({"PATH": "/usr/bin:/bin"}),
+    )
+
+
+def untrusted_relative_executable_with_separator() -> ExecutionJob:
+    return job_for(
+        untrusted_command_target(("bin/dr-exec-test-relative",)),
+        env=EnvGrant.fixed({"PATH": "/usr/bin:/bin"}),
+    )
+
+
 def relative_granted_path_entry() -> ExecutionJob:
     return job_for(
         trusted_target(("dr-exec-test-relative",)),
@@ -131,6 +145,14 @@ INVALID_DECLARATIONS = [
     pytest.param(
         untrusted_relative_executable_without_granted_path,
         id="untrusted-relative-no-path",
+    ),
+    pytest.param(
+        relative_executable_with_separator,
+        id="relative-with-separator",
+    ),
+    pytest.param(
+        untrusted_relative_executable_with_separator,
+        id="untrusted-relative-with-separator",
     ),
     pytest.param(
         relative_granted_path_entry, id="relative-granted-path-entry"

@@ -45,6 +45,11 @@ def validate_command_resolvability(
     name = argv[0]
     if Path(name).is_absolute():
         return
+    separators = (os.sep,) if os.altsep is None else (os.sep, os.altsep)
+    if any(separator in name for separator in separators):
+        raise DeclarationError(
+            "a relative executable must be a separator-free PATH name: " + name
+        )
     granted_path = environment.get("PATH")
     if granted_path is None:
         raise DeclarationError(

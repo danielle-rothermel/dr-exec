@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Generic, TypeVar, cast
@@ -97,6 +98,10 @@ class ExecutionPool:
     _closed: bool
     _scheduler: _ExecutionScheduler[object] | None
     _owning_loop: asyncio.AbstractEventLoop | None
+    _close_task: asyncio.Task[None] | None
+    _active_streams: int
+    _stream_wakeups: set[asyncio.Event]
+    _shutdown_complete: bool
 
     def __init__(
         self,
@@ -111,6 +116,10 @@ class ExecutionPool:
         self._closed = False
         self._scheduler = None
         self._owning_loop = None
+        self._close_task = None
+        self._active_streams = 0
+        self._stream_wakeups = set()
+        self._shutdown_complete = False
 
     @property
     def state(self) -> ExecutionPoolState:
@@ -131,11 +140,12 @@ class ExecutionPool:
             )
         capacity = _resolve_capacity(self._config.capacity)
         self._effective_capacity = capacity
+        self._owning_loop = asyncio.get_running_loop()
         self._scheduler = _ExecutionScheduler(
             executor=self._executor,
             capacity=capacity.max_active_jobs,
+            notify_change=self._notify_scheduler_change,
         )
-        self._owning_loop = asyncio.get_running_loop()
         self._state = ExecutionPoolState.RUNNING
         return self
 
@@ -176,48 +186,96 @@ class ExecutionPool:
         source = aiter(submissions)
         exhausted = False
         carried: ExecutionSubmission[ContextT] | None = None
+        source_pull: (
+            asyncio.Task[ExecutionSubmission[ContextT] | None] | None
+        ) = None
+        wakeup = asyncio.Event()
+        self._stream_wakeups.add(wakeup)
+        self._active_streams += 1
         try:
             while True:
-                while not exhausted and scheduler.can_admit():
-                    submission = (
-                        carried
-                        if carried is not None
-                        else await _next_submission(source)
-                    )
+                wakeup.clear()
+                if self._state is not ExecutionPoolState.RUNNING:
+                    exhausted = True
                     carried = None
-                    if submission is None:
-                        exhausted = True
-                        break
-                    match scheduler.admit(submission.job, submission.context):
-                        case _AdmissionResult.ADMITTED:
-                            pass
-                        case _AdmissionResult.INTAKE_CLOSED:
-                            # A close during source pull ends intake normally.
-                            exhausted = True
-                            break
-                        case _AdmissionResult.NO_ROOM:
-                            # Preserve a submission pulled during a slot race.
-                            carried = submission
-                            break
+                    await _cancel_source_pull(source_pull)
+                    source_pull = None
+
+                completion = scheduler.take_completion_nowait()
+                if completion is not None:
+                    if (
+                        not exhausted
+                        and carried is None
+                        and source_pull is None
+                        and scheduler.can_admit()
+                    ):
+                        source_pull = asyncio.create_task(
+                            _next_submission(source)
+                        )
+                    yield ExecutionCompletion(
+                        completed_execution=completion.completed_execution,
+                        context=cast("ContextT", completion.context),
+                    )
+                    continue
+
                 if (
                     exhausted
                     and carried is None
-                    and not await asyncio.to_thread(scheduler.has_residents)
+                    and not scheduler.has_residents()
                 ):
                     return
-                completion = await asyncio.to_thread(scheduler.take_completion)
-                if completion is None:
-                    if carried is None:
-                        return
+
+                if carried is not None:
+                    match scheduler.admit(carried.job, carried.context):
+                        case _AdmissionResult.ADMITTED:
+                            carried = None
+                            continue
+                        case _AdmissionResult.INTAKE_CLOSED:
+                            carried = None
+                            exhausted = True
+                            continue
+                        case _AdmissionResult.NO_ROOM:
+                            pass
+
+                if source_pull is not None and source_pull.done():
+                    submission = source_pull.result()
+                    source_pull = None
+                    if submission is None:
+                        exhausted = True
+                    elif self._state is ExecutionPoolState.RUNNING:
+                        carried = submission
                     continue
-                yield ExecutionCompletion(
-                    completed_execution=completion.completed_execution,
-                    context=cast("ContextT", completion.context),
-                )
+
+                if (
+                    not exhausted
+                    and carried is None
+                    and source_pull is None
+                    and scheduler.can_admit()
+                ):
+                    source_pull = asyncio.create_task(_next_submission(source))
+
+                changed = asyncio.create_task(wakeup.wait())
+                waits: set[asyncio.Task[object]] = {changed}
+                if source_pull is not None:
+                    waits.add(source_pull)
+                try:
+                    await asyncio.wait(
+                        waits, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    changed.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await changed
         except SchedulerBroken:
             if self._state is ExecutionPoolState.RUNNING:
                 self._state = ExecutionPoolState.BROKEN
             raise
+        finally:
+            await _cancel_source_pull(source_pull)
+            self._stream_wakeups.discard(wakeup)
+            self._active_streams -= 1
+            if self._active_streams == 0 and self._shutdown_complete:
+                scheduler.discard_completions()
 
     async def drain(self) -> None:
         """Await work the scheduler still owns, then close.
@@ -227,32 +285,59 @@ class ExecutionPool:
         """
 
         self._require_owning_loop()
-        scheduler = self._closing_scheduler()
-        if scheduler is None:
-            return
-        broke = self._state is ExecutionPoolState.BROKEN
-        self._state = ExecutionPoolState.DRAINING
-        scheduler.close_intake()
-        await asyncio.to_thread(scheduler.wait_for_quiescence)
-        await asyncio.to_thread(scheduler.shutdown)
-        self._closed = True
-        self._state = _closed_state(broke or scheduler.is_broken())
+        await self._close(abort=False)
 
     async def abort(self) -> None:
         """Cancel scheduler-owned work and await executor teardown."""
 
         self._require_owning_loop()
+        await self._close(abort=True)
+
+    async def _close(self, *, abort: bool) -> None:
         scheduler = self._closing_scheduler()
         if scheduler is None:
             return
-        broke = self._state is ExecutionPoolState.BROKEN
-        self._state = ExecutionPoolState.DRAINING
-        scheduler.close_intake()
-        scheduler.cancel_all()
+        if self._close_task is None:
+            self._state = ExecutionPoolState.DRAINING
+            scheduler.close_intake()
+            self._wake_streams()
+            self._close_task = asyncio.create_task(
+                self._finish_close(scheduler)
+            )
+        if abort:
+            scheduler.cancel_all()
+        close_task = self._close_task
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            await close_task
+            raise
+
+    async def _finish_close(
+        self, scheduler: _ExecutionScheduler[object], /
+    ) -> None:
         await asyncio.to_thread(scheduler.wait_for_quiescence)
-        await asyncio.to_thread(scheduler.shutdown)
+        await asyncio.to_thread(scheduler.shutdown, preserve_completions=True)
+        self._shutdown_complete = True
         self._closed = True
-        self._state = _closed_state(broke or scheduler.is_broken())
+        self._state = _closed_state(scheduler.is_broken())
+        self._wake_streams()
+        if self._active_streams == 0:
+            scheduler.discard_completions()
+
+    def _notify_scheduler_change(self) -> None:
+        loop = self._owning_loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._wake_streams)
+        except RuntimeError:
+            # A final worker notification can race event-loop teardown.
+            pass
+
+    def _wake_streams(self) -> None:
+        for wakeup in self._stream_wakeups:
+            wakeup.set()
 
     def _require_owning_loop(self) -> None:
         if self._owning_loop is None:
@@ -294,6 +379,17 @@ async def _next_submission[T](
         return await anext(source)
     except StopAsyncIteration:
         return None
+
+
+async def _cancel_source_pull[T](
+    source_pull: asyncio.Task[ExecutionSubmission[T] | None] | None,
+    /,
+) -> None:
+    if source_pull is None:
+        return
+    source_pull.cancel()
+    with suppress(asyncio.CancelledError, StopAsyncIteration):
+        await source_pull
 
 
 __all__ = [

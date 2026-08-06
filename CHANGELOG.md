@@ -21,6 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to PyPI.
 - Added MIT package metadata and artifact checks that require the license in
   both distributions.
+- Made asynchronous pool delivery cancellation-safe across dependent sources,
+  concurrent streams, and drain or abort while preserving buffered results.
+- Rejected slash-relative command executables that cannot retain their meaning
+  after the child enters its scratch workspace.
 
 ### Added
 

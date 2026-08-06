@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import UNIQUE, Enum, auto, verify
 from threading import Condition, Thread
@@ -67,6 +68,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         "_executor",
         "_intake_closed",
         "_next_ticket",
+        "_notify_change",
         "_pending",
         "_ready",
         "_residents",
@@ -75,11 +77,18 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         "_workers",
     )
 
-    def __init__(self, *, executor: Executor, capacity: int) -> None:
+    def __init__(
+        self,
+        *,
+        executor: Executor,
+        capacity: int,
+        notify_change: Callable[[], None] | None = None,
+    ) -> None:
         if capacity < 1:
             raise ValueError("scheduler capacity must be positive")
         self._executor = executor
         self._capacity = capacity
+        self._notify_change = notify_change
         self._condition = Condition()
         self._pending: deque[_Admitted[ContextT]] = deque()
         self._ready: deque[_Completion[ContextT]] = deque()
@@ -110,7 +119,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             self._pending.append(_Admitted(ticket, job, context, token))
             self._residents += 1
             self._ensure_worker()
-            self._condition.notify_all()
+            self._announce_change()
             # A failed worker start drops this queued submission; buffered
             # completions still drain before the break surfaces.
             if self._broken is not None:
@@ -120,7 +129,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
     def close_intake(self) -> None:
         with self._condition:
             self._intake_closed = True
-            self._condition.notify_all()
+            self._announce_change()
 
     def has_residents(self) -> bool:
         with self._condition:
@@ -129,6 +138,15 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
     def is_broken(self) -> bool:
         with self._condition:
             return self._broken is not None
+
+    def take_completion_nowait(self) -> _Completion[ContextT] | None:
+        """Atomically hand one buffered completion to the calling driver."""
+
+        with self._condition:
+            if not self._ready:
+                self._raise_if_broken()
+                return None
+            return self._take_ready()
 
     def take_completion(self) -> _Completion[ContextT] | None:
         with self._condition:
@@ -142,17 +160,13 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             if not self._ready:
                 self._raise_if_broken()
                 return None
-            completion = self._ready.popleft()
-            self._tokens.pop(completion.ticket, None)
-            self._residents -= 1
-            self._condition.notify_all()
-            return completion
+            return self._take_ready()
 
     def cancel_all(self) -> None:
         with self._condition:
             for token in tuple(self._tokens.values()):
                 token.cancel()
-            self._condition.notify_all()
+            self._announce_change()
 
     def wait_for_quiescence(self) -> None:
         with self._condition:
@@ -160,19 +174,26 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
                 lambda: not self._running and not self._pending
             )
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, preserve_completions: bool = False) -> None:
         with self._condition:
             self._intake_closed = True
-            self._condition.notify_all()
+            self._announce_change()
             workers = tuple(self._workers)
         for worker in workers:
             worker.join()
         with self._condition:
             self._workers.clear()
             self._pending.clear()
-            self._ready.clear()
-            self._tokens.clear()
-            self._residents = 0
+            if not preserve_completions:
+                self._discard_completions()
+            self._announce_change()
+
+    def discard_completions(self) -> None:
+        """Release results after no event-loop stream can consume them."""
+
+        with self._condition:
+            self._discard_completions()
+            self._announce_change()
 
     def _ensure_worker(self) -> None:
         idle = len(self._workers) - self._running
@@ -187,7 +208,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             worker.start()
         except BaseException as failure:  # noqa: BLE001
             self._break(failure)
-            self._condition.notify_all()
+            self._announce_change()
             return
         self._workers.append(worker)
 
@@ -242,7 +263,24 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
                 self._tokens.pop(ticket, None)
             if broken is not None:
                 self._break(broken)
-            self._condition.notify_all()
+            self._announce_change()
+
+    def _take_ready(self) -> _Completion[ContextT]:
+        completion = self._ready.popleft()
+        self._tokens.pop(completion.ticket, None)
+        self._residents -= 1
+        self._announce_change()
+        return completion
+
+    def _discard_completions(self) -> None:
+        self._ready.clear()
+        self._tokens.clear()
+        self._residents = 0
+
+    def _announce_change(self) -> None:
+        self._condition.notify_all()
+        if self._notify_change is not None:
+            self._notify_change()
 
     def _break(self, failure: BaseException, /) -> None:
         if self._broken is not None:
