@@ -1083,21 +1083,20 @@ def test_a_break_delivers_the_buffered_tail_before_it_raises() -> None:
             assert scheduler is not None
             scheduler._notify_change = None
             try:
-                await asyncio.to_thread(
-                    responder.release_successes, first.job_id, second.job_id
-                )
-                await asyncio.to_thread(
-                    _await_scheduler_publication,
+                # Hold the owning loop while worker-thread gates advance so
+                # the consumer cannot take the completions being buffered.
+                responder.release_successes(first.job_id, second.job_id)
+                _await_scheduler_publication(
                     scheduler,
                     first.job_id,
                     second.job_id,
                 )
-                await asyncio.to_thread(responder.break_the_pool)
-                await asyncio.to_thread(_await_scheduler_break, scheduler)
+                responder.break_the_pool()
+                _await_scheduler_break(scheduler)
             finally:
                 scheduler._notify_change = pool._notify_scheduler_change
                 pool._wake_streams()
-            may_proceed.set()
+                may_proceed.set()
             await asyncio.wait_for(consumer, WATCHDOG_SECONDS)
 
     with pytest.raises(ExecutorFailure, match="the execution pool broke") as e:
