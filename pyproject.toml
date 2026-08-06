@@ -11,7 +11,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "dr-serialize==0.1.2",
-    "dr-store==0.1.2",
+    "dr-store==0.1.3",
     "pydantic==2.13.4",
 ]
 
@@ -19,10 +19,9 @@ dependencies = [
 requires = ["uv_build>=0.11.25,<0.12.0"]
 build-backend = "uv_build"
 
-# dr-store's record cache is unreleased; pin the exact reviewed commit.
-# Re-pin to a released dr-store version before merging.
+# Use the local dr-store checkout while its record cache is under development.
 [tool.uv.sources]
-dr-store = { git = "https://github.com/danielle-rothermel/dr-store", rev = "8656db5e5428c6ce637cd5b223bac8b4396604f3" }
+dr-store = { path = "../dr-store" }
 
 [dependency-groups]
 dev = [

@@ -19,7 +19,7 @@ from dr_serialize import (
     canonical_json_bytes,
     json_hash,
 )
-from dr_store import RecordCache, StoreError, derive_cache_key
+from dr_store import CacheHit, RecordCache, StoreError, derive_cache_key
 from pydantic import ValidationError
 
 from dr_exec.capabilities.protocols import Executor
@@ -125,16 +125,16 @@ def _cache_key(
 
 
 def _replayed_completion(
-    record: Jsonable | None,
+    hit: CacheHit | None,
     key: str,
     /,
 ) -> CompletedExecution | None:
     """Rebuild a completion from a stored record, or miss on any fault."""
-    if record is None:
+    if hit is None:
         return None
     try:
         result = ExecutionResult.model_validate_json(
-            canonical_json_bytes(record), strict=True
+            canonical_json_bytes(hit.record), strict=True
         )
     except (SerializationError, ValidationError):
         # A mismatched or corrupt entry reads as a miss, never raises.

@@ -59,7 +59,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dr-serialize", specifier = "==0.1.2" },
-    { name = "dr-store", git = "https://github.com/danielle-rothermel/dr-store?rev=8656db5e5428c6ce637cd5b223bac8b4396604f3" },
+    { name = "dr-store", directory = "../dr-store" },
     { name = "pydantic", specifier = "==2.13.4" },
 ]
 
@@ -85,10 +85,21 @@ wheels = [
 
 [[package]]
 name = "dr-store"
-version = "0.1.2"
-source = { git = "https://github.com/danielle-rothermel/dr-store?rev=8656db5e5428c6ce637cd5b223bac8b4396604f3#8656db5e5428c6ce637cd5b223bac8b4396604f3" }
+version = "0.1.3"
+source = { directory = "../dr-store" }
 dependencies = [
     { name = "dr-serialize" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "dr-serialize", specifier = ">=0.1.2" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pre-commit", specifier = ">=4.6.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.15.18" },
+    { name = "ty", specifier = ">=0.0.51" },
 ]
 
 [[package]]
