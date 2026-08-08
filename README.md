@@ -156,6 +156,45 @@ V1 accepts finite workload limits only for wall time, input bytes, and
 aggregate captured payload output. Memory, CPU time, process count, file size,
 open-file count, and disk limits must remain explicitly unbudgeted.
 
+### Importable JSON process jobs
+
+The importable JSON adapter builds an ordinary Python execution job for one
+installed module-level synchronous callable. It exchanges one strict JSON value
+in each direction; execution, cancellation, recording, and scheduling remain
+with the selected executor and pool.
+
+```python
+entry_point = ImportableEntryPoint(
+    module_name="my_package.workers",
+    attribute_name="evaluate",
+)
+job = build_untrusted_importable_json_job(
+    job_id,
+    entry_point,
+    request,
+    env=EnvGrant.none(),
+    budgets=budgets,
+)
+completed = executor.run(job)
+result = parse_importable_json_result(completed)
+```
+
+Use `build_trusted_importable_json_job` only when the effective payload is
+caller-controlled. The untrusted builder always declares
+`PROCESS_BOUNDARY_ONLY`; neither builder selects an operating-system sandbox.
+Entrypoints must be importable by the isolated installed interpreter—source
+paths, working-directory imports, expressions, and nested attribute traversal
+are unsupported. Callers enforce any entrypoint allowlist before construction.
+
+One job is one isolation, cancellation, failure, and recording unit. Its JSON
+request may be a finite caller-owned batch only when all members intentionally
+share that fate; the adapter does not interpret members or provide mapping,
+partial results, or per-item retries. High-volume callers reuse runtime,
+executor, run-store, and pool instances and configure finite input, retained
+payload-output, protocol frame, protocol total-byte, JSON-depth, and one-output
+limits from representative measurements. Bulk data remains caller-owned by
+reference or artifact rather than traveling through the compact JSON value.
+
 ## Runtime
 
 The runtime boundary turns either Python target into an invocation and a

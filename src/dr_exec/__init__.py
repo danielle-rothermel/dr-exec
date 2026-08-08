@@ -49,6 +49,13 @@ from dr_exec.declarations.models import (
     UntrustedPythonTarget,
 )
 from dr_exec.execution.executor import ProcessExecutor
+from dr_exec.importable_json import (
+    ImportableEntryPoint,
+    ImportableJsonResultError,
+    build_trusted_importable_json_job,
+    build_untrusted_importable_json_job,
+    parse_importable_json_result,
+)
 from dr_exec.recording.models import (
     BudgetExceededOutcome,
     BudgetExceededOutcomeRecord,
@@ -177,6 +184,8 @@ __all__ = [
     "FiniteDurationLimit",
     "FiniteOutput",
     "FixedPoolCapacity",
+    "ImportableEntryPoint",
+    "ImportableJsonResultError",
     "IsolatedHostPythonRuntime",
     "JobId",
     "LimitKind",
@@ -232,4 +241,7 @@ __all__ = [
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTarget",
     "UntrustedPythonTargetRecord",
+    "build_trusted_importable_json_job",
+    "build_untrusted_importable_json_job",
+    "parse_importable_json_result",
 ]

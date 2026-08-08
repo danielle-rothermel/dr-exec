@@ -92,6 +92,7 @@ fi
 
 requirements_file="${temporary_root}/requirements.txt"
 wheel_environment="${temporary_root}/wheel-environment"
+fixture_artifact_directory="${temporary_root}/fixture-dist"
 if [[ -z "${publish_artifacts}" ]]; then
     artifact_directory="${temporary_root}/dist"
 else
@@ -105,6 +106,9 @@ fi
 mkdir -- "${artifact_directory}"
 uv build --out-dir "${artifact_directory}"
 uv run python scripts/check_distribution.py "${artifact_directory}"
+mkdir -- "${fixture_artifact_directory}"
+uv build --out-dir "${fixture_artifact_directory}" \
+    tests/fixtures/importable-json-fixture
 
 uv export --quiet --locked --no-sources --no-dev --no-emit-project \
     --output-file "${requirements_file}"
@@ -126,15 +130,22 @@ fi
 
 shopt -s nullglob
 wheels=("${artifact_directory}"/*.whl)
+fixture_wheels=("${fixture_artifact_directory}"/*.whl)
 shopt -u nullglob
 if [[ "${#wheels[@]}" -ne 1 ]]; then
     printf 'Expected one wheel; found %d.\n' "${#wheels[@]}" >&2
+    exit 1
+fi
+if [[ "${#fixture_wheels[@]}" -ne 1 ]]; then
+    printf 'Expected one fixture wheel; found %d.\n' \
+        "${#fixture_wheels[@]}" >&2
     exit 1
 fi
 
 uv pip install --python "${wheel_python}" \
     --requirement "${requirements_file}"
 uv pip install --python "${wheel_python}" --no-deps "${wheels[0]}"
+uv pip install --python "${wheel_python}" --no-deps "${fixture_wheels[0]}"
 
 (
     cd -- "${wheel_environment}"

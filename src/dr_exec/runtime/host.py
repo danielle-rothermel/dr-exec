@@ -68,7 +68,7 @@ class IsolatedHostPythonRuntime:
 
     def __post_init__(self) -> None:
         try:
-            resolved = self.executable.resolve(strict=True)
+            resolved = Path(os.path.abspath(self.executable))
             mode = resolved.stat().st_mode
         except (OSError, RuntimeError) as error:
             raise ValueError(

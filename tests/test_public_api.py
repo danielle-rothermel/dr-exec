@@ -60,6 +60,8 @@ EXPECTED_PUBLIC_API = (
     "FiniteDurationLimit",
     "FiniteOutput",
     "FixedPoolCapacity",
+    "ImportableEntryPoint",
+    "ImportableJsonResultError",
     "IsolatedHostPythonRuntime",
     "JobId",
     "LimitKind",
@@ -115,6 +117,9 @@ EXPECTED_PUBLIC_API = (
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTarget",
     "UntrustedPythonTargetRecord",
+    "build_trusted_importable_json_job",
+    "build_untrusted_importable_json_job",
+    "parse_importable_json_result",
 )
 
 

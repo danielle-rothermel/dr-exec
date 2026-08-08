@@ -107,7 +107,7 @@ def test_runtime_identity_maps_each_fact_from_the_probed_interpreter(
 
     runtime = IsolatedHostPythonRuntime(Path(sys.executable))
     record = runtime.describe()
-    resolved = Path(sys.executable).resolve()
+    resolved = Path(os.path.abspath(sys.executable))
 
     assert record.kind is RuntimeKind.ISOLATED_HOST_PYTHON
     assert record.resolved_executable == resolved
@@ -143,15 +143,17 @@ def test_runtime_record_rejects_a_resolved_path_identity_mismatch() -> None:
         )
 
 
-def test_runtime_identity_binds_the_resolved_executable_path(
+def test_runtime_identity_binds_the_selected_executable_path(
     tmp_path: Path,
     host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
     aliased = tmp_path / "aliased-python"
     aliased.symlink_to(Path(sys.executable).resolve())
-    assert IsolatedHostPythonRuntime(aliased).describe() == (
-        host_runtime.describe()
-    )
+    aliased_runtime = IsolatedHostPythonRuntime(aliased)
+    aliased_record = aliased_runtime.describe()
+    assert aliased_runtime.executable == aliased
+    assert aliased_record.resolved_executable == aliased
+    assert aliased_record != host_runtime.describe()
     forwarding = _write_executable(
         tmp_path / "forwarding-python",
         f'#!/bin/sh\nexec "{Path(sys.executable).resolve()}" "$@"\n',
