@@ -195,6 +195,15 @@ payload-output, protocol frame, protocol total-byte, JSON-depth, and one-output
 limits from representative measurements. Bulk data remains caller-owned by
 reference or artifact rather than traveling through the compact JSON value.
 
+Run the representative resource and throughput investigation with:
+
+```console
+uv run --with ./tests/fixtures/importable-json-fixture python scripts/benchmark_importable_json.py
+```
+
+The command writes a machine-readable JSON report. Its measurements are
+observations for capacity selection, not performance pass/fail thresholds.
+
 ## Runtime
 
 The runtime boundary turns either Python target into an invocation and a
