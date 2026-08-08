@@ -25,6 +25,7 @@ from dr_exec import (
     OutputArtifactRecord,
     OutputOverflowPolicy,
     PayloadRetentionBudget,
+    RunRecordReference,
     StreamRetentionBudget,
     TrustedCommandTarget,
     UntrustedPythonTarget,
@@ -65,6 +66,12 @@ def _path_and_digest_scalar_model() -> ContractModel:
         relative_path=Path("stdout.bin"),
         size_bytes=7,
         sha256=ALL_ZERO_DIGEST_WITH_TRAILING_F,
+    )
+
+
+def _run_record_reference_model() -> ContractModel:
+    return RunRecordReference(
+        record_id=UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72")
     )
 
 
@@ -128,6 +135,12 @@ SCALAR_VECTORS = (
         b'{"relative_path":"stdout.bin","sha256":"0000000000000000000000'
         b'00000000000000000000000000000000000000000f","size_bytes":7}',
         id="path-and-sha256",
+    ),
+    pytest.param(
+        _run_record_reference_model,
+        b'{"backend":"directory","record_id":'
+        b'"0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72"}',
+        id="run-record-reference",
     ),
     pytest.param(
         _enum_and_integer_scalar_model,

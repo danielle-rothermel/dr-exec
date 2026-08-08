@@ -309,12 +309,25 @@ class RunStore(Protocol):
         /,
     ) -> RealRecordReceipt: ...
 
-    def load(self, record_dir: Path, /) -> RunRecord: ...
+    def load(self, reference: RunRecordReference, /) -> RunRecord: ...
+
+    def read_artifact(
+        self,
+        reference: RunRecordReference,
+        artifact: OutputArtifactRecord,
+        /,
+        *,
+        max_bytes: int,
+    ) -> bytes: ...
 ```
 
 `DirectoryRunStore` publishes canonical lifecycle manifests within fixed
 structural byte and depth ceilings, then loads them through bounded,
-descriptor-pinned reads before validating the record and its sidecars.
+descriptor-pinned reads before validating the record and its sidecars. Real
+handles and receipts expose only an opaque serializable `RunRecordReference`;
+the store alone resolves its directory layout. Finalized sidecars are recovered
+with `read_artifact` under a required finite byte limit and verified for size
+and digest during the same descriptor-pinned, no-follow read.
 
 ## Scheduling
 

@@ -100,13 +100,15 @@ def test_a_real_batch_completes_every_job_and_records_each_one(
     for one in completed:
         receipt = one.record_receipt
         assert isinstance(receipt, CompleteRecordReceipt)
-        assert receipt.record_dir.is_dir()
+        assert executor.run_store.load(
+            receipt.reference
+        ).declaration.execution_id == (one.result.execution_id)
 
-    directories = {
-        one.record_receipt.record_dir  # ty: ignore[unresolved-attribute]
+    references = {
+        one.record_receipt.reference  # ty: ignore[unresolved-attribute]
         for one in completed
     }
-    assert len(directories) == len(batch)
+    assert len(references) == len(batch)
 
 
 @requires_macos

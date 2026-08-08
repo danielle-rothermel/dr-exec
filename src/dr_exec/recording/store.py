@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
+from uuid import UUID, uuid4
 
 from dr_serialize import (
     Jsonable,
@@ -13,7 +17,12 @@ from dr_serialize import (
     Sha256Digest,
     canonical_json_bytes,
 )
-from dr_store import DocumentDirectory, DocumentDirectoryError, SidecarSummary
+from dr_store import (
+    AllocationError,
+    DocumentDirectory,
+    DocumentDirectoryError,
+    SidecarSummary,
+)
 from pydantic import TypeAdapter, ValidationError
 
 from dr_exec.core.errors import ExecutorFailure, RecordLoadError
@@ -52,6 +61,7 @@ from dr_exec.recording.models import (
     RetainedPayloadStreamRecord,
     RunningRecord,
     RunRecord,
+    RunRecordReference,
     SignaledOutcome,
     SignaledOutcomeRecord,
     SpawnAbsentOutcome,
@@ -75,7 +85,7 @@ class PreparedRun:
     """Run whose complete declaration is durably recorded pre-spawn."""
 
     execution_id: ExecutionId
-    record_dir: Path
+    reference: RunRecordReference
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +93,7 @@ class RunningRun:
     """Run whose spawned child is durably recorded."""
 
     execution_id: ExecutionId
-    record_dir: Path
+    reference: RunRecordReference
 
 
 type FinalizableRun = PreparedRun | RunningRun
@@ -224,17 +234,12 @@ class DirectoryRunStore:
         /,
     ) -> PreparedRun:
         with _executor_failure("prepare the run record"):
-            directory = DocumentDirectory.allocate(
-                self.root,
-                prefix=RECORD_DIRECTORY_PREFIX,
-                manifest_name=MANIFEST_NAME,
-                manifest_max_bytes=STRUCTURAL_MANIFEST_BYTE_CEILING,
-                manifest_max_depth=STRUCTURAL_DEPTH_CEILING,
-            )
+            reference = RunRecordReference(record_id=uuid4())
+            directory = self._allocate(reference)
             directory.publish(_manifest_payload(record))
         return PreparedRun(
             execution_id=record.declaration.execution_id,
-            record_dir=directory.path,
+            reference=reference,
         )
 
     def mark_running(
@@ -244,8 +249,8 @@ class DirectoryRunStore:
         /,
     ) -> RunningRun:
         with _executor_failure("publish the running run record"):
-            prepared = self._load_prepared(prepared_run.record_dir)
-            _directory(prepared_run.record_dir).publish(
+            prepared = self._load_prepared(prepared_run.reference)
+            _directory(self._resolve(prepared_run.reference)).publish(
                 _manifest_payload(
                     RunningRecord(
                         header=prepared.header,
@@ -256,7 +261,7 @@ class DirectoryRunStore:
             )
         return RunningRun(
             execution_id=prepared_run.execution_id,
-            record_dir=prepared_run.record_dir,
+            reference=prepared_run.reference,
         )
 
     def finalize(
@@ -270,26 +275,57 @@ class DirectoryRunStore:
         except (DocumentDirectoryError, RecordLoadError) as error:
             return DegradedRecordReceipt(
                 execution_id=run.execution_id,
-                record_dir=run.record_dir,
-                latest_state=_durable_state(run),
+                reference=run.reference,
+                latest_state=self._durable_state(run),
                 failures=(_recording_failure("finalize", error),),
             )
         return CompleteRecordReceipt(
             execution_id=run.execution_id,
-            record_dir=run.record_dir,
+            reference=run.reference,
         )
 
     def load(
         self,
-        record_dir: Path,
+        reference: RunRecordReference,
         /,
     ) -> RunRecord:
         """Validate a lifecycle record and every finalized sidecar."""
 
+        record_dir = self._resolve(reference)
         record = _load_record(record_dir)
         if isinstance(record, FinalizedRecord):
             _verify_sidecars(record_dir, record)
         return record
+
+    def read_artifact(
+        self,
+        reference: RunRecordReference,
+        artifact: OutputArtifactRecord,
+        /,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        """Read one finalized owned artifact through one pinned descriptor."""
+
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int):
+            raise TypeError("max_bytes must be an integer")
+        if max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative")
+        record_dir = self._resolve(reference)
+        record = _load_record(record_dir)
+        if not isinstance(record, FinalizedRecord):
+            raise RecordLoadError(
+                f"run record {reference.record_id} is not finalized"
+            )
+        if artifact not in (record.outputs.stdout, record.outputs.stderr):
+            raise RecordLoadError(
+                f"artifact is not owned by run record {reference.record_id}"
+            )
+        if artifact.size_bytes > max_bytes:
+            raise RecordLoadError(
+                f"artifact exceeds the {max_bytes}-byte read limit"
+            )
+        return _read_artifact(record_dir, artifact)
 
     def _publish_finalized(
         self,
@@ -297,12 +333,13 @@ class DirectoryRunStore:
         result: ExecutionResult,
         /,
     ) -> None:
-        record = _load_record(run.record_dir)
+        record_dir = self._resolve(run.reference)
+        record = _load_record(record_dir)
         if isinstance(record, FinalizedRecord):
             raise RecordLoadError(
-                f"run record at {run.record_dir} is already finalized"
+                f"run record {run.reference.record_id} is already finalized"
             )
-        directory = _directory(run.record_dir)
+        directory = _directory(record_dir)
         stdout_summary = _write_sidecar(
             directory,
             STDOUT_SIDECAR_NAME,
@@ -335,13 +372,61 @@ class DirectoryRunStore:
             )
         )
 
-    def _load_prepared(self, record_dir: Path, /) -> PreparedRecord:
+    def _load_prepared(
+        self, reference: RunRecordReference, /
+    ) -> PreparedRecord:
+        record_dir = self._resolve(reference)
         record = _load_record(record_dir)
         if not isinstance(record, PreparedRecord):
             raise RecordLoadError(
                 f"run record at {record_dir} is not in the prepared state"
             )
         return record
+
+    def _allocate(self, reference: RunRecordReference, /) -> DocumentDirectory:
+        record_dir = self._record_dir(reference)
+        try:
+            record_dir.mkdir(exist_ok=False)
+        except OSError as error:
+            raise AllocationError(
+                f"could not allocate run record {reference.record_id}"
+            ) from error
+        return _directory(record_dir)
+
+    def _record_dir(self, reference: RunRecordReference, /) -> Path:
+        return self.root / f"{RECORD_DIRECTORY_PREFIX}-{reference.record_id}"
+
+    def _resolve(self, reference: RunRecordReference, /) -> Path:
+        if not isinstance(reference, RunRecordReference):
+            raise RecordLoadError("unsupported run record reference")
+        if reference.backend != "directory":
+            raise RecordLoadError(
+                f"unsupported run record backend {reference.backend!r}"
+            )
+        if not isinstance(reference.record_id, UUID):
+            raise RecordLoadError("malformed directory run record identifier")
+        record_dir = self._record_dir(reference)
+        try:
+            metadata = record_dir.lstat()
+        except OSError as error:
+            raise RecordLoadError(
+                f"could not resolve run record {reference.record_id}"
+            ) from error
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RecordLoadError(
+                f"could not resolve run record {reference.record_id}"
+            )
+        return record_dir
+
+    def _durable_state(self, run: FinalizableRun, /) -> RecordState:
+        try:
+            return _load_record(self._resolve(run.reference)).state
+        except RecordLoadError:
+            return (
+                RecordState.PREPARED
+                if isinstance(run, PreparedRun)
+                else RecordState.RUNNING
+            )
 
 
 @contextmanager
@@ -350,17 +435,6 @@ def _executor_failure(operation: str, /) -> Iterator[None]:
         yield
     except (DocumentDirectoryError, RecordLoadError) as error:
         raise ExecutorFailure(f"could not {operation}") from error
-
-
-def _durable_state(run: FinalizableRun, /) -> RecordState:
-    try:
-        return _load_record(run.record_dir).state
-    except RecordLoadError:
-        return (
-            RecordState.PREPARED
-            if isinstance(run, PreparedRun)
-            else RecordState.RUNNING
-        )
 
 
 def _directory(record_dir: Path, /) -> DocumentDirectory:
@@ -440,6 +514,98 @@ def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:
                 f"sidecar {artifact.relative_path} at {record_dir} does not "
                 "match its record"
             ) from error
+
+
+_READ_CHUNK_BYTES: Final = 1 << 16
+_OPEN_SUPPORTS_DIR_FD: Final = os.open in getattr(os, "supports_dir_fd", ())
+_REQUIRED_ARTIFACT_OPEN_FLAGS: Final = (
+    "O_CLOEXEC",
+    "O_DIRECTORY",
+    "O_NOFOLLOW",
+    "O_NONBLOCK",
+)
+
+
+def _read_artifact(
+    record_dir: Path,
+    artifact: OutputArtifactRecord,
+    /,
+) -> bytes:
+    """Boundedly read and verify one regular child from pinned descriptors."""
+
+    missing_flags = [
+        flag
+        for flag in _REQUIRED_ARTIFACT_OPEN_FLAGS
+        if not isinstance(getattr(os, flag, None), int)
+    ]
+    if not _OPEN_SUPPORTS_DIR_FD or missing_flags:
+        detail = ", ".join(missing_flags) or "os.open(dir_fd=...)"
+        raise RecordLoadError(
+            "descriptor-pinned no-follow artifact reads are unsupported: "
+            f"missing {detail}"
+        )
+
+    name = artifact.relative_path.as_posix()
+    directory_descriptor: int | None = None
+    artifact_descriptor: int | None = None
+    try:
+        directory_descriptor = os.open(
+            record_dir,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        artifact_descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=directory_descriptor,
+        )
+        metadata = os.fstat(artifact_descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RecordLoadError(f"artifact {name!r} is not a regular file")
+        if metadata.st_size != artifact.size_bytes:
+            raise RecordLoadError(
+                f"artifact {name!r} size does not match its record"
+            )
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        actual_size = 0
+        while actual_size < artifact.size_bytes:
+            chunk = os.read(
+                artifact_descriptor,
+                min(_READ_CHUNK_BYTES, artifact.size_bytes - actual_size),
+            )
+            if not chunk:
+                break
+            actual_size += len(chunk)
+            chunks.append(chunk)
+            digest.update(chunk)
+        if os.fstat(artifact_descriptor).st_size != artifact.size_bytes:
+            raise RecordLoadError(
+                f"artifact {name!r} size does not match its record"
+            )
+    except RecordLoadError:
+        raise
+    except (NotImplementedError, OSError) as error:
+        raise RecordLoadError(f"could not read artifact {name!r}") from error
+    finally:
+        if artifact_descriptor is not None:
+            try:
+                os.close(artifact_descriptor)
+            except OSError:
+                pass
+        if directory_descriptor is not None:
+            try:
+                os.close(directory_descriptor)
+            except OSError:
+                pass
+    if actual_size != artifact.size_bytes:
+        raise RecordLoadError(
+            f"artifact {name!r} size does not match its record"
+        )
+    if digest.hexdigest() != artifact.sha256:
+        raise RecordLoadError(
+            f"artifact {name!r} digest does not match its record"
+        )
+    return b"".join(chunks)
 
 
 __all__ = [

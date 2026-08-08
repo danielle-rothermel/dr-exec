@@ -5,6 +5,7 @@ import sys
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -26,6 +27,7 @@ from dr_exec import (
     DirectoryRunStore,
     EnvGrant,
     ExecutionJob,
+    ExecutionResult,
     ExecutorFailure,
     ExecutorSelfBudgets,
     ExitedOutcome,
@@ -36,13 +38,21 @@ from dr_exec import (
     FiniteDurationLimit,
     IsolatedHostPythonRuntime,
     JobId,
+    OutputArtifactRecord,
+    PreparedRecord,
     ProcessExecutor,
+    ProcessRecord,
     ProtocolFailedOutcome,
     ProtocolFailureCode,
+    RealRecordReceipt,
     RecordState,
+    RunRecord,
+    RunRecordReference,
     UntrustedPythonTarget,
     UntrustedPythonTargetRecord,
 )
+from dr_exec.core.model import canonical_model_bytes
+from dr_exec.recording.store import FinalizableRun, PreparedRun, RunningRun
 from dr_exec.runtime.bootstrap import (
     DRIVER_ENTRYPOINT_NAME,
     PROTOCOL_DESCRIPTOR,
@@ -87,10 +97,57 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
 
 @dataclass(frozen=True, slots=True)
+class _CapturingRunStore:
+    delegate: DirectoryRunStore
+    prepared_runs: list[PreparedRun]
+
+    def prepare(self, record: PreparedRecord, /) -> PreparedRun:
+        prepared = self.delegate.prepare(record)
+        self.prepared_runs.append(prepared)
+        return prepared
+
+    def mark_running(
+        self,
+        prepared_run: PreparedRun,
+        process: ProcessRecord,
+        /,
+    ) -> RunningRun:
+        return self.delegate.mark_running(prepared_run, process)
+
+    def finalize(
+        self,
+        run: FinalizableRun,
+        result: ExecutionResult,
+        /,
+    ) -> RealRecordReceipt:
+        return self.delegate.finalize(run, result)
+
+    def load(self, reference: RunRecordReference, /) -> RunRecord:
+        return self.delegate.load(reference)
+
+    def read_artifact(
+        self,
+        reference: RunRecordReference,
+        artifact: OutputArtifactRecord,
+        /,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        return self.delegate.read_artifact(
+            reference, artifact, max_bytes=max_bytes
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Harness:
     executor: ProcessExecutor
     store: DirectoryRunStore
     root: Path
+    prepared_runs: list[PreparedRun] = dataclass_field(default_factory=list)
+
+    def only_record_reference(self) -> RunRecordReference:
+        (prepared,) = self.prepared_runs
+        return prepared.reference
 
     def run(
         self,
@@ -164,20 +221,22 @@ def harness(
     root = tmp_path / "records"
     root.mkdir()
     store = DirectoryRunStore(root=root)
+    prepared_runs: list[PreparedRun] = []
     return Harness(
         executor=ProcessExecutor(
             runtime=host_runtime,
-            run_store=store,
+            run_store=_CapturingRunStore(store, prepared_runs),
         ),
         store=store,
         root=root,
+        prepared_runs=prepared_runs,
     )
 
 
-def record_dir_of(completed: CompletedExecution, /) -> Path:
+def reference_of(completed: CompletedExecution, /) -> RunRecordReference:
     receipt = completed.record_receipt
     assert isinstance(receipt, CompleteRecordReceipt)
-    return receipt.record_dir
+    return receipt.reference
 
 
 def payloads_of(completed: CompletedExecution, /) -> list[object]:
@@ -391,8 +450,10 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert len(os.listdir("/dev/fd")) == before
-    (record_dir,) = harness.root.iterdir()
-    assert harness.store.load(record_dir).state is RecordState.RUNNING
+    assert (
+        harness.store.load(harness.only_record_reference()).state
+        is RecordState.RUNNING
+    )
     with pytest.raises(ChildProcessError):
         os.waitpid(-1, os.WNOHANG)
 
@@ -482,7 +543,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 """
     completed = harness.run(driver)
 
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert isinstance(record, FinalizedRecord)
     assert [
         document.payload for document in record.result.protocol_outputs
@@ -625,7 +686,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
     assert completed.result.outcome == CancelledOutcome()
     assert payloads_of(completed) == [{"index": 0}]
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert record.state is RecordState.FINALIZED
 
 
@@ -635,7 +696,7 @@ def test_the_record_carries_python_specific_durable_evidence(
 ) -> None:
     completed = harness.run(ECHO_DRIVER)
 
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert isinstance(record, FinalizedRecord)
     target = record.declaration.target
     assert isinstance(target, UntrustedPythonTargetRecord)
@@ -660,7 +721,9 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 """
     completed = harness.run(secret_source, echo="a-secret-in-the-request")
 
-    manifest = (record_dir_of(completed) / "record.json").read_text()
+    manifest = canonical_model_bytes(
+        harness.store.load(reference_of(completed))
+    ).decode()
     assert "a-secret-in-the-driver" not in manifest
     assert "a-secret-in-the-request" not in manifest
     assert "SECRET_LITERAL" not in manifest
@@ -672,7 +735,7 @@ def test_accepted_outputs_are_recorded_inline_not_as_digests(
 ) -> None:
     completed = harness.run(ECHO_DRIVER, count=2, echo="inline")
 
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert isinstance(record, FinalizedRecord)
     assert [
         document.payload for document in record.result.protocol_outputs
@@ -750,7 +813,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert len({str(output) for output in outputs}) == call_count
     assert len({output["cwd"] for output in outputs}) == call_count
     assert len({output["pid"] for output in outputs}) == call_count
-    assert len({record_dir_of(c) for c in completions}) == call_count
+    assert len({reference_of(c) for c in completions}) == call_count
     assert (
         len(
             {

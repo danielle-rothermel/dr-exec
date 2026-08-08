@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Protocol
 
 from dr_exec.core.cancel import CancelToken
@@ -8,10 +7,12 @@ from dr_exec.declarations.models import ExecutionJob, UntrustedPythonTarget
 from dr_exec.recording.models import (
     CompletedExecution,
     ExecutionResult,
+    OutputArtifactRecord,
     PreparedRecord,
     ProcessRecord,
     RealRecordReceipt,
     RunRecord,
+    RunRecordReference,
 )
 from dr_exec.recording.store import FinalizableRun, PreparedRun, RunningRun
 from dr_exec.runtime.host import PreparedPythonProcess, RuntimeRecord
@@ -66,9 +67,19 @@ class RunStore(Protocol):
 
     def load(
         self,
-        record_dir: Path,
+        reference: RunRecordReference,
         /,
     ) -> RunRecord:
+        raise NotImplementedError
+
+    def read_artifact(
+        self,
+        reference: RunRecordReference,
+        artifact: OutputArtifactRecord,
+        /,
+        *,
+        max_bytes: int,
+    ) -> bytes:
         raise NotImplementedError
 
 

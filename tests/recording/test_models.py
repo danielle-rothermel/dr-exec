@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -12,6 +11,7 @@ from dr_exec import (
     AttemptId,
     CompletedExecution,
     CompleteRecordReceipt,
+    DegradedRecordReceipt,
     ExecutionAttribution,
     ExecutionAttributionRecord,
     ExecutionId,
@@ -27,8 +27,11 @@ from dr_exec import (
     ProtocolFailedOutcome,
     ProtocolFailedOutcomeRecord,
     ProtocolFailureCode,
+    RecordingFailure,
+    RecordState,
     RetainedPayloadStream,
     RetainedPayloadStreamRecord,
+    RunRecordReference,
 )
 from dr_exec.capabilities import CachedRecordReceipt
 from dr_exec.core.model import canonical_model_bytes
@@ -86,6 +89,42 @@ def _result(execution_id: ExecutionId) -> ExecutionResult:
         ),
         measurements=_measurements(),
     )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {"backend": "other", "record_id": str(UUID(int=1))},
+            id="unknown-backend",
+        ),
+        pytest.param(
+            {"backend": "directory", "record_id": "../run"},
+            id="path-locator",
+        ),
+        pytest.param(
+            {
+                "backend": "directory",
+                "record_id": str(UUID(int=1)),
+                "root": "/records",
+            },
+            id="root-field",
+        ),
+        pytest.param(
+            {
+                "backend": "directory",
+                "record_id": str(UUID(int=1)),
+                "relative_path": "run-1",
+            },
+            id="relative-path-field",
+        ),
+    ],
+)
+def test_run_record_references_reject_nonopaque_shapes(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        RunRecordReference.model_validate(payload, strict=True)
 
 
 @pytest.mark.parametrize(
@@ -210,17 +249,50 @@ def test_recorded_protocol_failure_count_must_match_accepted_outputs() -> None:
         )
 
 
-def test_completed_execution_binds_result_and_receipt_ids(
-    tmp_path: Path,
-) -> None:
+def test_completed_execution_binds_result_and_receipt_ids() -> None:
     result = _result(_execution_id(1))
     receipt = CompleteRecordReceipt(
         execution_id=_execution_id(3),
-        record_dir=tmp_path / "run",
+        reference=RunRecordReference(record_id=UUID(int=7)),
     )
 
     with pytest.raises(ValidationError, match="execution IDs differ"):
         CompletedExecution(result=result, record_receipt=receipt)
+
+
+def test_complete_receipt_wire_keys_are_pinned() -> None:
+    receipt = CompleteRecordReceipt(
+        execution_id=_execution_id(1),
+        reference=RunRecordReference(record_id=UUID(int=7)),
+    )
+
+    assert canonical_model_bytes(receipt) == (
+        b'{"execution_id":{"attempt_id":"00000000-0000-0000-0000-'
+        b'000000000002","job_id":"00000000-0000-0000-0000-000000000001"},'
+        b'"kind":"complete","latest_state":"finalized","reference":'
+        b'{"backend":"directory","record_id":"00000000-0000-0000-0000-'
+        b'000000000007"}}'
+    )
+
+
+def test_degraded_receipt_wire_keys_are_pinned() -> None:
+    receipt = DegradedRecordReceipt(
+        execution_id=_execution_id(1),
+        reference=RunRecordReference(record_id=UUID(int=7)),
+        latest_state=RecordState.RUNNING,
+        failures=(
+            RecordingFailure(operation="finalize", errno=5, detail="OSError"),
+        ),
+    )
+
+    assert canonical_model_bytes(receipt) == (
+        b'{"execution_id":{"attempt_id":"00000000-0000-0000-0000-'
+        b'000000000002","job_id":"00000000-0000-0000-0000-000000000001"},'
+        b'"failures":[{"detail":"OSError","errno":5,"operation":"finalize"}],'
+        b'"kind":"degraded","latest_state":"running","reference":'
+        b'{"backend":"directory","record_id":"00000000-0000-0000-0000-'
+        b'000000000007"}}'
+    )
 
 
 def test_cached_completion_binds_result_to_source_not_requested_job() -> None:

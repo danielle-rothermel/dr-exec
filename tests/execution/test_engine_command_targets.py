@@ -9,6 +9,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -49,6 +50,7 @@ from dr_exec import (
     FiniteOutput,
     IsolatedHostPythonRuntime,
     JobId,
+    OutputArtifactRecord,
     OutputOverflowPolicy,
     PayloadRetentionBudget,
     PreparedRecord,
@@ -57,6 +59,7 @@ from dr_exec import (
     RecordState,
     RunningRecord,
     RunRecord,
+    RunRecordReference,
     RunStore,
     SignaledOutcome,
     SpawnAbsentOutcome,
@@ -68,6 +71,7 @@ from dr_exec import (
     UntrustedCommandTargetRecord,
     UntrustedPythonTarget,
 )
+from dr_exec.core.model import canonical_model_bytes
 from dr_exec.execution.engine import SCRATCH_DIRECTORY_PREFIX, run_execution
 from dr_exec.execution.spawn import (
     SETUP_STAGE_CHDIR,
@@ -102,6 +106,7 @@ class Harness:
     store: DirectoryRunStore
     root: Path
     runtime: IsolatedHostPythonRuntime
+    prepared_runs: list[PreparedRun] = dataclass_field(default_factory=list)
 
     def run(
         self,
@@ -148,7 +153,11 @@ class Harness:
         return run_execution(
             job,
             runtime=self.runtime,
-            run_store=self.store if store is None else store,
+            run_store=(
+                _CapturingRunStore(self.store, self.prepared_runs)
+                if store is None
+                else store
+            ),
             self_budgets=(
                 ExecutorSelfBudgets.unbudgeted()
                 if self_budgets is None
@@ -157,15 +166,57 @@ class Harness:
             cancellation=cancellation,
         )
 
-    def only_record_dir(self) -> Path:
-        (directory,) = sorted(self.root.iterdir())
-        return directory
+    def only_record_reference(self) -> RunRecordReference:
+        (prepared,) = self.prepared_runs
+        return prepared.reference
 
 
-def record_dir_of(completed: CompletedExecution, /) -> Path:
+@dataclass(frozen=True, slots=True)
+class _CapturingRunStore:
+    delegate: DirectoryRunStore
+    prepared_runs: list[PreparedRun]
+
+    def prepare(self, record: PreparedRecord, /) -> PreparedRun:
+        prepared = self.delegate.prepare(record)
+        self.prepared_runs.append(prepared)
+        return prepared
+
+    def mark_running(
+        self,
+        prepared_run: PreparedRun,
+        process: ProcessRecord,
+        /,
+    ) -> RunningRun:
+        return self.delegate.mark_running(prepared_run, process)
+
+    def finalize(
+        self,
+        run: FinalizableRun,
+        result: ExecutionResult,
+        /,
+    ) -> RealRecordReceipt:
+        return self.delegate.finalize(run, result)
+
+    def load(self, reference: RunRecordReference, /) -> RunRecord:
+        return self.delegate.load(reference)
+
+    def read_artifact(
+        self,
+        reference: RunRecordReference,
+        artifact: OutputArtifactRecord,
+        /,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        return self.delegate.read_artifact(
+            reference, artifact, max_bytes=max_bytes
+        )
+
+
+def reference_of(completed: CompletedExecution, /) -> RunRecordReference:
     receipt = completed.record_receipt
     assert isinstance(receipt, CompleteRecordReceipt | DegradedRecordReceipt)
-    return receipt.record_dir
+    return receipt.reference
 
 
 def degraded_receipt_of(
@@ -177,9 +228,9 @@ def degraded_receipt_of(
 
 
 def finalized_record(
-    store: DirectoryRunStore, record_dir: Path, /
+    store: DirectoryRunStore, reference: RunRecordReference, /
 ) -> FinalizedRecord:
-    record = store.load(record_dir)
+    record = store.load(reference)
     assert isinstance(record, FinalizedRecord)
     return record
 
@@ -616,7 +667,7 @@ def test_an_untrusted_command_records_its_containment_profile(
 ) -> None:
     completed = harness.run(python_command("pass"), untrusted=True)
 
-    record = finalized_record(harness.store, record_dir_of(completed))
+    record = finalized_record(harness.store, reference_of(completed))
     target_record = record.declaration.target
     assert isinstance(target_record, UntrustedCommandTargetRecord)
     assert target_record.containment_profile is (
@@ -1131,7 +1182,7 @@ def test_a_descendant_that_leaves_the_session_escapes_the_claim(
 
     assert not exact_pid_exists(escapee_pid)
 
-    record = harness.store.load(harness.only_record_dir())
+    record = harness.store.load(harness.only_record_reference())
     assert record.state is RecordState.RUNNING
 
 
@@ -1173,7 +1224,7 @@ def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
 
     assert not exact_pid_exists(escapee_pid)
 
-    record = harness.store.load(harness.only_record_dir())
+    record = harness.store.load(harness.only_record_reference())
     assert record.state is RecordState.RUNNING
 
 
@@ -1195,7 +1246,7 @@ def test_pre_spawn_cancellation_records_without_launching_a_child(
     assert completed.result.outcome == CancelledOutcome()
     assert completed.result.attribution.owner is FailureOwner.NONE
     assert not marker.exists()
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert record.state is RecordState.FINALIZED
 
 
@@ -1226,7 +1277,7 @@ def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     canceller.join()
 
     assert completed.result.outcome == CancelledOutcome()
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert record.state is RecordState.FINALIZED
 
 
@@ -1243,12 +1294,16 @@ def test_a_completed_run_finalizes_with_digest_matching_sidecars(
     )
 
     assert isinstance(completed.record_receipt, CompleteRecordReceipt)
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert isinstance(record, FinalizedRecord)
-    stdout_path = (
-        record_dir_of(completed) / record.outputs.stdout.relative_path
+    assert (
+        harness.store.read_artifact(
+            reference_of(completed),
+            record.outputs.stdout,
+            max_bytes=record.outputs.stdout.size_bytes,
+        )
+        == b"stdout evidence"
     )
-    assert stdout_path.read_bytes() == b"stdout evidence"
 
 
 @requires_macos
@@ -1260,10 +1315,12 @@ def test_the_record_carries_the_declaration_digest_but_never_argv(
         (sys.executable, "-I", "-c", "pass", secret),
     )
 
-    manifest = (record_dir_of(completed) / "record.json").read_text()
+    manifest = canonical_model_bytes(
+        harness.store.load(reference_of(completed))
+    ).decode()
     assert secret not in manifest
     assert sys.executable not in manifest
-    record = finalized_record(harness.store, record_dir_of(completed))
+    record = finalized_record(harness.store, reference_of(completed))
     target_record = record.declaration.target
     assert isinstance(target_record, TrustedCommandTargetRecord)
     assert len(target_record.canonical_declaration_sha256) == 64
@@ -1278,7 +1335,9 @@ def test_the_record_names_granted_variables_but_never_their_values(
         env=EnvGrant.fixed({"GRANTED_NAME": "the-secret-value"}),
     )
 
-    manifest = (record_dir_of(completed) / "record.json").read_text()
+    manifest = canonical_model_bytes(
+        harness.store.load(reference_of(completed))
+    ).decode()
     assert "GRANTED_NAME" in manifest
     assert "the-secret-value" not in manifest
 
@@ -1303,7 +1362,7 @@ def test_a_spawn_absence_finalizes_directly_from_prepared(
     completed = harness.run(("/nonexistent/definitely-not-here",))
 
     assert marked == []
-    record = harness.store.load(record_dir_of(completed))
+    record = harness.store.load(reference_of(completed))
     assert record.state is RecordState.FINALIZED
 
 
@@ -1317,6 +1376,7 @@ def test_the_running_manifest_is_published_while_the_child_is_alive(
     observing_store = _MarkRunningObservedStore(
         delegate=harness.store,
         marked_running=marked_running,
+        prepared_runs=[],
     )
     (call,) = start_threaded_calls(
         (
@@ -1345,8 +1405,8 @@ def test_the_running_manifest_is_published_while_the_child_is_alive(
         assert marked_running.wait(timeout=5), (
             "mark_running publication watchdog fired"
         )
-        (record_dir,) = sorted(harness.root.iterdir())
-        record = observing_store.load(record_dir)
+        (prepared,) = observing_store.prepared_runs
+        record = observing_store.load(prepared.reference)
     finally:
         release.release()
         (completed,) = finish_threaded_calls((call,))
@@ -1362,9 +1422,12 @@ def test_the_running_manifest_is_published_while_the_child_is_alive(
 class _MarkRunningObservedStore:
     delegate: DirectoryRunStore
     marked_running: threading.Event
+    prepared_runs: list[PreparedRun]
 
     def prepare(self, record: PreparedRecord, /) -> PreparedRun:
-        return self.delegate.prepare(record)
+        prepared = self.delegate.prepare(record)
+        self.prepared_runs.append(prepared)
+        return prepared
 
     def mark_running(
         self,
@@ -1384,8 +1447,20 @@ class _MarkRunningObservedStore:
     ) -> RealRecordReceipt:
         return self.delegate.finalize(run, result)
 
-    def load(self, record_dir: Path, /) -> RunRecord:
-        return self.delegate.load(record_dir)
+    def load(self, reference: RunRecordReference, /) -> RunRecord:
+        return self.delegate.load(reference)
+
+    def read_artifact(
+        self,
+        reference: RunRecordReference,
+        artifact: OutputArtifactRecord,
+        /,
+        *,
+        max_bytes: int,
+    ) -> bytes:
+        return self.delegate.read_artifact(
+            reference, artifact, max_bytes=max_bytes
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1438,8 +1513,7 @@ def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
     assert completed.result.attribution.owner is FailureOwner.NONE
     stdout = completed.result.payload_outputs.stdout
     assert stdout.produced_bytes == produced_bytes
-    (record_dir,) = sorted(root.iterdir())
-    assert store.load(record_dir).state is RecordState.FINALIZED
+    assert store.load(reference_of(completed)).state is RecordState.FINALIZED
 
 
 @requires_macos
@@ -1543,8 +1617,7 @@ def test_a_failed_running_publication_degrades_the_receipt_by_name(
     )
 
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
-    (record_dir,) = sorted(root.iterdir())
-    assert store.load(record_dir).state is RecordState.FINALIZED
+    assert store.load(reference_of(completed)).state is RecordState.FINALIZED
     receipt = degraded_receipt_of(completed)
     assert [failure.operation for failure in receipt.failures] == [
         "mark_running"
@@ -1654,8 +1727,8 @@ def test_concurrent_calls_keep_their_attempts_fully_separate(
         for completed in completions
     }
     assert len(outputs) == call_count
-    record_dirs = {record_dir_of(completed) for completed in completions}
-    assert len(record_dirs) == call_count
+    references = {reference_of(completed) for completed in completions}
+    assert len(references) == call_count
     attempt_ids = {
         completed.result.execution_id.attempt_id for completed in completions
     }
@@ -1739,7 +1812,7 @@ def test_bootstrap_launch_failure_closes_every_attempt_resource(
     assert len(os.listdir("/dev/fd")) == before
     assert len(scratch_paths) == 1
     assert not scratch_paths[0].exists()
-    record = harness.store.load(harness.only_record_dir())
+    record = harness.store.load(harness.only_record_reference())
     assert record.state is RecordState.PREPARED
     with pytest.raises(ChildProcessError):
         os.waitpid(-1, os.WNOHANG)
@@ -1769,7 +1842,7 @@ def test_a_started_output_worker_failure_raises_after_lifecycle_cleanup(
 
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert len(os.listdir("/dev/fd")) == before
-    record = harness.store.load(harness.only_record_dir())
+    record = harness.store.load(harness.only_record_reference())
     assert record.state is RecordState.RUNNING
     with pytest.raises(ChildProcessError):
         os.waitpid(-1, os.WNOHANG)

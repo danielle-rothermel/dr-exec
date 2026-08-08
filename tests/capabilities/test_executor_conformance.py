@@ -30,6 +30,7 @@ from dr_exec import (
     IsolatedHostPythonRuntime,
     ProcessExecutor,
     RecordReceiptKind,
+    RecordState,
     TrustedCommandTarget,
 )
 from dr_exec.capabilities import CachedRecordReceipt, CachingExecutor
@@ -271,4 +272,7 @@ def test_each_executor_enforces_its_own_receipt_kind(
     else:
         assert isinstance(receipt, CompleteRecordReceipt)
         assert receipt.kind is RecordReceiptKind.COMPLETE
-        assert receipt.record_dir.is_dir()
+        assert isinstance(executor, ProcessExecutor)
+        assert executor.run_store.load(receipt.reference).state is (
+            RecordState.FINALIZED
+        )

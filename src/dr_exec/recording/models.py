@@ -24,6 +24,7 @@ from dr_exec.core.kinds import (
 )
 from dr_exec.core.model import (
     Base64UrlBytes,
+    CanonicalUuid,
     ContractModel,
     IdentityDocumentField,
     UtcDatetime,
@@ -126,6 +127,15 @@ class OutputArtifactRecord(ContractModel):
 class OutputArtifactRecords(ContractModel):
     stdout: OutputArtifactRecord
     stderr: OutputArtifactRecord
+
+
+class RunRecordReference(ContractModel):
+    """Opaque locator interpreted only by its owning run store."""
+
+    # Persisted-format literals: the backend value and field names are pinned
+    # by golden tests and must not be derived from implementation names.
+    backend: Literal["directory"] = "directory"
+    record_id: CanonicalUuid
 
 
 class RetainedPayloadStream(ContractModel):
@@ -377,14 +387,14 @@ class RecordingFailure(ContractModel):
 class CompleteRecordReceipt(ContractModel):
     kind: Literal[RecordReceiptKind.COMPLETE] = RecordReceiptKind.COMPLETE
     execution_id: ExecutionId
-    record_dir: Path
+    reference: RunRecordReference
     latest_state: Literal[RecordState.FINALIZED] = RecordState.FINALIZED
 
 
 class DegradedRecordReceipt(ContractModel):
     kind: Literal[RecordReceiptKind.DEGRADED] = RecordReceiptKind.DEGRADED
     execution_id: ExecutionId
-    record_dir: Path
+    reference: RunRecordReference
     latest_state: RecordState
     failures: tuple[RecordingFailure, ...]
 
@@ -468,6 +478,7 @@ __all__ = [
     "RunDeclaration",
     "RunRecord",
     "RunRecordHeader",
+    "RunRecordReference",
     "RunningRecord",
     "SignaledOutcome",
     "SignaledOutcomeRecord",

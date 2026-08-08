@@ -20,6 +20,7 @@ from dr_exec import (
     JobId,
     ProcessExecutor,
     RecordState,
+    RunRecordReference,
     TrustedCommandTarget,
 )
 
@@ -72,10 +73,10 @@ def job_for(target: TrustedCommandTarget, /) -> ExecutionJob:
     )
 
 
-def record_dir_of(completed: CompletedExecution, /) -> Path:
+def reference_of(completed: CompletedExecution, /) -> RunRecordReference:
     receipt = completed.record_receipt
     assert isinstance(receipt, CompleteRecordReceipt)
-    return receipt.record_dir
+    return receipt.reference
 
 
 @requires_macos
@@ -93,7 +94,7 @@ def test_run_binds_the_finalized_manifest_to_the_returned_execution(
     assert isinstance(receipt, CompleteRecordReceipt)
     assert receipt.latest_state is RecordState.FINALIZED
     assert receipt.execution_id == completed.result.execution_id
-    record = store.load(record_dir_of(completed))
+    record = store.load(reference_of(completed))
     assert isinstance(record, FinalizedRecord)
     assert record.declaration.execution_id == completed.result.execution_id
 

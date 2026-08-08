@@ -91,6 +91,7 @@ EXPECTED_PUBLIC_API = (
     "RunDeclaration",
     "RunRecord",
     "RunRecordHeader",
+    "RunRecordReference",
     "RunStore",
     "RunningRecord",
     "RunningRun",

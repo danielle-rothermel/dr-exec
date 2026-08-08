@@ -695,7 +695,7 @@ def _degraded_from(
         return receipt
     return DegradedRecordReceipt(
         execution_id=receipt.execution_id,
-        record_dir=receipt.record_dir,
+        reference=receipt.reference,
         latest_state=receipt.latest_state,
         failures=(
             *prior_failures,
@@ -716,7 +716,7 @@ def _degraded_receipt(
 ) -> RealRecordReceipt:
     return DegradedRecordReceipt(
         execution_id=run.execution_id,
-        record_dir=run.record_dir,
+        reference=run.reference,
         latest_state=RecordState.PREPARED
         if isinstance(run, PreparedRun)
         else RecordState.RUNNING,

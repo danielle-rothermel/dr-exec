@@ -3,9 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from threading import Lock, Thread
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from dr_serialize import IdentityDocument, build_identity_document
 
@@ -28,6 +27,7 @@ from dr_exec import (
     JobId,
     PayloadOutputs,
     RetainedPayloadStream,
+    RunRecordReference,
     TrustedCommandTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
@@ -177,6 +177,6 @@ def real_receipted_completion() -> CompletedExecution:
         result=execution_result(execution_id),
         record_receipt=CompleteRecordReceipt(
             execution_id=execution_id,
-            record_dir=Path("/dr-exec-test/records/run-0"),
+            reference=RunRecordReference(record_id=UUID(int=4)),
         ),
     )
