@@ -13,6 +13,7 @@ Payload content controlled by the caller and treated as ordinary program input, 
 not as adversarial content."""
 exported_symbols = [
   "dr_exec.TrustedCommandTarget",
+  "dr_exec.TrustedPythonTarget",
 ]
 
 [[terms]]
@@ -94,8 +95,9 @@ exported_symbols = [
 [[terms]]
 name = "execution protocol"
 definition = """
-The protected canonical-NDJSON channel used by untrusted Python for structured, \
-request-bound messages. It is separate from payload stdout and stderr."""
+The protected canonical-NDJSON channel used by trusted and untrusted Python \
+for structured, request-bound messages. It is separate from payload stdout and \
+stderr."""
 
 [[terms]]
 name = "protocol output"
@@ -163,3 +165,29 @@ exported_symbols = [
   "dr_exec.capabilities.CachedRecordReceipt",
   "dr_exec.capabilities.CachingExecutor",
 ]
+
+[[terms]]
+name = "importable entry point"
+definition = """
+An exact Python module name and module-level callable name resolved in the \
+selected child runtime. It locates code without verifying code, package, \
+interpreter, or dependency bytes."""
+
+[[terms]]
+name = "importable JSON process job"
+definition = """
+An execution job that invokes one importable entry point in a fresh local \
+Python child and exchanges one canonical JSON value in each direction, subject \
+to declared workload and executor self-budgets. It is one process-isolation, \
+cancellation, failure, and run-record unit and owns no application scheduling \
+or domain-effect policy."""
+is_a = [
+  "execution job",
+]
+
+[[terms]]
+name = "run record reference"
+definition = """
+A serializable opaque locator through which the selected run store loads one \
+run record and its finalized output artifacts. It exposes neither a filesystem \
+path nor the store's internal layout."""
