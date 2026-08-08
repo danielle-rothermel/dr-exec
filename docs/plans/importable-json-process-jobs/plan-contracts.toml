@@ -20,9 +20,10 @@ module-level attribute. Resolution occurs in the selected child runtime, \
 requires the exact import and a callable attribute, and rejects relative module \
 names, filesystem paths, expressions, and attribute traversal. `dr-exec` does \
 not infer or enforce an application registry; callers that require an allowlist \
-validate the declaration before job construction. The declaration and observed \
-runtime facts are recorded, but neither proves source, package, interpreter, or \
-dependency bytes or portability to another runtime."""
+validate the declaration before job construction. The declaration contributes \
+to the existing canonical target identity, and existing runtime facts retain \
+their current meaning; neither identifies or verifies source, package, \
+interpreter, or dependency bytes or portability to another runtime."""
 rationale = """
 Exact resolution is auditable and fail-closed without turning application \
 authorization policy or unverified ambient code into a foundational claim."""
@@ -32,28 +33,29 @@ date = "2026-08-08"
 title = "JSON is the complete callable boundary"
 statement = """
 The adapter provides one strict canonical JSON value as input and accepts \
-exactly one strict canonical JSON value as the result. Input uses the execution \
-job's input budget, and production result framing, bytes, count, and depth use \
-finite existing protocol self-budgets. The result crosses the protected \
-execution protocol, never payload stdout or stderr. Arbitrary Python object \
-serialization and caller-selected codecs are unsupported."""
+exactly one strict canonical JSON value as the result. The execution job's \
+existing input budget and the selected executor's existing protocol budgets \
+govern the exchange; the adapter introduces no second limit model and does not \
+inspect executor configuration. The result crosses the protected execution \
+protocol, never payload stdout or stderr. Arbitrary Python object serialization \
+and caller-selected codecs are unsupported."""
 rationale = """
-One bounded data grammar keeps the process boundary portable, inspectable, and \
-separate from diagnostic output without introducing another transport or limit \
-model."""
+One data grammar keeps the process boundary portable, inspectable, and separate \
+from diagnostic output without introducing another transport or limit model."""
 date = "2026-08-08"
 
 [[contracts]]
-title = "Adapter failures preserve execution evidence"
+title = "Adapter interpretation preserves execution evidence"
 statement = """
-Invalid entrypoint declarations and non-JSON input fail before spawn. Import or \
-attribute resolution failure, a non-callable attribute, and invalid, missing, \
-or multiple results are typed adapter or protocol failures. Nonzero exit, \
-timeout, cancellation, containment, executor machinery, and recording retain \
-their existing meanings. Every post-spawn adapter outcome retains its \
-underlying execution completion and available record evidence."""
+Syntactically invalid entrypoint declarations and non-JSON input fail before \
+spawn. After spawn, entrypoint resolution, invocation, and output failures keep \
+the representations supplied by the existing execution and protocol path; the \
+adapter adds no wire frame or execution outcome kind to classify them. Callers \
+accept an adapter result only when a returned completion contains exactly one \
+valid output. That completion and its record receipt remain the source of \
+failure evidence."""
 rationale = """
-Protocol interpretation can add facts specific to callable invocation without \
+Protocol interpretation can enforce the adapter's result shape without \
 discarding or reclassifying evidence owned by the execution engine."""
 date = "2026-08-08"
 
@@ -65,7 +67,9 @@ concurrency nor durable scheduling. Standalone fan-out uses `ExecutionPool`; a \
 durable workflow platform invokes one job per scheduled stage without nesting \
 a local pool by default. The adapter exposes no provider retry, backoff, commit, \
 cache, reward, artifact-publication, or other application policy surface; \
-applications apply those effects after receiving the returned data."""
+it provides no domain-effect API and makes no side-effect-free execution \
+guarantee. Callers choose workers intended to return data and own any \
+downstream effects."""
 rationale = """
 Keeping execution mechanism separate from workflow and domain policy prevents a \
 second scheduler or application framework from accumulating in `dr-exec`."""
