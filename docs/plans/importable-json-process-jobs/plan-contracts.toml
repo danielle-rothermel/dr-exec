@@ -1,76 +1,65 @@
-# Proposed additions for the importable JSON process jobs plan.
-
 [[contracts]]
 title = "Importable JSON process jobs reuse the execution path"
 statement = """
-An importable JSON process job is represented as an ordinary execution job and \
-runs through the selected `Executor`. Its adapter may construct the target and \
-interpret the completion, but does not independently spawn processes, manage \
-environment grants, enforce lifecycle limits, cancel, schedule, or record."""
+An importable JSON process job is an ordinary execution job run through the \
+selected `Executor`. Its adapter constructs the target and interprets the \
+completion; spawning, environment grants, lifecycle limits, cancellation, \
+scheduling, and recording remain with their existing owners."""
 rationale = """
-One execution path keeps process creation, bounds, containment, cancellation, \
-cleanup, and durable evidence under their existing owners."""
+This keeps process lifecycle, limits, containment, cleanup, and evidence on one \
+path."""
 date = "2026-08-08"
 
 [[contracts]]
 title = "Importable entry points are declarations, not code identities"
 statement = """
 An importable entry point names one fully qualified Python module and one \
-module-level attribute. Resolution occurs in the selected child runtime, \
-requires the exact import and a callable attribute, and rejects relative module \
-names, filesystem paths, expressions, and attribute traversal. `dr-exec` does \
-not infer or enforce an application registry; callers that require an allowlist \
-validate the declaration before job construction. The declaration contributes \
-to the existing canonical target identity, and existing runtime facts retain \
-their current meaning; neither identifies or verifies source, package, \
-interpreter, or dependency bytes or portability to another runtime."""
+module-level attribute. The selected child runtime performs the exact import \
+and one attribute lookup, which must produce a callable; relative modules, \
+filesystem paths, expressions, and attribute traversal are unsupported. \
+`dr-exec` provides no registry; callers enforce allowlists before job \
+construction. The declaration contributes to canonical target identity, while \
+existing runtime facts retain their meaning; neither verifies source, package, \
+interpreter, dependency bytes, or portability."""
 rationale = """
-Exact resolution is auditable and fail-closed without turning application \
-authorization policy or unverified ambient code into a foundational claim."""
+Exact fail-closed lookup is auditable without making application authorization \
+or ambient code identity a `dr-exec` guarantee."""
 date = "2026-08-08"
 
 [[contracts]]
-title = "JSON is the complete callable boundary"
+title = "Callable input and output are JSON"
 statement = """
-The adapter provides one strict canonical JSON value as input and accepts \
-exactly one strict canonical JSON value as the result. The execution job's \
-existing input budget and the selected executor's existing protocol budgets \
-govern the exchange; the adapter introduces no second limit model and does not \
-inspect executor configuration. The result crosses the protected execution \
-protocol, never payload stdout or stderr. Arbitrary Python object serialization \
-and caller-selected codecs are unsupported."""
+The adapter sends one strict JSON value in canonical form and accepts exactly \
+one such result. Existing job input and executor protocol budgets govern the \
+exchange; the adapter adds no limit model and does not inspect configuration. \
+Results use the protected execution protocol, not payload stdout or stderr. \
+Arbitrary Python object serialization and custom codecs are unsupported."""
 rationale = """
-One data grammar keeps the process boundary portable, inspectable, and separate \
-from diagnostic output without introducing another transport or limit model."""
+One data grammar keeps results inspectable and separate from diagnostics \
+without another transport or limit model."""
 date = "2026-08-08"
 
 [[contracts]]
 title = "Adapter interpretation preserves execution evidence"
 statement = """
-Syntactically invalid entrypoint declarations and non-JSON input fail before \
-spawn. After spawn, entrypoint resolution, invocation, and output failures keep \
-the representations supplied by the existing execution and protocol path; the \
-adapter adds no wire frame or execution outcome kind to classify them. Callers \
-accept an adapter result only when a returned completion contains exactly one \
-valid output. That completion and its record receipt remain the source of \
+Syntactically invalid entrypoints and non-JSON input fail before spawn. \
+Post-spawn resolution, invocation, and output failures retain existing \
+execution and protocol representations; the adapter adds no wire frame or \
+outcome kind. A completion is an adapter success only when it contains exactly \
+one valid output; otherwise its execution result and record receipt remain the \
 failure evidence."""
 rationale = """
-Protocol interpretation can enforce the adapter's result shape without \
-discarding or reclassifying evidence owned by the execution engine."""
+The adapter validates result shape without reclassifying execution evidence."""
 date = "2026-08-08"
 
 [[contracts]]
 title = "Scheduling and domain effects remain caller-owned"
 statement = """
-The adapter handles one execution job and introduces neither internal \
-concurrency nor durable scheduling. Standalone fan-out uses `ExecutionPool`; a \
-durable workflow platform invokes one job per scheduled stage without nesting \
-a local pool by default. The adapter exposes no provider retry, backoff, commit, \
-cache, reward, artifact-publication, or other application policy surface; \
-it provides no domain-effect API and makes no side-effect-free execution \
-guarantee. Callers choose workers intended to return data and own any \
-downstream effects."""
+The adapter handles one job and owns neither concurrency nor durable scheduling. \
+Standalone fan-out uses `ExecutionPool`; durable workflows invoke one job per \
+stage without a nested local pool by default. The adapter owns no retry or other \
+application policy, exposes no domain-effect API, and makes no side-effect-free \
+guarantee. Callers choose data-returning workers and own downstream effects."""
 rationale = """
-Keeping execution mechanism separate from workflow and domain policy prevents a \
-second scheduler or application framework from accumulating in `dr-exec`."""
+This keeps execution separate from workflow and domain policy."""
 date = "2026-08-08"
