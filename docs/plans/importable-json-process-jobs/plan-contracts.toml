@@ -1,0 +1,72 @@
+# Proposed additions for the importable JSON process jobs plan.
+
+[[contracts]]
+title = "Importable JSON process jobs reuse the execution path"
+statement = """
+An importable JSON process job is represented as an ordinary execution job and \
+runs through the selected `Executor`. Its adapter may construct the target and \
+interpret the completion, but does not independently spawn processes, manage \
+environment grants, enforce lifecycle limits, cancel, schedule, or record."""
+rationale = """
+One execution path keeps process creation, bounds, containment, cancellation, \
+cleanup, and durable evidence under their existing owners."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Importable entry points are declarations, not code identities"
+statement = """
+An importable entry point names one fully qualified Python module and one \
+module-level attribute. Resolution occurs in the selected child runtime, \
+requires the exact import and a callable attribute, and rejects relative module \
+names, filesystem paths, expressions, and attribute traversal. `dr-exec` does \
+not infer or enforce an application registry; callers that require an allowlist \
+validate the declaration before job construction. The declaration and observed \
+runtime facts are recorded, but neither proves source, package, interpreter, or \
+dependency bytes or portability to another runtime."""
+rationale = """
+Exact resolution is auditable and fail-closed without turning application \
+authorization policy or unverified ambient code into a foundational claim."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "JSON is the complete callable boundary"
+statement = """
+The adapter provides one strict canonical JSON value as input and accepts \
+exactly one strict canonical JSON value as the result. Input uses the execution \
+job's input budget, and production result framing, bytes, count, and depth use \
+finite existing protocol self-budgets. The result crosses the protected \
+execution protocol, never payload stdout or stderr. Arbitrary Python object \
+serialization and caller-selected codecs are unsupported."""
+rationale = """
+One bounded data grammar keeps the process boundary portable, inspectable, and \
+separate from diagnostic output without introducing another transport or limit \
+model."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Adapter failures preserve execution evidence"
+statement = """
+Invalid entrypoint declarations and non-JSON input fail before spawn. Import or \
+attribute resolution failure, a non-callable attribute, and invalid, missing, \
+or multiple results are typed adapter or protocol failures. Nonzero exit, \
+timeout, cancellation, containment, executor machinery, and recording retain \
+their existing meanings. Every post-spawn adapter outcome retains its \
+underlying execution completion and available record evidence."""
+rationale = """
+Protocol interpretation can add facts specific to callable invocation without \
+discarding or reclassifying evidence owned by the execution engine."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Scheduling and domain effects remain caller-owned"
+statement = """
+The adapter handles one execution job and introduces neither internal \
+concurrency nor durable scheduling. Standalone fan-out uses `ExecutionPool`; a \
+durable workflow platform invokes one job per scheduled stage without nesting \
+a local pool by default. The adapter exposes no provider retry, backoff, commit, \
+cache, reward, artifact-publication, or other application policy surface; \
+applications apply those effects after receiving the returned data."""
+rationale = """
+Keeping execution mechanism separate from workflow and domain policy prevents a \
+second scheduler or application framework from accumulating in `dr-exec`."""
+date = "2026-08-08"

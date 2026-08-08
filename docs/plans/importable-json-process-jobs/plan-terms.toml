@@ -1,0 +1,21 @@
+#:schema ../../../.defs/terms.schema.json
+
+# Proposed additions for the importable JSON process jobs plan.
+
+[[terms]]
+name = "importable entry point"
+definition = """
+An exact Python module and module-level callable name resolved inside the \
+selected child runtime. It identifies where to find code but does not verify \
+the code, package, interpreter, or dependency bytes."""
+
+[[terms]]
+name = "importable JSON process job"
+definition = """
+An execution job that invokes one importable entry point in a fresh local \
+Python child, provides one bounded canonical JSON input, and accepts one \
+bounded canonical JSON result through the ordinary execution lifecycle. It \
+carries no application scheduling or domain side-effect policy."""
+is_a = [
+  "execution job",
+]
