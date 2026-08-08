@@ -29,6 +29,7 @@ from dr_exec import (
     RetainedPayloadStream,
     RunRecordReference,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
@@ -102,6 +103,17 @@ def python_target(echo: str = "ran", /) -> ExecutionTarget:
             payload={"echo": echo},
         ),
         containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+    )
+
+
+def trusted_python_target(echo: str = "ran", /) -> ExecutionTarget:
+    return TrustedPythonTarget(
+        driver_source=ECHO_DRIVER,
+        request=build_identity_document(
+            schema="dr_exec.test_request",
+            schema_version=1,
+            payload={"echo": echo},
+        ),
     )
 
 

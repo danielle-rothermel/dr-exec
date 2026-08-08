@@ -22,6 +22,7 @@ from dr_exec import (
     PayloadRetentionBudget,
     StreamRetentionBudget,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UnbudgetedLimit,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
@@ -284,15 +285,46 @@ def test_command_targets_reject_invalid_argv(
         declare()
 
 
+@pytest.mark.parametrize("trusted", [True, False])
 def test_python_targets_reject_nul_in_driver_source(
     request_document: IdentityDocument,
+    *,
+    trusted: bool,
 ) -> None:
     with pytest.raises(ValidationError, match="must not contain NUL"):
-        UntrustedPythonTarget(
-            driver_source="before\0after",
-            request=request_document,
-            containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+        (
+            TrustedPythonTarget(
+                driver_source="before\0after",
+                request=request_document,
+            )
+            if trusted
+            else UntrustedPythonTarget(
+                driver_source="before\0after",
+                request=request_document,
+                containment_profile=(ContainmentProfile.PROCESS_BOUNDARY_ONLY),
+            )
         )
+
+
+def test_python_target_trust_is_a_closed_shape_difference(
+    request_document: IdentityDocument,
+) -> None:
+    trusted = TrustedPythonTarget(
+        driver_source="def dr_exec_main(request, emit): ...\n",
+        request=request_document,
+    )
+    untrusted = UntrustedPythonTarget(
+        driver_source=trusted.driver_source,
+        request=request_document,
+        containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+    )
+
+    assert trusted.kind.value == "trusted_python"
+    assert "containment_profile" not in type(trusted).model_fields
+    assert untrusted.kind.value == "untrusted_python"
+    assert untrusted.containment_profile is (
+        ContainmentProfile.PROCESS_BOUNDARY_ONLY
+    )
 
 
 UNSUPPORTED_FINITE_WORKLOAD_AXES = (

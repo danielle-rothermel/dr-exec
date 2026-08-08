@@ -78,10 +78,12 @@ from dr_exec import (
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
     TrustedCommandTargetRecord,
+    TrustedPythonTargetRecord,
 )
 from dr_exec.declarations.models import (
     ExecutorSelfBudgets,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
@@ -508,6 +510,9 @@ _UNTRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS = frozenset(
         "runtime.id_doc.payload.cache_tag",
         "runtime.id_doc.payload.platform",
     }
+)
+_TRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS = (
+    _UNTRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS - {"containment_profile"}
 )
 
 
@@ -1024,6 +1029,24 @@ def test_accepted_protocol_outputs_stay_inline_and_complete(
             id="untrusted-command",
         ),
         pytest.param(
+            TrustedPythonTarget(
+                driver_source=PYTHON_DRIVER_CANARY,
+                request=build_identity_document(
+                    schema="dr_exec.secret_request",
+                    schema_version=1,
+                    payload={"secret": PYTHON_REQUEST_CANARY},
+                ),
+            ),
+            PYTHON_ENV_CANARY,
+            (
+                PYTHON_DRIVER_CANARY,
+                PYTHON_REQUEST_CANARY,
+                PYTHON_ENV_CANARY,
+            ),
+            _TRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS,
+            id="trusted-python",
+        ),
+        pytest.param(
             UntrustedPythonTarget(
                 driver_source=PYTHON_DRIVER_CANARY,
                 request=build_identity_document(
@@ -1092,6 +1115,9 @@ def test_each_target_producer_is_secret_free_across_the_lifecycle(
     prepared = json.loads(prepared_bytes)
     assert prepared["declaration"]["env"]["var_names"] == ["TOKEN"]
     assert len(prepared["declaration"]["env"]["canonical_values_sha256"]) == 64
+    target_record = prepared_record.declaration.target
+    if isinstance(target_record, TrustedPythonTargetRecord):
+        assert "containment_profile" not in type(target_record).model_fields
 
 
 @pytest.mark.parametrize(

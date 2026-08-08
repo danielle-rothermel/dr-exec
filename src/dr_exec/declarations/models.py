@@ -314,6 +314,29 @@ class UntrustedCommandTarget(ContractModel):
     _validated_argv = field_validator("argv")(_validate_argv)
 
 
+def _validate_driver_source(source: str) -> str:
+    if "\0" in source:
+        raise ValueError("driver_source must not contain NUL")
+    return source
+
+
+class TrustedPythonTarget(ContractModel):
+    kind: Literal[ExecutionTargetKind.TRUSTED_PYTHON] = (
+        ExecutionTargetKind.TRUSTED_PYTHON
+    )
+    driver_source: str = Field(
+        description=(
+            "Python source defining dr_exec_main(request, emit); the "
+            "library-owned bootstrap opens fd 3 before loading it"
+        )
+    )
+    request: IdentityDocumentField
+
+    _validated_driver_source = field_validator("driver_source")(
+        _validate_driver_source
+    )
+
+
 class UntrustedPythonTarget(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = (
         ExecutionTargetKind.UNTRUSTED_PYTHON
@@ -327,16 +350,16 @@ class UntrustedPythonTarget(ContractModel):
     request: IdentityDocumentField
     containment_profile: ContainmentProfile
 
-    @field_validator("driver_source")
-    @classmethod
-    def driver_source_must_be_nul_free(cls, source: str) -> str:
-        if "\0" in source:
-            raise ValueError("driver_source must not contain NUL")
-        return source
+    _validated_driver_source = field_validator("driver_source")(
+        _validate_driver_source
+    )
 
 
 type ExecutionTarget = Annotated[
-    TrustedCommandTarget | UntrustedCommandTarget | UntrustedPythonTarget,
+    TrustedCommandTarget
+    | TrustedPythonTarget
+    | UntrustedCommandTarget
+    | UntrustedPythonTarget,
     Field(discriminator="kind"),
 ]
 
@@ -368,6 +391,7 @@ __all__ = [
     "PayloadRetentionBudget",
     "StreamRetentionBudget",
     "TrustedCommandTarget",
+    "TrustedPythonTarget",
     "UnbudgetedLimit",
     "UnbudgetedOutput",
     "UntrustedCommandTarget",

@@ -28,6 +28,7 @@ from dr_exec import (
     RunRecordReference,
     StreamRetentionBudget,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedPythonTarget,
 )
 from dr_exec.core.model import ContractModel, canonical_model_bytes
@@ -263,6 +264,21 @@ def test_untrusted_python_target_wire_spelling_is_pinned(
         b'{"containment_profile":"process_boundary_only","driver_source":'
         b'"def dr_exec_main(request, emit):\\n    return None\\n",'
         b'"kind":"untrusted_python","request":{"payload":{"a":[1,'
+        b'{"z":null}],"b":2},"schema":"dr_exec.test_request",'
+        b'"schema_version":1}}'
+    )
+
+
+def test_trusted_python_target_wire_spelling_is_pinned(
+    request_document: IdentityDocument,
+) -> None:
+    target = TrustedPythonTarget(
+        driver_source="def dr_exec_main(request, emit):\n    return None\n",
+        request=request_document,
+    )
+    assert canonical_model_bytes(target) == (
+        b'{"driver_source":"def dr_exec_main(request, emit):\\n    return '
+        b'None\\n","kind":"trusted_python","request":{"payload":{"a":[1,'
         b'{"z":null}],"b":2},"schema":"dr_exec.test_request",'
         b'"schema_version":1}}'
     )

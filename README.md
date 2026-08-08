@@ -18,8 +18,8 @@ that creates another session can outlive teardown. Isolated host Python also
 does not verify interpreter, standard-library, or package bytes.
 
 - **[Declarations](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/declarations)**
-  describe trusted commands, untrusted commands, and untrusted Python together
-  with their environment grants and resource budgets.
+  describe trusted and untrusted command and Python targets together with their
+  environment grants and resource budgets.
 - **[Execution](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/execution)**
   owns process startup, input and output transport, budget enforcement,
   cancellation, teardown, and outcome attribution.
@@ -95,6 +95,12 @@ class UntrustedCommandTarget(ContractModel):
     containment_profile: ContainmentProfile
 
 
+class TrustedPythonTarget(ContractModel):
+    kind: Literal[ExecutionTargetKind.TRUSTED_PYTHON] = ...
+    driver_source: str
+    request: IdentityDocumentField
+
+
 class UntrustedPythonTarget(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = ...
     driver_source: str
@@ -103,7 +109,10 @@ class UntrustedPythonTarget(ContractModel):
 
 
 type ExecutionTarget = Annotated[
-    TrustedCommandTarget | UntrustedCommandTarget | UntrustedPythonTarget,
+    TrustedCommandTarget
+    | TrustedPythonTarget
+    | UntrustedCommandTarget
+    | UntrustedPythonTarget,
     Field(discriminator="kind"),
 ]
 ```
@@ -149,15 +158,18 @@ open-file count, and disk limits must remain explicitly unbudgeted.
 
 ## Runtime
 
-The runtime boundary turns an untrusted Python target into an invocation and a
-recorded runtime description. The v1 implementation resolves and probes a host
-interpreter, then invokes it with isolated Python startup controls.
+The runtime boundary turns either Python target into an invocation and a
+recorded runtime description. Trusted and untrusted Python use the same child,
+startup, request, and protected-protocol path; only the untrusted declaration
+and record carry containment evidence. The v1 implementation resolves and
+probes a host interpreter, then invokes it with isolated Python startup
+controls.
 
 ```python
 class Runtime(Protocol):
     def prepare(
         self,
-        target: UntrustedPythonTarget,
+        target: TrustedPythonTarget | UntrustedPythonTarget,
         /,
     ) -> PreparedPythonProcess: ...
 
@@ -171,7 +183,7 @@ class IsolatedHostPythonRuntime:
 
     def prepare(
         self,
-        target: UntrustedPythonTarget,
+        target: TrustedPythonTarget | UntrustedPythonTarget,
         /,
     ) -> PreparedPythonProcess: ...
 

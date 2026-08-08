@@ -107,6 +107,8 @@ EXPECTED_PUBLIC_API = (
     "StreamRetentionBudget",
     "TrustedCommandTarget",
     "TrustedCommandTargetRecord",
+    "TrustedPythonTarget",
+    "TrustedPythonTargetRecord",
     "UnbudgetedLimit",
     "UnbudgetedOutput",
     "UntrustedCommandTarget",

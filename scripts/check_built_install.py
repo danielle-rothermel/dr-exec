@@ -6,7 +6,7 @@ from sys import argv
 import dr_exec
 from dr_exec.capabilities import CachedRecordReceipt, CachingExecutor
 
-EXPECTED_ROOT_EXPORT_COUNT = 109
+EXPECTED_ROOT_EXPORT_COUNT = 111
 
 
 def main() -> None:

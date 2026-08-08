@@ -19,7 +19,9 @@ from support.executor import (
     cache_scope_identity_document,
     empty_payload_outputs,
     job_for,
+    python_target,
     run_thread_calls,
+    trusted_python_target,
     trusted_target,
 )
 
@@ -436,6 +438,16 @@ def test_a_changed_declaration_misses() -> None:
 
     executor.run(job_for(trusted_target(("/usr/bin/true",))))
     executor.run(job_for(trusted_target(("/usr/bin/false",))))
+
+    assert len(fake.calls) == 2
+
+
+def test_python_target_trust_is_part_of_the_cache_declaration() -> None:
+    fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
+    executor = caching_over_fake(fake)
+
+    executor.run(job_for(trusted_python_target("same-request")))
+    executor.run(job_for(python_target("same-request")))
 
     assert len(fake.calls) == 2
 

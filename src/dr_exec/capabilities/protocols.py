@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Protocol
 
 from dr_exec.core.cancel import CancelToken
-from dr_exec.declarations.models import ExecutionJob, UntrustedPythonTarget
+from dr_exec.declarations.models import (
+    ExecutionJob,
+    TrustedPythonTarget,
+    UntrustedPythonTarget,
+)
 from dr_exec.recording.models import (
     CompletedExecution,
     ExecutionResult,
@@ -32,7 +36,7 @@ class Executor(Protocol):
 class Runtime(Protocol):
     def prepare(
         self,
-        target: UntrustedPythonTarget,
+        target: TrustedPythonTarget | UntrustedPythonTarget,
         /,
     ) -> PreparedPythonProcess:
         raise NotImplementedError

@@ -67,6 +67,15 @@ class UntrustedCommandTargetRecord(ContractModel):
     containment_profile: ContainmentProfile
 
 
+class TrustedPythonTargetRecord(ContractModel):
+    kind: Literal[ExecutionTargetKind.TRUSTED_PYTHON] = (
+        ExecutionTargetKind.TRUSTED_PYTHON
+    )
+    canonical_declaration_sha256: Sha256Digest
+    request_id_sha256: Sha256Digest
+    runtime: RuntimeRecord
+
+
 class UntrustedPythonTargetRecord(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = (
         ExecutionTargetKind.UNTRUSTED_PYTHON
@@ -79,6 +88,7 @@ class UntrustedPythonTargetRecord(ContractModel):
 
 type ExecutionTargetRecord = Annotated[
     TrustedCommandTargetRecord
+    | TrustedPythonTargetRecord
     | UntrustedCommandTargetRecord
     | UntrustedPythonTargetRecord,
     Field(discriminator="kind"),
@@ -488,6 +498,7 @@ __all__ = [
     "SpawnFailedOutcome",
     "SpawnFailedOutcomeRecord",
     "TrustedCommandTargetRecord",
+    "TrustedPythonTargetRecord",
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTargetRecord",
 ]

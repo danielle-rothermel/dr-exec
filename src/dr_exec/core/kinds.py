@@ -36,6 +36,7 @@ class OutputOverflowPolicy(StrEnum):
 @verify(UNIQUE)
 class ExecutionTargetKind(StrEnum):
     TRUSTED_COMMAND = "trusted_command"
+    TRUSTED_PYTHON = "trusted_python"
     UNTRUSTED_COMMAND = "untrusted_command"
     UNTRUSTED_PYTHON = "untrusted_python"
 

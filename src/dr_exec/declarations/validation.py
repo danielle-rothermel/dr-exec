@@ -9,6 +9,7 @@ from dr_exec.declarations.models import (
     ExecutionJob,
     FiniteByteLimit,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
@@ -23,7 +24,7 @@ def declared_input_bytes(job: ExecutionJob, /) -> bytes:
     match job.target:
         case TrustedCommandTarget() | UntrustedCommandTarget():
             return job.target.stdin
-        case UntrustedPythonTarget():
+        case TrustedPythonTarget() | UntrustedPythonTarget():
             return request_transport_bytes(job.target.request)
 
 
@@ -70,7 +71,7 @@ def validate_declaration(job: ExecutionJob, /) -> None:
             validate_command_resolvability(
                 job.target.argv, granted_environment(job.env)
             )
-        case UntrustedPythonTarget():
+        case TrustedPythonTarget() | UntrustedPythonTarget():
             return
 
 

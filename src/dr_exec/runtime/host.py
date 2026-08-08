@@ -5,12 +5,19 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dr_serialize import IdentityDocument
+from dr_serialize import Sha256Digest
 from pydantic import model_validator
 
 from dr_exec.core.kinds import RuntimeKind
 from dr_exec.core.model import ContractModel, IdentityDocumentField
-from dr_exec.declarations.models import UntrustedPythonTarget
+from dr_exec.declarations.models import (
+    TrustedPythonTarget,
+    UntrustedPythonTarget,
+)
+from dr_exec.declarations.transport import (
+    request_transport_bytes,
+    request_transport_digest,
+)
 from dr_exec.runtime.bootstrap import (
     ISOLATED_INVOCATION_ARGUMENTS,
     driver_wrapper_source,
@@ -41,7 +48,8 @@ class RuntimeRecord(ContractModel):
 @dataclass(frozen=True, slots=True)
 class PreparedPythonProcess:
     argv: tuple[str, ...]
-    request: IdentityDocument
+    request_bytes: bytes
+    request_id_sha256: Sha256Digest
     runtime_record: RuntimeRecord
 
 
@@ -83,16 +91,18 @@ class IsolatedHostPythonRuntime:
 
     def prepare(
         self,
-        target: UntrustedPythonTarget,
+        target: TrustedPythonTarget | UntrustedPythonTarget,
         /,
     ) -> PreparedPythonProcess:
+        request_bytes = request_transport_bytes(target.request)
         return PreparedPythonProcess(
             argv=(
                 self.executable.as_posix(),
                 *ISOLATED_INVOCATION_ARGUMENTS,
                 driver_wrapper_source(target.driver_source),
             ),
-            request=target.request,
+            request_bytes=request_bytes,
+            request_id_sha256=request_transport_digest(request_bytes),
             runtime_record=self._runtime_record,
         )
 

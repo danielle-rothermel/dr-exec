@@ -5,6 +5,7 @@ from dr_serialize import IdentityDocument
 from dr_exec import (
     ContainmentProfile,
     EnvGrant,
+    TrustedPythonTarget,
     UntrustedPythonTarget,
 )
 from dr_exec.core.model import canonical_model_bytes
@@ -30,6 +31,20 @@ def test_identity_document_fields_round_trip_through_the_wire_form(
         containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
     )
     restored = UntrustedPythonTarget.model_validate_json(
+        canonical_model_bytes(target), strict=True
+    )
+    assert restored.request == request_document
+    assert restored == target
+
+
+def test_trusted_identity_document_fields_round_trip_through_the_wire_form(
+    request_document: IdentityDocument,
+) -> None:
+    target = TrustedPythonTarget(
+        driver_source="def dr_exec_main(r, e): ...\n",
+        request=request_document,
+    )
+    restored = TrustedPythonTarget.model_validate_json(
         canonical_model_bytes(target), strict=True
     )
     assert restored.request == request_document

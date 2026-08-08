@@ -13,6 +13,7 @@ from support.executor import (
     fake_completion,
     job_for,
     python_target,
+    trusted_python_target,
     trusted_target,
     untrusted_command_target,
 )
@@ -154,6 +155,13 @@ def python_request_exceeding_its_declared_budget() -> ExecutionJob:
     )
 
 
+def trusted_python_request_exceeding_its_declared_budget() -> ExecutionJob:
+    return job_for(
+        trusted_python_target("a-request-longer-than-four-bytes"),
+        budgets=Budgets(input_bytes=FiniteByteLimit(max_bytes=4)),
+    )
+
+
 INVALID_DECLARATIONS = [
     pytest.param(
         relative_executable_without_granted_path, id="relative-no-path"
@@ -177,7 +185,11 @@ INVALID_DECLARATIONS = [
     pytest.param(input_exceeding_its_declared_budget, id="input-over-budget"),
     pytest.param(
         python_request_exceeding_its_declared_budget,
-        id="python-request-over-budget",
+        id="untrusted-python-request-over-budget",
+    ),
+    pytest.param(
+        trusted_python_request_exceeding_its_declared_budget,
+        id="trusted-python-request-over-budget",
     ),
 ]
 

@@ -48,6 +48,8 @@ from dr_exec import (
     RecordState,
     RunRecord,
     RunRecordReference,
+    TrustedPythonTarget,
+    TrustedPythonTargetRecord,
     UntrustedPythonTarget,
     UntrustedPythonTargetRecord,
 )
@@ -161,6 +163,7 @@ class Harness:
         budgets: Budgets | None = None,
         self_budgets: ExecutorSelfBudgets | None = None,
         cancellation: CancelToken | None = None,
+        trusted: bool = False,
     ) -> CompletedExecution:
         executor = (
             self.executor
@@ -179,6 +182,7 @@ class Harness:
                 request=request,
                 env=env,
                 budgets=budgets,
+                trusted=trusted,
             ),
             cancellation=cancellation,
         )
@@ -193,21 +197,32 @@ class Harness:
         request: IdentityDocument | None = None,
         env: EnvGrant | None = None,
         budgets: Budgets | None = None,
+        trusted: bool = False,
     ) -> ExecutionJob:
+        request_document = (
+            build_identity_document(
+                schema=REQUEST_SCHEMA,
+                schema_version=1,
+                payload={"count": count, "echo": echo},
+            )
+            if request is None
+            else request
+        )
         return ExecutionJob(
             job_id=JobId(uuid4()),
-            target=UntrustedPythonTarget(
-                driver_source=driver_source,
-                request=(
-                    build_identity_document(
-                        schema=REQUEST_SCHEMA,
-                        schema_version=1,
-                        payload={"count": count, "echo": echo},
-                    )
-                    if request is None
-                    else request
-                ),
-                containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+            target=(
+                TrustedPythonTarget(
+                    driver_source=driver_source,
+                    request=request_document,
+                )
+                if trusted
+                else UntrustedPythonTarget(
+                    driver_source=driver_source,
+                    request=request_document,
+                    containment_profile=(
+                        ContainmentProfile.PROCESS_BOUNDARY_ONLY
+                    ),
+                )
             ),
             env=env if env is not None else EnvGrant.none(),
             budgets=budgets if budgets is not None else Budgets.unbudgeted(),
@@ -268,6 +283,50 @@ def test_a_python_target_returns_its_outputs_and_a_clean_exit(
     assert payloads_of(completed) == [
         {"index": index, "echo": "hello"} for index in range(3)
     ]
+
+
+@requires_macos
+@pytest.mark.parametrize(
+    "trusted", [True, False], ids=["trusted", "untrusted"]
+)
+def test_python_target_trust_variants_share_callable_and_protocol_behavior(
+    harness: Harness,
+    *,
+    trusted: bool,
+) -> None:
+    job = harness.job(
+        ECHO_DRIVER,
+        count=2,
+        echo="same-path",
+        trusted=trusted,
+    )
+    completed = harness.executor.run(job)
+
+    assert completed.result.outcome == ExitedOutcome(exit_code=0)
+    assert payloads_of(completed) == [
+        {"index": 0, "echo": "same-path"},
+        {"index": 1, "echo": "same-path"},
+    ]
+    record = harness.store.load(reference_of(completed))
+    assert isinstance(record, FinalizedRecord)
+    target = record.declaration.target
+    expected_type = (
+        TrustedPythonTargetRecord if trusted else UntrustedPythonTargetRecord
+    )
+    assert isinstance(target, expected_type)
+    declared_target = job.target
+    assert isinstance(
+        declared_target, TrustedPythonTarget | UntrustedPythonTarget
+    )
+    assert target.request_id_sha256 == (
+        harness.executor.runtime.prepare(declared_target).request_id_sha256
+    )
+    if isinstance(target, TrustedPythonTargetRecord):
+        assert "containment_profile" not in type(target).model_fields
+    else:
+        assert target.containment_profile is (
+            ContainmentProfile.PROCESS_BOUNDARY_ONLY
+        )
 
 
 @requires_macos
