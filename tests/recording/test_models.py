@@ -300,6 +300,7 @@ def test_cached_completion_binds_result_to_source_not_requested_job() -> None:
     receipt = CachedRecordReceipt(
         requested_job_id=_execution_id(3).job_id,
         source_execution_id=_execution_id(5),
+        source_record_reference=None,
         cache_key="dr_exec.test_cache_key",
     )
 
@@ -317,6 +318,7 @@ def test_cached_completion_round_trips_through_its_wire_union() -> None:
         record_receipt=CachedRecordReceipt(
             requested_job_id=_execution_id(3).job_id,
             source_execution_id=source_execution_id,
+            source_record_reference=RunRecordReference(record_id=UUID(int=7)),
             cache_key="dr_exec.test_cache_key",
         ),
     )
@@ -328,3 +330,21 @@ def test_cached_completion_round_trips_through_its_wire_union() -> None:
 
     assert restored == completed
     assert isinstance(restored.record_receipt, CachedRecordReceipt)
+
+
+def test_cached_receipt_wire_keys_are_pinned() -> None:
+    receipt = CachedRecordReceipt(
+        requested_job_id=_execution_id(3).job_id,
+        source_execution_id=_execution_id(1),
+        source_record_reference=RunRecordReference(record_id=UUID(int=7)),
+        cache_key="dr_exec.test_cache_key",
+    )
+
+    assert canonical_model_bytes(receipt) == (
+        b'{"cache_key":"dr_exec.test_cache_key","kind":"cached",'
+        b'"requested_job_id":"00000000-0000-0000-0000-000000000003",'
+        b'"source_execution_id":{"attempt_id":"00000000-0000-0000-0000-'
+        b'000000000002","job_id":"00000000-0000-0000-0000-000000000001"},'
+        b'"source_record_reference":{"backend":"directory","record_id":'
+        b'"00000000-0000-0000-0000-000000000007"}}'
+    )

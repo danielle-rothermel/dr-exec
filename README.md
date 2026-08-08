@@ -389,7 +389,10 @@ Consumers can program against the small `Executor`, `Runtime`, and `RunStore`
 Protocols while selecting concrete implementations separately. The optional
 caching wrapper replays eligible results within a caller-owned scope; the
 selected cache backend defines how long entries persist. Replayed results retain
-their source execution identity, while the receipt identifies the current job.
+their source execution identity, while the receipt identifies the current job
+and preserves the source run-record reference when the source has a real
+record. Retention may later make that reference unresolved; loading it then
+fails visibly without invalidating the cached result or embedding a record copy.
 An already-cancelled call bypasses replay and remains the inner executor's
 responsibility.
 
@@ -447,6 +450,7 @@ class CachedRecordReceipt(ContractModel):
     kind: Literal[RecordReceiptKind.CACHED] = ...
     requested_job_id: JobId
     source_execution_id: ExecutionId
+    source_record_reference: RunRecordReference | None
     cache_key: str
 ```
 

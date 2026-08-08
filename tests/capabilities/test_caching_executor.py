@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from dr_serialize import build_identity_document
@@ -31,6 +31,9 @@ from dr_exec import (
     CancelledOutcome,
     CancelToken,
     CompletedExecution,
+    CompleteRecordReceipt,
+    DegradedRecordReceipt,
+    DirectoryRunStore,
     EnvGrant,
     ExecutionAttribution,
     ExecutionId,
@@ -45,14 +48,23 @@ from dr_exec import (
     FiniteDurationLimit,
     JobId,
     PayloadOutputs,
+    RecordingFailure,
+    RecordLoadError,
     RecordReceiptKind,
+    RecordState,
     RetainedPayloadStream,
+    RunRecordReference,
     SignaledOutcome,
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
 )
 from dr_exec.capabilities import CachedRecordReceipt, CachingExecutor
-from dr_exec.capabilities.caching import _cache_key, _CacheFormat
+from dr_exec.capabilities.caching import (
+    _cache_key,
+    _CacheFormat,
+    _CacheValue,
+)
+from dr_exec.core.model import canonical_model_bytes
 
 WATCHDOG_SECONDS = 30.0
 
@@ -96,6 +108,96 @@ def completion_with(
 
 def exited_completion() -> CompletedExecution:
     return completion_with(ExitedOutcome(exit_code=0), FailureOwner.NONE)
+
+
+def real_receipted_completion(*, degraded: bool) -> CompletedExecution:
+    completed = exited_completion()
+    reference = RunRecordReference(record_id=uuid4())
+    receipt = (
+        DegradedRecordReceipt(
+            execution_id=completed.result.execution_id,
+            reference=reference,
+            latest_state=RecordState.RUNNING,
+            failures=(
+                RecordingFailure(
+                    operation="finalize", errno=5, detail="OSError"
+                ),
+            ),
+        )
+        if degraded
+        else CompleteRecordReceipt(
+            execution_id=completed.result.execution_id,
+            reference=reference,
+        )
+    )
+    return CompletedExecution(result=completed.result, record_receipt=receipt)
+
+
+class ReturningExecutor:
+    def __init__(self, completed: CompletedExecution, /) -> None:
+        self.completed = completed
+        self.calls: list[ExecutionJob] = []
+
+    def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        del cancellation
+        self.calls.append(job)
+        return self.completed
+
+
+def test_cache_value_schema_and_wire_keys_are_pinned() -> None:
+    execution_id = ExecutionId(
+        job_id=JobId(UUID(int=1)), attempt_id=AttemptId(UUID(int=2))
+    )
+    moment = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    empty_stream = RetainedPayloadStream(
+        head=b"", tail=b"", produced_bytes=0, dropped_bytes=0
+    )
+    value = _CacheValue(
+        result=ExecutionResult(
+            execution_id=execution_id,
+            outcome=ExitedOutcome(exit_code=0),
+            attribution=ExecutionAttribution(owner=FailureOwner.NONE),
+            protocol_outputs=(),
+            payload_outputs=PayloadOutputs(
+                stdout=empty_stream,
+                stderr=empty_stream,
+            ),
+            measurements=ExecutionMeasurements(
+                started_at=moment,
+                finished_at=moment,
+                duration_ns=0,
+                teardown_duration_ns=0,
+                input_bytes=0,
+                protocol_bytes_received=0,
+            ),
+        ),
+        source_record_reference=RunRecordReference(record_id=UUID(int=7)),
+    )
+
+    assert _CacheFormat.VALUE_SCHEMA == (
+        "dr_exec.caching_executor.execution_result.v2"
+    )
+    assert canonical_model_bytes(value) == (
+        b'{"result":{"attribution":{"detail":null,"owner":"none"},'
+        b'"execution_id":{"attempt_id":"00000000-0000-0000-0000-'
+        b'000000000002","job_id":"00000000-0000-0000-0000-000000000001"},'
+        b'"measurements":{"duration_ns":0,"finished_at":'
+        b'"2026-08-08T12:00:00.000000Z","input_bytes":0,'
+        b'"protocol_bytes_received":0,"started_at":'
+        b'"2026-08-08T12:00:00.000000Z","teardown_duration_ns":0},'
+        b'"outcome":{"exit_code":0,"kind":"exited"},"payload_outputs":'
+        b'{"stderr":{"dropped_bytes":0,"head":"","produced_bytes":0,'
+        b'"tail":""},"stdout":{"dropped_bytes":0,"head":"",'
+        b'"produced_bytes":0,"tail":""}},"protocol_outputs":[]},'
+        b'"source_record_reference":{"backend":"directory","record_id":'
+        b'"00000000-0000-0000-0000-000000000007"}}'
+    )
 
 
 def replay_evidence_completion() -> CompletedExecution:
@@ -182,6 +284,84 @@ def test_a_hit_replays_the_stored_result_without_delegating() -> None:
     assert second.record_receipt.cache_key == _cache_key(
         second_job, cache_scope_identity=cache_scope_identity_document()
     )
+    assert second.record_receipt.source_record_reference is None
+
+
+@pytest.mark.parametrize("degraded", [False, True])
+def test_a_real_source_record_reference_is_persisted(
+    degraded: bool,
+) -> None:
+    source = real_receipted_completion(degraded=degraded)
+    inner = ReturningExecutor(source)
+    executor = CachingExecutor(
+        inner,
+        cache=fresh_cache(),
+        cache_scope_identity=cache_scope_identity_document(),
+    )
+
+    executor.run(job())
+    replayed = executor.run(job())
+
+    assert len(inner.calls) == 1
+    assert isinstance(
+        source.record_receipt,
+        CompleteRecordReceipt | DegradedRecordReceipt,
+    )
+    assert isinstance(replayed.record_receipt, CachedRecordReceipt)
+    assert replayed.record_receipt.source_record_reference == (
+        source.record_receipt.reference
+    )
+
+
+def test_a_layered_cache_preserves_the_original_source_reference() -> None:
+    source = real_receipted_completion(degraded=False)
+    base = ReturningExecutor(source)
+    inner = CachingExecutor(
+        base,
+        cache=fresh_cache(),
+        cache_scope_identity=cache_scope_identity_document(),
+    )
+    inner.run(job())
+    outer = CachingExecutor(
+        inner,
+        cache=fresh_cache(),
+        cache_scope_identity=cache_scope_identity_document(),
+    )
+
+    inner_replay = outer.run(job())
+    outer_replay = outer.run(job())
+
+    assert len(base.calls) == 1
+    assert isinstance(inner_replay.record_receipt, CachedRecordReceipt)
+    assert isinstance(outer_replay.record_receipt, CachedRecordReceipt)
+    assert outer_replay.record_receipt.source_record_reference == (
+        inner_replay.record_receipt.source_record_reference
+    )
+
+
+def test_an_unresolved_source_reference_does_not_make_a_cache_miss(
+    tmp_path: Path,
+) -> None:
+    source = real_receipted_completion(degraded=False)
+    inner = ReturningExecutor(source)
+    executor = CachingExecutor(
+        inner,
+        cache=fresh_cache(),
+        cache_scope_identity=cache_scope_identity_document(),
+    )
+    records = tmp_path / "records"
+    records.mkdir()
+    store = DirectoryRunStore(root=records)
+
+    executor.run(job())
+    replayed = executor.run(job())
+
+    assert len(inner.calls) == 1
+    assert isinstance(replayed.record_receipt, CachedRecordReceipt)
+    reference = replayed.record_receipt.source_record_reference
+    assert reference is not None
+    with pytest.raises(RecordLoadError, match="could not resolve"):
+        store.load(reference)
 
 
 def test_an_already_cancelled_call_bypasses_a_warm_hit(
@@ -420,7 +600,10 @@ def test_a_policy_ineligible_valid_entry_reads_as_a_miss() -> None:
     cache.put(
         key,
         _CacheFormat.VALUE_SCHEMA,
-        ineligible.model_dump(mode="json"),
+        _CacheValue(
+            result=ineligible,
+            source_record_reference=None,
+        ).model_dump(mode="json"),
     )
     fake = FakeExecutor(responder=lambda _j, _c: exited_completion())
 

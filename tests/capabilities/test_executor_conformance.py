@@ -259,6 +259,7 @@ def test_caching_executor_preserves_supported_declarations_on_a_warm_hit(
     assert replayed.record_receipt.source_execution_id == (
         source.result.execution_id
     )
+    assert replayed.record_receipt.source_record_reference is None
 
 
 def test_each_executor_enforces_its_own_receipt_kind(

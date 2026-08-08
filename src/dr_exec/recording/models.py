@@ -407,11 +407,12 @@ class FakeRecordReceipt(ContractModel):
 
 
 class CachedRecordReceipt(ContractModel):
-    """Identify the request and source execution of a cache replay."""
+    """Identify the request and source evidence of a cache replay."""
 
     kind: Literal[RecordReceiptKind.CACHED] = RecordReceiptKind.CACHED
     requested_job_id: JobId
     source_execution_id: ExecutionId
+    source_record_reference: RunRecordReference | None
     cache_key: str
 
 

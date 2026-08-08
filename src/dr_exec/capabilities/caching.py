@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import UNIQUE, StrEnum, verify
-from typing import Literal, cast
+from typing import Literal, assert_never, cast
 
 from dr_serialize import (
     IdentityDocument,
@@ -29,8 +29,13 @@ from dr_exec.recording.models import (
     BudgetExceededOutcome,
     CachedRecordReceipt,
     CompletedExecution,
+    CompleteRecordReceipt,
+    DegradedRecordReceipt,
     ExecutionResult,
     ExitedOutcome,
+    FakeRecordReceipt,
+    RecordReceipt,
+    RunRecordReference,
 )
 
 
@@ -39,7 +44,7 @@ class _CacheFormat(StrEnum):
     # Bump a value when its corresponding shape changes. Members are named
     # contract constants, never an iterable payload source.
     KEY_NAMESPACE = "dr_exec.caching_executor.key.v1"
-    VALUE_SCHEMA = "dr_exec.caching_executor.execution_result.v1"
+    VALUE_SCHEMA = "dr_exec.caching_executor.execution_result.v2"
 
 
 # Reusing infrastructure-attributed results could preserve a transient or
@@ -56,6 +61,11 @@ class _CacheKeyPayload(ContractModel):
     budgets: Budgets
     cache_scope_identity_sha256: Sha256Digest
     cache_budget_exceeded: bool
+
+
+class _CacheValue(ContractModel):
+    result: ExecutionResult
+    source_record_reference: RunRecordReference | None
 
 
 class CachingExecutor:
@@ -103,32 +113,39 @@ class CachingExecutor:
             cache_scope_identity=self._cache_scope_identity,
             cache_budget_exceeded=self._cache_budget_exceeded,
         )
-        replayed = _replayed_result(
+        replayed = _replayed_value(
             self._cache.get(key, schema=_CacheFormat.VALUE_SCHEMA)
         )
         if (
             replayed is not None
             and _is_cacheable(
-                replayed,
+                replayed.result,
                 cache_budget_exceeded=self._cache_budget_exceeded,
             )
             and not (cancellation is not None and cancellation.cancelled)
         ):
             return _cached_completion(
-                replayed,
+                replayed.result,
                 key,
                 requested_job_id=job.job_id,
+                source_record_reference=replayed.source_record_reference,
             )
         completed = self._inner.run(job, cancellation=cancellation)
         if _is_cacheable(
             completed.result,
             cache_budget_exceeded=self._cache_budget_exceeded,
         ):
-            self._store(key, completed.result)
+            self._store(key, completed)
         return completed
 
-    def _store(self, key: str, result: ExecutionResult, /) -> None:
-        record = cast("Jsonable", result.model_dump(mode="json"))
+    def _store(self, key: str, completed: CompletedExecution, /) -> None:
+        value = _CacheValue(
+            result=completed.result,
+            source_record_reference=_source_record_reference(
+                completed.record_receipt
+            ),
+        )
+        record = cast("Jsonable", value.model_dump(mode="json"))
         try:
             self._cache.put(key, _CacheFormat.VALUE_SCHEMA, record)
         except StoreError:
@@ -157,14 +174,14 @@ def _cache_key(
     return derive_cache_key(_CacheFormat.KEY_NAMESPACE, projection)
 
 
-def _replayed_result(
+def _replayed_value(
     hit: CacheHit | None,
     /,
-) -> ExecutionResult | None:
+) -> _CacheValue | None:
     if hit is None:
         return None
     try:
-        return ExecutionResult.model_validate_json(
+        return _CacheValue.model_validate_json(
             canonical_json_bytes(hit.record), strict=True
         )
     except (SerializationError, ValidationError):
@@ -177,15 +194,30 @@ def _cached_completion(
     /,
     *,
     requested_job_id: JobId,
+    source_record_reference: RunRecordReference | None,
 ) -> CompletedExecution:
     return CompletedExecution(
         result=result,
         record_receipt=CachedRecordReceipt(
             requested_job_id=requested_job_id,
             source_execution_id=result.execution_id,
+            source_record_reference=source_record_reference,
             cache_key=key,
         ),
     )
+
+
+def _source_record_reference(
+    receipt: RecordReceipt,
+    /,
+) -> RunRecordReference | None:
+    if isinstance(receipt, CompleteRecordReceipt | DegradedRecordReceipt):
+        return receipt.reference
+    if isinstance(receipt, CachedRecordReceipt):
+        return receipt.source_record_reference
+    if isinstance(receipt, FakeRecordReceipt):
+        return None
+    assert_never(receipt)
 
 
 def _is_cacheable(
