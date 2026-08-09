@@ -12,7 +12,6 @@ from uuid import uuid4
 from dr_serialize import Jsonable, validate_strict_json
 
 import dr_exec
-from dr_exec.capabilities import CachedRecordReceipt, CachingExecutor
 
 EXPECTED_ROOT_EXPORT_COUNT = 116
 WATCHDOG_SECONDS = 30.0
@@ -48,13 +47,12 @@ def main() -> None:
     if missing_exports:
         raise ValueError(f"missing root exports: {missing_exports!r}")
 
-    capability_exports = (CachedRecordReceipt, CachingExecutor)
     if sys.platform == "darwin":
         _check_importable_json_process_jobs(repository_root)
     print(
         f"Validated {len(exports)} root exports from installed wheel at "
-        f"{package_file}, plus {len(capability_exports)} capability exports "
-        f"and the separately installed fixture at {fixture_file}."
+        f"{package_file}, plus the separately installed fixture at "
+        f"{fixture_file}."
     )
 
 

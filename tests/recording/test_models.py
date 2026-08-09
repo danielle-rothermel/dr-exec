@@ -33,7 +33,6 @@ from dr_exec import (
     RetainedPayloadStreamRecord,
     RunRecordReference,
 )
-from dr_exec.capabilities import CachedRecordReceipt
 from dr_exec.core.model import canonical_model_bytes
 
 VALID_DIGEST = "a" * 64
@@ -292,59 +291,4 @@ def test_degraded_receipt_wire_keys_are_pinned() -> None:
         b'"kind":"degraded","latest_state":"running","reference":'
         b'{"backend":"directory","record_id":"00000000-0000-0000-0000-'
         b'000000000007"}}'
-    )
-
-
-def test_cached_completion_binds_result_to_source_not_requested_job() -> None:
-    source_execution_id = _execution_id(1)
-    receipt = CachedRecordReceipt(
-        requested_job_id=_execution_id(3).job_id,
-        source_execution_id=_execution_id(5),
-        source_record_reference=None,
-        cache_key="dr_exec.test_cache_key",
-    )
-
-    with pytest.raises(ValidationError):
-        CompletedExecution(
-            result=_result(source_execution_id),
-            record_receipt=receipt,
-        )
-
-
-def test_cached_completion_round_trips_through_its_wire_union() -> None:
-    source_execution_id = _execution_id(1)
-    completed = CompletedExecution(
-        result=_result(source_execution_id),
-        record_receipt=CachedRecordReceipt(
-            requested_job_id=_execution_id(3).job_id,
-            source_execution_id=source_execution_id,
-            source_record_reference=RunRecordReference(record_id=UUID(int=7)),
-            cache_key="dr_exec.test_cache_key",
-        ),
-    )
-
-    restored = CompletedExecution.model_validate_json(
-        canonical_model_bytes(completed),
-        strict=True,
-    )
-
-    assert restored == completed
-    assert isinstance(restored.record_receipt, CachedRecordReceipt)
-
-
-def test_cached_receipt_wire_keys_are_pinned() -> None:
-    receipt = CachedRecordReceipt(
-        requested_job_id=_execution_id(3).job_id,
-        source_execution_id=_execution_id(1),
-        source_record_reference=RunRecordReference(record_id=UUID(int=7)),
-        cache_key="dr_exec.test_cache_key",
-    )
-
-    assert canonical_model_bytes(receipt) == (
-        b'{"cache_key":"dr_exec.test_cache_key","kind":"cached",'
-        b'"requested_job_id":"00000000-0000-0000-0000-000000000003",'
-        b'"source_execution_id":{"attempt_id":"00000000-0000-0000-0000-'
-        b'000000000002","job_id":"00000000-0000-0000-0000-000000000001"},'
-        b'"source_record_reference":{"backend":"directory","record_id":'
-        b'"00000000-0000-0000-0000-000000000007"}}'
     )

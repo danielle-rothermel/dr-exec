@@ -32,7 +32,7 @@ does not verify interpreter, standard-library, or package bytes.
   with completion-order delivery and intake backpressure.
 - **[Capabilities](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/capabilities)**
   supplies the executor, runtime, and run-store boundaries together with the
-  library-owned fake and caller-scoped caching executors.
+  library-owned fake executor.
 - **[Runtime](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/runtime)**
   prepares isolated Python invocations and protects structured protocol
   messages from payload output.
@@ -65,7 +65,6 @@ class RecordReceiptKind(StrEnum):
     COMPLETE = "complete"
     DEGRADED = "degraded"
     NOT_APPLICABLE = "not_applicable"
-    CACHED = "cached"
 
 
 class CancelToken:
@@ -336,8 +335,7 @@ class CompletedExecution(ContractModel):
 type RecordReceipt = Annotated[
     CompleteRecordReceipt
     | DegradedRecordReceipt
-    | FakeRecordReceipt
-    | CachedRecordReceipt,
+    | FakeRecordReceipt,
     Field(discriminator="kind"),
 ]
 ```
@@ -446,15 +444,9 @@ class ExecutionPool:
 ## Capabilities
 
 Consumers can program against the small `Executor`, `Runtime`, and `RunStore`
-Protocols while selecting concrete implementations separately. The optional
-caching wrapper replays eligible results within a caller-owned scope; the
-selected cache backend defines how long entries persist. Replayed results retain
-their source execution identity, while the receipt identifies the current job
-and preserves the source run-record reference when the source has a real
-record. Retention may later make that reference unresolved; loading it then
-fails visibly without invalidating the cached result or embedding a record copy.
-An already-cancelled call bypasses replay and remains the inner executor's
-responsibility.
+Protocols while selecting concrete implementations separately. `FakeExecutor`
+preserves shared declaration and concurrency contracts without claiming host,
+process, containment, or durable-record behavior.
 
 ```python
 class FakeExecutor:
@@ -465,53 +457,6 @@ class FakeExecutor:
         *,
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution: ...
-```
-
-```python
-class CachingExecutor:
-    def __init__(
-        self,
-        inner: Executor,
-        /,
-        *,
-        cache: RecordCache,
-        cache_scope_identity: IdentityDocument,
-        cache_budget_exceeded: bool = False,
-    ) -> None: ...
-
-    def run(
-        self,
-        job: ExecutionJob,
-        /,
-        *,
-        cancellation: CancelToken | None = None,
-    ) -> CompletedExecution: ...
-```
-
-`CachingExecutor` does not own or close an injected cache; the caller owns its
-lifecycle. For a persistent SQLite cache, keep the wrapper within the managed
-cache scope:
-
-```python
-from dr_exec.capabilities import CachingExecutor
-from dr_store import SqliteRecordCache
-
-with SqliteRecordCache("cache.sqlite3") as cache:
-    executor = CachingExecutor(
-        inner,
-        cache=cache,
-        cache_scope_identity=cache_scope_identity,
-    )
-    completed = executor.run(job)
-```
-
-```python
-class CachedRecordReceipt(ContractModel):
-    kind: Literal[RecordReceiptKind.CACHED] = ...
-    requested_job_id: JobId
-    source_execution_id: ExecutionId
-    source_record_reference: RunRecordReference | None
-    cache_key: str
 ```
 
 ## Development

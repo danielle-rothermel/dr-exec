@@ -175,7 +175,7 @@ def _artifact_record(
     return OutputArtifactRecord(
         relative_path=Path(name),
         size_bytes=summary.head_length + summary.tail_length,
-        sha256=Sha256Digest(summary.digest),
+        sha256=Sha256Digest(summary.sidecar_hash),
     )
 
 
@@ -505,7 +505,7 @@ def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:
         try:
             directory.verify_sidecar(
                 expected_name,
-                expected_digest=artifact.sha256,
+                expected_sidecar_hash=artifact.sha256,
                 expected_head_length=stream.head_bytes,
                 expected_tail_length=stream.tail_bytes,
             )

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from threading import Lock, Thread
 from uuid import UUID, uuid4
 
-from dr_serialize import IdentityDocument, build_identity_document
+from dr_serialize import build_identity_document
 
 from dr_exec import (
     AttemptId,
@@ -114,17 +114,6 @@ def trusted_python_target(echo: str = "ran", /) -> ExecutionTarget:
             schema_version=1,
             payload={"echo": echo},
         ),
-    )
-
-
-def cache_scope_identity_document(
-    scope: str = "default",
-    /,
-) -> IdentityDocument:
-    return build_identity_document(
-        schema="dr_exec.test_cache_scope",
-        schema_version=1,
-        payload={"scope": scope},
     )
 
 

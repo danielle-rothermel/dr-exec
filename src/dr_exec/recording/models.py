@@ -29,7 +29,7 @@ from dr_exec.core.model import (
     IdentityDocumentField,
     UtcDatetime,
 )
-from dr_exec.core.names import ExecutionId, JobId
+from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import Budgets, EnvGrantRecord
 from dr_exec.recording.identity import (
     _validate_executor_config_identity,
@@ -416,22 +416,9 @@ class FakeRecordReceipt(ContractModel):
     execution_id: ExecutionId
 
 
-class CachedRecordReceipt(ContractModel):
-    """Identify the request and source evidence of a cache replay."""
-
-    kind: Literal[RecordReceiptKind.CACHED] = RecordReceiptKind.CACHED
-    requested_job_id: JobId
-    source_execution_id: ExecutionId
-    source_record_reference: RunRecordReference | None
-    cache_key: str
-
-
 type RealRecordReceipt = CompleteRecordReceipt | DegradedRecordReceipt
 type RecordReceipt = Annotated[
-    CompleteRecordReceipt
-    | DegradedRecordReceipt
-    | FakeRecordReceipt
-    | CachedRecordReceipt,
+    CompleteRecordReceipt | DegradedRecordReceipt | FakeRecordReceipt,
     Field(discriminator="kind"),
 ]
 
@@ -442,12 +429,7 @@ class CompletedExecution(ContractModel):
 
     @model_validator(mode="after")
     def execution_ids_must_match(self) -> CompletedExecution:
-        receipt_execution_id = (
-            self.record_receipt.source_execution_id
-            if isinstance(self.record_receipt, CachedRecordReceipt)
-            else self.record_receipt.execution_id
-        )
-        if self.result.execution_id != receipt_execution_id:
+        if self.result.execution_id != self.record_receipt.execution_id:
             raise ValueError("result and record receipt execution IDs differ")
         return self
 
@@ -455,7 +437,6 @@ class CompletedExecution(ContractModel):
 __all__ = [
     "BudgetExceededOutcome",
     "BudgetExceededOutcomeRecord",
-    "CachedRecordReceipt",
     "CancelledOutcome",
     "CancelledOutcomeRecord",
     "CompleteRecordReceipt",
