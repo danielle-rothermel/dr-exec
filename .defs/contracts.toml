@@ -261,9 +261,8 @@ statement = """
 Real lifecycle handles and receipts carry a serializable `RunRecordReference`, \
 not a filesystem path. The selected `RunStore` accepts that reference to load \
 the record and to read a named finalized artifact under a required finite byte \
-limit; unsupported or unresolved references fail without path fallback. A \
-cached receipt carries its source reference when its source has a real record. \
-Only the store resolves physical layout. Retention, partitioning, archival, and \
+limit; unsupported or unresolved references fail without path fallback. Only \
+the store resolves physical layout. Retention, partitioning, archival, and \
 deletion remain store or operator policy."""
 rationale = """
 Opaque access permits another store layout without changing persisted receipts \
