@@ -5,6 +5,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-08
+
+### Added
+
+- Added trusted Python targets alongside the existing untrusted variant on the
+  same runtime, protocol, budget, cancellation, and recording path.
+- Added importable JSON process jobs with strict entry-point declarations,
+  trusted and untrusted builders, one canonical JSON value in each direction,
+  and explicit completion parsing.
+- Added a repeatable resource and throughput investigation for representative
+  importable JSON workloads.
+
+### Changed
+
+- Replaced public run-record paths with opaque serializable references and
+  store-owned bounded artifact reads.
+- Preserved selected virtual-environment interpreter paths so installed child
+  dependencies remain importable under isolated Python startup.
+- Updated to `dr-store` 0.2.0 and its `sidecar_hash` API.
+- Updated the authoritative terms and contracts for trusted Python, importable
+  JSON jobs, and backend-neutral run-record access.
+
+### Removed
+
+- Removed `CachingExecutor`, cached receipts, and their persistence contract;
+  caching remains application-owned rather than bridging synchronous execution
+  to the asynchronous `dr-store` Record Cache.
+
 ## [0.1.4] - 2026-08-06
 
 ### Changed
