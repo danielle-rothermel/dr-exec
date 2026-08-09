@@ -24,11 +24,12 @@ from dr_exec.core.kinds import (
 )
 from dr_exec.core.model import (
     Base64UrlBytes,
+    CanonicalUuid,
     ContractModel,
     IdentityDocumentField,
     UtcDatetime,
 )
-from dr_exec.core.names import ExecutionId, JobId
+from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import Budgets, EnvGrantRecord
 from dr_exec.recording.identity import (
     _validate_executor_config_identity,
@@ -66,6 +67,15 @@ class UntrustedCommandTargetRecord(ContractModel):
     containment_profile: ContainmentProfile
 
 
+class TrustedPythonTargetRecord(ContractModel):
+    kind: Literal[ExecutionTargetKind.TRUSTED_PYTHON] = (
+        ExecutionTargetKind.TRUSTED_PYTHON
+    )
+    canonical_declaration_sha256: Sha256Digest
+    request_id_sha256: Sha256Digest
+    runtime: RuntimeRecord
+
+
 class UntrustedPythonTargetRecord(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = (
         ExecutionTargetKind.UNTRUSTED_PYTHON
@@ -78,6 +88,7 @@ class UntrustedPythonTargetRecord(ContractModel):
 
 type ExecutionTargetRecord = Annotated[
     TrustedCommandTargetRecord
+    | TrustedPythonTargetRecord
     | UntrustedCommandTargetRecord
     | UntrustedPythonTargetRecord,
     Field(discriminator="kind"),
@@ -126,6 +137,15 @@ class OutputArtifactRecord(ContractModel):
 class OutputArtifactRecords(ContractModel):
     stdout: OutputArtifactRecord
     stderr: OutputArtifactRecord
+
+
+class RunRecordReference(ContractModel):
+    """Opaque locator interpreted only by its owning run store."""
+
+    # Persisted-format literals: the backend value and field names are pinned
+    # by golden tests and must not be derived from implementation names.
+    backend: Literal["directory"] = "directory"
+    record_id: CanonicalUuid
 
 
 class RetainedPayloadStream(ContractModel):
@@ -377,14 +397,14 @@ class RecordingFailure(ContractModel):
 class CompleteRecordReceipt(ContractModel):
     kind: Literal[RecordReceiptKind.COMPLETE] = RecordReceiptKind.COMPLETE
     execution_id: ExecutionId
-    record_dir: Path
+    reference: RunRecordReference
     latest_state: Literal[RecordState.FINALIZED] = RecordState.FINALIZED
 
 
 class DegradedRecordReceipt(ContractModel):
     kind: Literal[RecordReceiptKind.DEGRADED] = RecordReceiptKind.DEGRADED
     execution_id: ExecutionId
-    record_dir: Path
+    reference: RunRecordReference
     latest_state: RecordState
     failures: tuple[RecordingFailure, ...]
 
@@ -396,21 +416,9 @@ class FakeRecordReceipt(ContractModel):
     execution_id: ExecutionId
 
 
-class CachedRecordReceipt(ContractModel):
-    """Identify the request and source execution of a cache replay."""
-
-    kind: Literal[RecordReceiptKind.CACHED] = RecordReceiptKind.CACHED
-    requested_job_id: JobId
-    source_execution_id: ExecutionId
-    cache_key: str
-
-
 type RealRecordReceipt = CompleteRecordReceipt | DegradedRecordReceipt
 type RecordReceipt = Annotated[
-    CompleteRecordReceipt
-    | DegradedRecordReceipt
-    | FakeRecordReceipt
-    | CachedRecordReceipt,
+    CompleteRecordReceipt | DegradedRecordReceipt | FakeRecordReceipt,
     Field(discriminator="kind"),
 ]
 
@@ -421,12 +429,7 @@ class CompletedExecution(ContractModel):
 
     @model_validator(mode="after")
     def execution_ids_must_match(self) -> CompletedExecution:
-        receipt_execution_id = (
-            self.record_receipt.source_execution_id
-            if isinstance(self.record_receipt, CachedRecordReceipt)
-            else self.record_receipt.execution_id
-        )
-        if self.result.execution_id != receipt_execution_id:
+        if self.result.execution_id != self.record_receipt.execution_id:
             raise ValueError("result and record receipt execution IDs differ")
         return self
 
@@ -434,7 +437,6 @@ class CompletedExecution(ContractModel):
 __all__ = [
     "BudgetExceededOutcome",
     "BudgetExceededOutcomeRecord",
-    "CachedRecordReceipt",
     "CancelledOutcome",
     "CancelledOutcomeRecord",
     "CompleteRecordReceipt",
@@ -468,6 +470,7 @@ __all__ = [
     "RunDeclaration",
     "RunRecord",
     "RunRecordHeader",
+    "RunRecordReference",
     "RunningRecord",
     "SignaledOutcome",
     "SignaledOutcomeRecord",
@@ -476,6 +479,7 @@ __all__ = [
     "SpawnFailedOutcome",
     "SpawnFailedOutcomeRecord",
     "TrustedCommandTargetRecord",
+    "TrustedPythonTargetRecord",
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTargetRecord",
 ]

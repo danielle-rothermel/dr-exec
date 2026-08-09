@@ -159,8 +159,8 @@ date = "2026-08-05"
 [[contracts]]
 title = "Structured Python output uses one protected protocol"
 statement = """
-An untrusted Python child receives one canonical request followed by EOF and \
-emits a versioned, request-bound canonical-NDJSON stream on a protected \
+A trusted or untrusted Python child receives one canonical request followed by \
+EOF and emits a versioned, request-bound canonical-NDJSON stream on a protected \
 descriptor. Complete accepted protocol outputs remain structured data and are \
 not decoded from, mixed with, or truncated like stdout and stderr."""
 rationale = """
@@ -183,29 +183,89 @@ only resource reused across jobs."""
 date = "2026-08-05"
 
 [[contracts]]
-title = "Cached completions replay caller-scoped declared inputs"
+title = "Importable JSON process jobs reuse the execution path"
 statement = """
-`CachingExecutor` uses a versioned key covering the target declaration, \
-environment grant, workload budgets, cache policy, and an opaque caller-owned \
-cache scope; job identity is excluded so equivalent submissions can share an \
-entry. The caller changes that scope when relevant executor, runtime, command, \
-or ambient inputs change and uses caching only for jobs it treats as \
-deterministic within the scope. The scope does not prove the inner executor's \
-runtime or implementation. The executor stores exited outcomes, stores \
-budget-exceeded outcomes only behind an explicit opt-in, and neither stores nor \
-replays executor- or machine-attributed outcomes. A hit returns the source \
-result under a distinct receipt identifying the requested job, source \
-execution, and cache entry. Missing, mismatched, corrupt, or otherwise \
-unverifiable records are misses. Operational backend failures may propagate \
-from reads or writes, and a conflicting write keeps the first stored entry. \
-An already-cancelled call is delegated to the inner executor without replaying \
-a cache hit. \
-There is no TTL, eviction, or delete; invalidation is by key and schema \
-versioning only. Entry persistence is defined by the selected cache backend."""
+An importable JSON process job is an ordinary execution job run through the \
+selected `Executor`. Its adapter constructs the target and interprets the \
+completion; spawning, environment grants, lifecycle limits, cancellation, \
+scheduling, and recording remain with their existing owners. Trusted and \
+untrusted Python targets use the same mechanism and differ only in their trust \
+and containment declarations and corresponding evidence."""
 rationale = """
-Explicit job inputs prevent known cross-declaration aliasing, while caller-owned \
-scope makes the remaining determinism assumption visible without claiming that \
-dr-exec can infer ambient state. Source and request identities keep replay \
-provenance distinct from new process evidence, and the inner executor retains \
-ownership of cancellation semantics."""
-date = "2026-08-06"
+This keeps process lifecycle, limits, containment, cleanup, and evidence on one \
+path."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Importable entry points are declarations, not code identities"
+statement = """
+An importable entry point names one fully qualified Python module and one \
+module-level attribute. The selected child runtime performs the exact import \
+and one attribute lookup, which must produce a callable; relative modules, \
+filesystem paths, expressions, and attribute traversal are unsupported. \
+`dr-exec` provides no registry; callers enforce allowlists before job \
+construction. The declaration contributes to canonical target identity, while \
+existing runtime facts retain their meaning; neither verifies source, package, \
+interpreter, dependency bytes, or portability."""
+rationale = """
+Exact fail-closed lookup is auditable without making application authorization \
+or ambient code identity a `dr-exec` guarantee."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Callable input and output are JSON"
+statement = """
+The adapter sends one strict JSON value in canonical form and accepts exactly \
+one such result through one fixed private identity envelope. Job input and \
+executor protocol budgets default to unbudgeted; callers may select their \
+existing finite limits, and the adapter adds no limit model or configuration \
+inspection. Results use the protected execution protocol, not payload stdout \
+or stderr. Arbitrary Python object serialization and custom codecs are \
+unsupported."""
+rationale = """
+One data grammar keeps results inspectable and separate from diagnostics \
+without another transport or limit model."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Adapter interpretation preserves execution evidence"
+statement = """
+Syntactically invalid entrypoints and non-JSON input fail before spawn. \
+Post-spawn resolution, invocation, and output failures retain existing \
+execution and protocol representations; the adapter adds no wire frame or \
+outcome kind. A completion is an adapter success only when it exits cleanly \
+with code zero and contains exactly one valid output; otherwise its execution \
+result and record receipt remain the failure evidence."""
+rationale = """
+The adapter validates result shape without reclassifying execution evidence."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Scheduling and domain effects remain caller-owned"
+statement = """
+The adapter handles one job and owns neither concurrency nor durable scheduling. \
+Standalone fan-out uses `ExecutionPool`; durable workflows invoke one job per \
+stage without a nested local pool by default. One job is one isolation, \
+cancellation, failure, and recording unit; its JSON value may contain a finite \
+caller-owned batch only when its members may share that fate. The adapter \
+provides no batch envelope, mapping, per-item result, or per-item retry. It owns \
+no other application policy or domain-effect API and makes no side-effect-free \
+guarantee."""
+rationale = """
+This keeps execution separate from workflow and domain policy."""
+date = "2026-08-08"
+
+[[contracts]]
+title = "Run-record access is store-owned and backend-neutral"
+statement = """
+Real lifecycle handles and receipts carry a serializable `RunRecordReference`, \
+not a filesystem path. The selected `RunStore` accepts that reference to load \
+the record and to read a named finalized artifact under a required finite byte \
+limit; unsupported or unresolved references fail without path fallback. A \
+cached receipt carries its source reference when its source has a real record. \
+Only the store resolves physical layout. Retention, partitioning, archival, and \
+deletion remain store or operator policy."""
+rationale = """
+Opaque access permits another store layout without changing persisted receipts \
+or teaching callers to join storage paths."""
+date = "2026-08-08"

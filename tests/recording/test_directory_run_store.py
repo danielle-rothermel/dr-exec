@@ -7,12 +7,13 @@ from base64 import urlsafe_b64encode
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
 from dr_serialize import (
     IdentityDocument,
+    Sha256Digest,
     build_identity_document,
     canonical_identity_json_bytes,
     canonical_json_bytes,
@@ -57,6 +58,7 @@ from dr_exec import (
     IsolatedHostPythonRuntime,
     JobId,
     OutcomeKind,
+    OutputArtifactRecord,
     PayloadOutputs,
     PreparedRecord,
     PreparedRun,
@@ -71,14 +73,17 @@ from dr_exec import (
     RunningRecord,
     RunningRun,
     RunRecordHeader,
+    RunRecordReference,
     SignaledOutcome,
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
     TrustedCommandTargetRecord,
+    TrustedPythonTargetRecord,
 )
 from dr_exec.declarations.models import (
     ExecutorSelfBudgets,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
@@ -137,6 +142,12 @@ def store(tmp_path: Path) -> DirectoryRunStore:
     root = tmp_path / "records"
     root.mkdir()
     return DirectoryRunStore(root=root)
+
+
+def _record_dir(
+    store: DirectoryRunStore, run: PreparedRun | RunningRun, /
+) -> Path:
+    return store._record_dir(run.reference)
 
 
 def _header() -> RunRecordHeader:
@@ -500,6 +511,9 @@ _UNTRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS = frozenset(
         "runtime.id_doc.payload.platform",
     }
 )
+_TRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS = (
+    _UNTRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS - {"containment_profile"}
+)
 
 
 def _with_target_leaf_key_paths(
@@ -532,9 +546,11 @@ def test_prepare_publishes_a_complete_prepared_record(
     run = store.prepare(prepared_record)
 
     assert run.execution_id == execution_id
-    assert run.record_dir.parent == store.root
-    assert run.record_dir.name.startswith(f"{RECORD_DIRECTORY_PREFIX}-")
-    assert store.load(run.record_dir) == prepared_record
+    assert _record_dir(store, run).parent == store.root
+    assert _record_dir(store, run).name.startswith(
+        f"{RECORD_DIRECTORY_PREFIX}-"
+    )
+    assert store.load(run.reference) == prepared_record
 
 
 def test_a_relative_root_is_normalized_for_the_store_and_allocated_run(
@@ -550,7 +566,49 @@ def test_a_relative_root_is_normalized_for_the_store_and_allocated_run(
     run = store.prepare(_prepared_record(execution_id))
 
     assert store.root == tmp_path / relative_root
-    assert run.record_dir.parent == store.root
+    assert _record_dir(store, run).parent == store.root
+
+
+def test_load_rejects_a_reference_owned_by_another_root(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    tmp_path: Path,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    other_root = tmp_path / "other-records"
+    other_root.mkdir()
+
+    with pytest.raises(RecordLoadError, match="could not resolve"):
+        DirectoryRunStore(root=other_root).load(run.reference)
+
+
+def test_load_rejects_nonreference_paths_without_fallback(
+    store: DirectoryRunStore,
+) -> None:
+    with pytest.raises(RecordLoadError, match="unsupported"):
+        store.load(cast("RunRecordReference", store.root))
+
+
+def test_load_rejects_an_unsupported_backend_without_fallback(
+    store: DirectoryRunStore,
+) -> None:
+    reference = RunRecordReference.model_construct(
+        backend="other", record_id=UUID(int=1)
+    )
+
+    with pytest.raises(RecordLoadError, match="unsupported"):
+        store.load(reference)
+
+
+def test_load_rejects_a_malformed_identifier_without_path_interpretation(
+    store: DirectoryRunStore,
+) -> None:
+    reference = RunRecordReference.model_construct(
+        backend="directory", record_id="../outside"
+    )
+
+    with pytest.raises(RecordLoadError, match="malformed"):
+        store.load(reference)
 
 
 def test_mark_running_publishes_the_process_bearing_record(
@@ -563,8 +621,8 @@ def test_mark_running_publishes_the_process_bearing_record(
 
     running_run = store.mark_running(prepared_run, process)
 
-    assert running_run.record_dir == prepared_run.record_dir
-    loaded = store.load(running_run.record_dir)
+    assert running_run.reference == prepared_run.reference
+    loaded = store.load(running_run.reference)
     assert isinstance(loaded, RunningRecord)
     assert loaded.process == process
     assert loaded.declaration == prepared_record.declaration
@@ -585,7 +643,7 @@ def test_finalize_from_running_completes_the_lifecycle(
     assert isinstance(receipt, CompleteRecordReceipt)
     assert receipt.latest_state == RecordState.FINALIZED
     assert receipt.execution_id == execution_id
-    assert isinstance(store.load(running_run.record_dir), FinalizedRecord)
+    assert isinstance(store.load(running_run.reference), FinalizedRecord)
 
 
 def test_a_recognized_pre_child_outcome_finalizes_from_prepared(
@@ -600,7 +658,7 @@ def test_a_recognized_pre_child_outcome_finalizes_from_prepared(
     )
 
     assert isinstance(receipt, CompleteRecordReceipt)
-    finalized = store.load(prepared_run.record_dir)
+    finalized = store.load(prepared_run.reference)
     assert isinstance(finalized, FinalizedRecord)
     assert finalized.result.outcome.kind == CancelledOutcome().kind
 
@@ -627,7 +685,7 @@ def test_mark_running_reports_an_unreadable_manifest_as_executor_failure(
     execution_id: ExecutionId,
 ) -> None:
     prepared_run = store.prepare(_prepared_record(execution_id))
-    (prepared_run.record_dir / MANIFEST_NAME).write_bytes(b"{")
+    (_record_dir(store, prepared_run) / MANIFEST_NAME).write_bytes(b"{")
 
     with pytest.raises(ExecutorFailure) as raised:
         store.mark_running(
@@ -644,18 +702,18 @@ def test_finalizing_twice_degrades_rather_than_replacing_the_record(
 ) -> None:
     prepared_run = store.prepare(_prepared_record(execution_id))
     store.finalize(prepared_run, _result(execution_id, stdout=_stream(b"a")))
-    first = _manifest_bytes(prepared_run.record_dir)
+    first = _manifest_bytes(_record_dir(store, prepared_run))
 
     receipt = store.finalize(
         prepared_run, _result(execution_id, stdout=_stream(b"bbbb"))
     )
 
     assert isinstance(receipt, DegradedRecordReceipt)
-    assert _manifest_bytes(prepared_run.record_dir) == first
+    assert _manifest_bytes(_record_dir(store, prepared_run)) == first
     # The handle proves only a lower bound; the receipt must not
     # understate the finalized record that is durably on disk.
     assert receipt.latest_state == RecordState.FINALIZED
-    assert receipt.latest_state == store.load(prepared_run.record_dir).state
+    assert receipt.latest_state == store.load(prepared_run.reference).state
 
 
 @pytest.mark.parametrize(
@@ -697,7 +755,7 @@ def test_a_record_committed_before_parent_death_recovers_as_incomplete(
                     run,
                     ProcessRecord(pid=os.getpid(), started_at=STARTED_AT),
                 )
-            handoff.write_text(run.record_dir.name)
+            handoff.write_text(str(run.reference.record_id))
             os.write(write_end, b"committed")
         finally:
             os._exit(0)
@@ -710,8 +768,8 @@ def test_a_record_committed_before_parent_death_recovers_as_incomplete(
     _, status = os.waitpid(child_pid, 0)
     assert os.WIFEXITED(status)
 
-    record_dir = root / handoff.read_text()
-    recovered = DirectoryRunStore(root=root).load(record_dir)
+    reference = RunRecordReference(record_id=UUID(handoff.read_text()))
+    recovered = DirectoryRunStore(root=root).load(reference)
     assert recovered.state == expected_state
     assert recovered.state is not RecordState.FINALIZED
 
@@ -724,10 +782,14 @@ def test_recovery_never_infers_completion_from_sidecars_on_disk(
         store.prepare(_prepared_record(execution_id)),
         ProcessRecord(pid=4242, started_at=STARTED_AT),
     )
-    (running_run.record_dir / STDOUT_SIDECAR_NAME).write_bytes(b"partial")
-    (running_run.record_dir / STDERR_SIDECAR_NAME).write_bytes(b"partial")
+    (_record_dir(store, running_run) / STDOUT_SIDECAR_NAME).write_bytes(
+        b"partial"
+    )
+    (_record_dir(store, running_run) / STDERR_SIDECAR_NAME).write_bytes(
+        b"partial"
+    )
 
-    recovered = store.load(running_run.record_dir)
+    recovered = store.load(running_run.reference)
 
     assert recovered.state == RecordState.RUNNING
 
@@ -744,15 +806,144 @@ def test_finalization_stores_digest_matching_retrievable_sidecars(
         prepared_run, _result(execution_id, stdout=stdout, stderr=stderr)
     )
 
-    finalized = store.load(prepared_run.record_dir)
+    finalized = store.load(prepared_run.reference)
     assert isinstance(finalized, FinalizedRecord)
     stored_stdout = (
-        prepared_run.record_dir / STDOUT_SIDECAR_NAME
+        _record_dir(store, prepared_run) / STDOUT_SIDECAR_NAME
     ).read_bytes()
     assert stored_stdout == stdout.head + stdout.tail
     assert finalized.outputs.stdout.size_bytes == len(stored_stdout)
     assert finalized.outputs.stdout.relative_path == Path(STDOUT_SIDECAR_NAME)
     assert finalized.outputs.stderr.relative_path == Path(STDERR_SIDECAR_NAME)
+
+
+def test_a_reference_recovers_complete_verified_artifact_bytes(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    expected = b"descriptor-pinned artifact"
+    store.finalize(run, _result(execution_id, stdout=_stream(head=expected)))
+    record = store.load(run.reference)
+    assert isinstance(record, FinalizedRecord)
+
+    def path_read_is_not_the_artifact_path(*_: object, **__: object) -> bytes:
+        raise AssertionError("artifact reads must not use Path.read_bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", path_read_is_not_the_artifact_path)
+
+    assert (
+        store.read_artifact(
+            run.reference,
+            record.outputs.stdout,
+            max_bytes=len(expected),
+        )
+        == expected
+    )
+
+
+def test_artifact_size_is_preflighted_against_the_caller_bound(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    store.finalize(run, _result(execution_id, stdout=_stream(head=b"data")))
+    record = store.load(run.reference)
+    assert isinstance(record, FinalizedRecord)
+    original_open = os.open
+
+    def unexpected_artifact_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if path == STDOUT_SIDECAR_NAME:
+            raise AssertionError("oversized declared artifact was opened")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", unexpected_artifact_open)
+
+    with pytest.raises(RecordLoadError, match="read limit"):
+        store.read_artifact(
+            run.reference,
+            record.outputs.stdout,
+            max_bytes=record.outputs.stdout.size_bytes - 1,
+        )
+
+
+def test_artifact_reads_require_a_finalized_owned_artifact(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    foreign = OutputArtifactRecord(
+        relative_path=Path(STDOUT_SIDECAR_NAME),
+        size_bytes=0,
+        sha256=Sha256Digest("0" * 64),
+    )
+
+    with pytest.raises(RecordLoadError, match="not finalized"):
+        store.read_artifact(run.reference, foreign, max_bytes=0)
+
+    store.finalize(run, _result(execution_id))
+    with pytest.raises(RecordLoadError, match="not owned"):
+        store.read_artifact(run.reference, foreign, max_bytes=0)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda path: path.write_bytes(b"corrupt!"), id="digest"),
+        pytest.param(lambda path: path.write_bytes(b"short"), id="truncated"),
+        pytest.param(lambda path: path.unlink(), id="missing"),
+    ],
+)
+def test_artifact_reads_return_no_bytes_for_corrupt_or_missing_data(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    mutate: Callable[[Path], object],
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    expected = b"original"
+    store.finalize(run, _result(execution_id, stdout=_stream(head=expected)))
+    record = store.load(run.reference)
+    assert isinstance(record, FinalizedRecord)
+    mutate(_record_dir(store, run) / STDOUT_SIDECAR_NAME)
+
+    with pytest.raises(RecordLoadError):
+        store.read_artifact(
+            run.reference,
+            record.outputs.stdout,
+            max_bytes=len(expected),
+        )
+
+
+def test_artifact_reads_reject_a_no_follow_symlink(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    tmp_path: Path,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    expected = b"original"
+    store.finalize(run, _result(execution_id, stdout=_stream(head=expected)))
+    record = store.load(run.reference)
+    assert isinstance(record, FinalizedRecord)
+    artifact_path = _record_dir(store, run) / STDOUT_SIDECAR_NAME
+    external = tmp_path / "external.bin"
+    external.write_bytes(expected)
+    artifact_path.unlink()
+    artifact_path.symlink_to(external)
+
+    with pytest.raises(RecordLoadError):
+        store.read_artifact(
+            run.reference,
+            record.outputs.stdout,
+            max_bytes=len(expected),
+        )
 
 
 def test_head_and_tail_segments_recover_exactly_with_their_counts(
@@ -764,14 +955,16 @@ def test_head_and_tail_segments_recover_exactly_with_their_counts(
 
     store.finalize(prepared_run, _result(execution_id, stdout=stdout))
 
-    finalized = store.load(prepared_run.record_dir)
+    finalized = store.load(prepared_run.reference)
     assert isinstance(finalized, FinalizedRecord)
     stream_record = finalized.result.payload_outputs.stdout
     assert stream_record.head_bytes == len(stdout.head)
     assert stream_record.tail_bytes == len(stdout.tail)
     assert stream_record.produced_bytes == stdout.produced_bytes
     assert stream_record.dropped_bytes == stdout.dropped_bytes
-    stored = (prepared_run.record_dir / STDOUT_SIDECAR_NAME).read_bytes()
+    stored = (
+        _record_dir(store, prepared_run) / STDOUT_SIDECAR_NAME
+    ).read_bytes()
     assert stored[: stream_record.head_bytes] == stdout.head
     assert stored[stream_record.head_bytes :] == stdout.tail
 
@@ -798,7 +991,7 @@ def test_accepted_protocol_outputs_stay_inline_and_complete(
         ),
     )
 
-    finalized = store.load(prepared_run.record_dir)
+    finalized = store.load(prepared_run.reference)
     assert isinstance(finalized, FinalizedRecord)
     assert finalized.result.protocol_outputs == outputs
 
@@ -834,6 +1027,24 @@ def test_accepted_protocol_outputs_stay_inline_and_complete(
             ),
             _UNTRUSTED_COMMAND_TARGET_LEAF_KEY_PATHS,
             id="untrusted-command",
+        ),
+        pytest.param(
+            TrustedPythonTarget(
+                driver_source=PYTHON_DRIVER_CANARY,
+                request=build_identity_document(
+                    schema="dr_exec.secret_request",
+                    schema_version=1,
+                    payload={"secret": PYTHON_REQUEST_CANARY},
+                ),
+            ),
+            PYTHON_ENV_CANARY,
+            (
+                PYTHON_DRIVER_CANARY,
+                PYTHON_REQUEST_CANARY,
+                PYTHON_ENV_CANARY,
+            ),
+            _TRUSTED_PYTHON_TARGET_LEAF_KEY_PATHS,
+            id="trusted-python",
         ),
         pytest.param(
             UntrustedPythonTarget(
@@ -872,14 +1083,14 @@ def test_each_target_producer_is_secret_free_across_the_lifecycle(
         host_runtime,
     )
     prepared_run = store.prepare(prepared_record)
-    prepared_bytes = _manifest_bytes(prepared_run.record_dir)
+    prepared_bytes = _manifest_bytes(_record_dir(store, prepared_run))
     running_run = store.mark_running(
         prepared_run,
         ProcessRecord(pid=4242, started_at=STARTED_AT),
     )
-    running_bytes = _manifest_bytes(running_run.record_dir)
+    running_bytes = _manifest_bytes(_record_dir(store, running_run))
     store.finalize(running_run, _result(execution_id))
-    finalized_bytes = _manifest_bytes(running_run.record_dir)
+    finalized_bytes = _manifest_bytes(_record_dir(store, running_run))
 
     expected_prepared_paths = _with_target_leaf_key_paths(
         _PREPARED_LEAF_KEY_PATHS,
@@ -904,6 +1115,9 @@ def test_each_target_producer_is_secret_free_across_the_lifecycle(
     prepared = json.loads(prepared_bytes)
     assert prepared["declaration"]["env"]["var_names"] == ["TOKEN"]
     assert len(prepared["declaration"]["env"]["canonical_values_sha256"]) == 64
+    target_record = prepared_record.declaration.target
+    if isinstance(target_record, TrustedPythonTargetRecord):
+        assert "containment_profile" not in type(target_record).model_fields
 
 
 @pytest.mark.parametrize(
@@ -990,7 +1204,7 @@ def test_every_outcome_projection_has_exact_paths_and_no_recoverable_secret(
             ),
         ),
     )
-    finalized_bytes = _manifest_bytes(running_run.record_dir)
+    finalized_bytes = _manifest_bytes(_record_dir(store, running_run))
 
     _assert_no_recoverable_canaries(
         finalized_bytes,
@@ -1040,7 +1254,7 @@ def test_result_byte_and_attribution_fields_leave_only_structural_evidence(
     )
 
     _assert_no_recoverable_canaries(
-        _manifest_bytes(running_run.record_dir),
+        _manifest_bytes(_record_dir(store, running_run)),
         (
             ATTRIBUTION_CANARY,
             STDOUT_HEAD_CANARY,
@@ -1058,7 +1272,7 @@ def test_the_manifest_excludes_pool_queue_and_lease_context(
     run = store.prepare(_prepared_record(execution_id))
     store.finalize(run, _result(execution_id))
 
-    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest = json.loads(_manifest_bytes(_record_dir(store, run)))
 
     text = json.dumps(manifest)
     for excluded in ("capacity", "queue", "lease", "worker", "pool"):
@@ -1080,16 +1294,16 @@ def test_an_unwritable_run_directory_degrades_the_receipt(
         store.prepare(_prepared_record(execution_id)),
         ProcessRecord(pid=4242, started_at=STARTED_AT),
     )
-    running_run.record_dir.chmod(0o500)
+    _record_dir(store, running_run).chmod(0o500)
 
     try:
         receipt = store.finalize(running_run, _result(execution_id))
     finally:
-        running_run.record_dir.chmod(0o700)
+        _record_dir(store, running_run).chmod(0o700)
 
     assert isinstance(receipt, DegradedRecordReceipt)
     assert receipt.latest_state == RecordState.RUNNING
-    assert receipt.record_dir == running_run.record_dir
+    assert receipt.reference == running_run.reference
     assert len(receipt.failures) == 1
     assert receipt.failures[0].operation == "finalize"
 
@@ -1140,7 +1354,7 @@ def test_finalization_faults_preserve_the_latest_manifest_and_degrade(
         store.prepare(_prepared_record(execution_id)),
         ProcessRecord(pid=4242, started_at=STARTED_AT),
     )
-    committed = _manifest_bytes(running_run.record_dir)
+    committed = _manifest_bytes(_record_dir(store, running_run))
     _install_finalization_fault(
         monkeypatch,
         stage=stage,
@@ -1162,18 +1376,18 @@ def test_finalization_faults_preserve_the_latest_manifest_and_degrade(
 
     assert isinstance(receipt, DegradedRecordReceipt)
     assert receipt.latest_state == RecordState.RUNNING
-    assert receipt.record_dir == running_run.record_dir
+    assert receipt.reference == running_run.reference
     assert len(receipt.failures) == 1
     failure = receipt.failures[0]
     assert failure.operation == "finalize"
     assert failure.errno == error_number
     assert failure.detail.isidentifier()
     assert SECRET_ERROR_DETAIL not in failure.detail
-    assert _manifest_bytes(running_run.record_dir) == committed
-    assert {entry.name for entry in running_run.record_dir.iterdir()} == (
-        expected_files
-    )
-    assert store.load(running_run.record_dir).state == RecordState.RUNNING
+    assert _manifest_bytes(_record_dir(store, running_run)) == committed
+    assert {
+        entry.name for entry in _record_dir(store, running_run).iterdir()
+    } == (expected_files)
+    assert store.load(running_run.reference).state == RecordState.RUNNING
 
 
 def test_an_unwritable_directory_fails_mark_running_without_losing_prepared(
@@ -1181,8 +1395,8 @@ def test_an_unwritable_directory_fails_mark_running_without_losing_prepared(
     execution_id: ExecutionId,
 ) -> None:
     prepared_run = store.prepare(_prepared_record(execution_id))
-    committed = _manifest_bytes(prepared_run.record_dir)
-    prepared_run.record_dir.chmod(0o500)
+    committed = _manifest_bytes(_record_dir(store, prepared_run))
+    _record_dir(store, prepared_run).chmod(0o500)
 
     try:
         with pytest.raises(ExecutorFailure) as raised:
@@ -1191,11 +1405,11 @@ def test_an_unwritable_directory_fails_mark_running_without_losing_prepared(
                 ProcessRecord(pid=4242, started_at=STARTED_AT),
             )
     finally:
-        prepared_run.record_dir.chmod(0o700)
+        _record_dir(store, prepared_run).chmod(0o700)
 
     assert isinstance(raised.value.__cause__, DocumentDirectoryError)
-    assert _manifest_bytes(prepared_run.record_dir) == committed
-    assert store.load(prepared_run.record_dir).state == RecordState.PREPARED
+    assert _manifest_bytes(_record_dir(store, prepared_run)) == committed
+    assert store.load(prepared_run.reference).state == RecordState.PREPARED
 
 
 def test_degradation_preserves_the_last_valid_on_disk_state(
@@ -1206,16 +1420,16 @@ def test_degradation_preserves_the_last_valid_on_disk_state(
         store.prepare(_prepared_record(execution_id)),
         ProcessRecord(pid=4242, started_at=STARTED_AT),
     )
-    committed = _manifest_bytes(running_run.record_dir)
-    running_run.record_dir.chmod(0o500)
+    committed = _manifest_bytes(_record_dir(store, running_run))
+    _record_dir(store, running_run).chmod(0o500)
 
     try:
         store.finalize(running_run, _result(execution_id))
     finally:
-        running_run.record_dir.chmod(0o700)
+        _record_dir(store, running_run).chmod(0o700)
 
-    assert _manifest_bytes(running_run.record_dir) == committed
-    assert store.load(running_run.record_dir).state == RecordState.RUNNING
+    assert _manifest_bytes(_record_dir(store, running_run)) == committed
+    assert store.load(running_run.reference).state == RecordState.RUNNING
 
 
 def test_a_degraded_receipt_from_prepared_reports_the_prepared_state(
@@ -1223,12 +1437,12 @@ def test_a_degraded_receipt_from_prepared_reports_the_prepared_state(
     execution_id: ExecutionId,
 ) -> None:
     prepared_run = store.prepare(_prepared_record(execution_id))
-    prepared_run.record_dir.chmod(0o500)
+    _record_dir(store, prepared_run).chmod(0o500)
 
     try:
         receipt = store.finalize(prepared_run, _result(execution_id))
     finally:
-        prepared_run.record_dir.chmod(0o700)
+        _record_dir(store, prepared_run).chmod(0o700)
 
     assert isinstance(receipt, DegradedRecordReceipt)
     assert receipt.latest_state == RecordState.PREPARED
@@ -1240,7 +1454,7 @@ def test_a_missing_run_directory_degrades_rather_than_raising(
 ) -> None:
     missing = PreparedRun(
         execution_id=execution_id,
-        record_dir=store.root / "run-absent",
+        reference=RunRecordReference(record_id=uuid4()),
     )
 
     receipt = store.finalize(missing, _result(execution_id))
@@ -1248,7 +1462,7 @@ def test_a_missing_run_directory_degrades_rather_than_raising(
     assert isinstance(receipt, DegradedRecordReceipt)
     assert receipt.latest_state == RecordState.PREPARED
     with pytest.raises(RecordLoadError):
-        store.load(missing.record_dir)
+        store.load(missing.reference)
 
 
 def test_a_recording_failure_names_no_rejected_value(
@@ -1259,7 +1473,7 @@ def test_a_recording_failure_names_no_rejected_value(
         store.prepare(_prepared_record(execution_id)),
         ProcessRecord(pid=4242, started_at=STARTED_AT),
     )
-    running_run.record_dir.chmod(0o500)
+    _record_dir(store, running_run).chmod(0o500)
 
     try:
         receipt = store.finalize(
@@ -1271,7 +1485,7 @@ def test_a_recording_failure_names_no_rejected_value(
             ),
         )
     finally:
-        running_run.record_dir.chmod(0o700)
+        _record_dir(store, running_run).chmod(0o700)
 
     assert isinstance(receipt, DegradedRecordReceipt)
     failure = receipt.failures[0]
@@ -1307,11 +1521,11 @@ def test_concurrent_writers_allocate_collision_free_directories(
     with ThreadPoolExecutor(max_workers=writer_count) as pool:
         runs = list(pool.map(prepare_one, range(writer_count)))
 
-    directories = {run.record_dir for run in runs}
+    directories = {_record_dir(store, run) for run in runs}
     assert len(directories) == writer_count
     assert {path for path in store.root.iterdir()} == directories
     for run in runs:
-        loaded = store.load(run.record_dir)
+        loaded = store.load(run.reference)
         assert loaded.declaration.execution_id == run.execution_id
 
 
@@ -1336,10 +1550,10 @@ def test_load_rejects_a_manifest_that_is_not_a_valid_record(
     expected_message: str,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    (run.record_dir / MANIFEST_NAME).write_bytes(manifest)
+    (_record_dir(store, run) / MANIFEST_NAME).write_bytes(manifest)
 
     with pytest.raises(RecordLoadError, match=expected_message) as raised:
-        store.load(run.record_dir)
+        store.load(run.reference)
 
     assert raised.value.__cause__ is not None
 
@@ -1370,13 +1584,15 @@ def test_load_rejects_a_corrupted_embedded_identity_document(
     corrupt: Callable[[Jsonable], Jsonable],
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    payload = json.loads(_manifest_bytes(run.record_dir))
+    payload = json.loads(_manifest_bytes(_record_dir(store, run)))
     header = payload["header"]
     header["executor_identity"] = corrupt(header["executor_identity"])
-    (run.record_dir / MANIFEST_NAME).write_bytes(canonical_json_bytes(payload))
+    (_record_dir(store, run) / MANIFEST_NAME).write_bytes(
+        canonical_json_bytes(payload)
+    )
 
     with pytest.raises(RecordLoadError, match="not a valid") as raised:
-        store.load(run.record_dir)
+        store.load(run.reference)
 
     assert raised.value.__cause__ is not None
 
@@ -1386,14 +1602,14 @@ def test_load_rejects_a_canonical_manifest_with_a_coercible_scalar(
     execution_id: ExecutionId,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest = json.loads(_manifest_bytes(_record_dir(store, run)))
     manifest["header"]["schema_version"] = "1"
-    (run.record_dir / MANIFEST_NAME).write_bytes(
+    (_record_dir(store, run) / MANIFEST_NAME).write_bytes(
         canonical_json_bytes(manifest)
     )
 
     with pytest.raises(RecordLoadError, match="not a valid"):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 def test_the_manifest_byte_ceiling_is_exactly_pinned() -> None:
@@ -1406,7 +1622,7 @@ def test_load_rejects_an_oversized_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    stored = _manifest_bytes(run.record_dir)
+    stored = _manifest_bytes(_record_dir(store, run))
     monkeypatch.setattr(
         dr_exec.recording.store,
         "STRUCTURAL_MANIFEST_BYTE_CEILING",
@@ -1414,7 +1630,7 @@ def test_load_rejects_an_oversized_manifest(
     )
 
     with pytest.raises(RecordLoadError):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 def test_a_manifest_exactly_at_the_byte_ceiling_is_accepted(
@@ -1423,14 +1639,14 @@ def test_a_manifest_exactly_at_the_byte_ceiling_is_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    stored = _manifest_bytes(run.record_dir)
+    stored = _manifest_bytes(_record_dir(store, run))
     monkeypatch.setattr(
         dr_exec.recording.store,
         "STRUCTURAL_MANIFEST_BYTE_CEILING",
         len(stored),
     )
 
-    assert store.load(run.record_dir).state == RecordState.PREPARED
+    assert store.load(run.reference).state == RecordState.PREPARED
 
 
 def test_a_manifest_exactly_at_the_depth_ceiling_is_accepted(
@@ -1440,14 +1656,14 @@ def test_a_manifest_exactly_at_the_depth_ceiling_is_accepted(
 ) -> None:
     prepared_record = _prepared_record(execution_id)
     run = store.prepare(prepared_record)
-    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest = json.loads(_manifest_bytes(_record_dir(store, run)))
     monkeypatch.setattr(
         dr_exec.recording.store,
         "STRUCTURAL_DEPTH_CEILING",
         _container_depth(manifest),
     )
 
-    assert store.load(run.record_dir) == prepared_record
+    assert store.load(run.reference) == prepared_record
 
 
 def test_load_rejects_a_manifest_over_the_depth_ceiling(
@@ -1456,7 +1672,7 @@ def test_load_rejects_a_manifest_over_the_depth_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest = json.loads(_manifest_bytes(_record_dir(store, run)))
     monkeypatch.setattr(
         dr_exec.recording.store,
         "STRUCTURAL_DEPTH_CEILING",
@@ -1464,7 +1680,7 @@ def test_load_rejects_a_manifest_over_the_depth_ceiling(
     )
 
     with pytest.raises(RecordLoadError):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 def test_load_rejects_a_missing_manifest(
@@ -1472,10 +1688,10 @@ def test_load_rejects_a_missing_manifest(
     execution_id: ExecutionId,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    (run.record_dir / MANIFEST_NAME).unlink()
+    (_record_dir(store, run) / MANIFEST_NAME).unlink()
 
     with pytest.raises(RecordLoadError, match="could not read"):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 def test_load_rejects_an_external_manifest_symlink(
@@ -1484,14 +1700,14 @@ def test_load_rejects_an_external_manifest_symlink(
     tmp_path: Path,
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
-    manifest_path = run.record_dir / MANIFEST_NAME
+    manifest_path = _record_dir(store, run) / MANIFEST_NAME
     external_path = tmp_path / "external-record.json"
     external_path.write_bytes(manifest_path.read_bytes())
     manifest_path.unlink()
     manifest_path.symlink_to(external_path)
 
     with pytest.raises(RecordLoadError) as raised:
-        store.load(run.record_dir)
+        store.load(run.reference)
 
     assert isinstance(raised.value.__cause__, DocumentDirectoryError)
 
@@ -1519,7 +1735,7 @@ def test_load_translates_directory_disappearance_during_sidecar_verification(
     )
 
     with pytest.raises(RecordLoadError) as raised:
-        store.load(run.record_dir)
+        store.load(run.reference)
 
     assert isinstance(raised.value.__cause__, DocumentDirectoryError)
 
@@ -1540,10 +1756,10 @@ def test_load_rejects_a_sidecar_that_drifted_from_its_record(
     store.finalize(
         run, _result(execution_id, stdout=_stream(head=b"original-stdout!!"))
     )
-    (run.record_dir / STDOUT_SIDECAR_NAME).write_bytes(replacement)
+    (_record_dir(store, run) / STDOUT_SIDECAR_NAME).write_bytes(replacement)
 
     with pytest.raises(RecordLoadError, match="does not match its record"):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 def test_load_rejects_a_missing_sidecar(
@@ -1552,10 +1768,10 @@ def test_load_rejects_a_missing_sidecar(
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
     store.finalize(run, _result(execution_id, stderr=_stream(head=b"err")))
-    (run.record_dir / STDERR_SIDECAR_NAME).unlink()
+    (_record_dir(store, run) / STDERR_SIDECAR_NAME).unlink()
 
     with pytest.raises(RecordLoadError, match=STDERR_SIDECAR_NAME):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 def test_load_rejects_an_unsafe_artifact_path_in_the_manifest(
@@ -1564,14 +1780,14 @@ def test_load_rejects_an_unsafe_artifact_path_in_the_manifest(
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
     store.finalize(run, _result(execution_id))
-    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest = json.loads(_manifest_bytes(_record_dir(store, run)))
     manifest["outputs"]["stdout"]["relative_path"] = "../escaped.bin"
-    (run.record_dir / MANIFEST_NAME).write_bytes(
+    (_record_dir(store, run) / MANIFEST_NAME).write_bytes(
         json.dumps(manifest, separators=(",", ":")).encode()
     )
 
     with pytest.raises(RecordLoadError, match="not a valid"):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 @pytest.mark.parametrize(
@@ -1589,15 +1805,15 @@ def test_load_requires_the_two_exact_artifact_paths(
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
     store.finalize(run, _result(execution_id))
-    manifest = json.loads(_manifest_bytes(run.record_dir))
+    manifest = json.loads(_manifest_bytes(_record_dir(store, run)))
     manifest["outputs"][artifact_name]["relative_path"] = unexpected_path
-    (run.record_dir / unexpected_path).write_bytes(b"")
-    (run.record_dir / MANIFEST_NAME).write_bytes(
+    (_record_dir(store, run) / unexpected_path).write_bytes(b"")
+    (_record_dir(store, run) / MANIFEST_NAME).write_bytes(
         canonical_json_bytes(manifest)
     )
 
     with pytest.raises(RecordLoadError, match="unexpected .* artifact path"):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 def test_load_rejects_an_equal_content_external_sidecar_symlink(
@@ -1608,14 +1824,14 @@ def test_load_rejects_an_equal_content_external_sidecar_symlink(
     run = store.prepare(_prepared_record(execution_id))
     stdout = _stream(head=b"equal-content")
     store.finalize(run, _result(execution_id, stdout=stdout))
-    stdout_path = run.record_dir / STDOUT_SIDECAR_NAME
+    stdout_path = _record_dir(store, run) / STDOUT_SIDECAR_NAME
     external_path = tmp_path / "external-stdout.bin"
     external_path.write_bytes(stdout_path.read_bytes())
     stdout_path.unlink()
     stdout_path.symlink_to(external_path)
 
     with pytest.raises(RecordLoadError, match="does not match its record"):
-        store.load(run.record_dir)
+        store.load(run.reference)
 
 
 @pytest.mark.parametrize(
@@ -1652,7 +1868,7 @@ def test_successful_and_failed_runs_both_produce_complete_records(
     )
 
     assert isinstance(receipt, CompleteRecordReceipt)
-    finalized = store.load(run.record_dir)
+    finalized = store.load(run.reference)
     assert isinstance(finalized, FinalizedRecord)
     assert finalized.result.attribution.owner == owner
     assert finalized.result.execution_id == execution_id
@@ -1668,7 +1884,7 @@ def test_the_finalized_record_binds_the_declaration_to_its_result(
     with pytest.raises(ValidationError):
         store.finalize(run, _result(other))
 
-    assert store.load(run.record_dir).state == RecordState.PREPARED
+    assert store.load(run.reference).state == RecordState.PREPARED
 
 
 def test_the_on_disk_layout_literals_are_exactly_pinned() -> None:
@@ -1684,8 +1900,10 @@ def test_an_allocated_run_directory_uses_the_owned_prefix_and_root(
 ) -> None:
     run = store.prepare(_prepared_record(execution_id))
 
-    assert run.record_dir.parent == store.root
-    assert run.record_dir.name.startswith(f"{RECORD_DIRECTORY_PREFIX}-")
+    assert _record_dir(store, run).parent == store.root
+    assert _record_dir(store, run).name.startswith(
+        f"{RECORD_DIRECTORY_PREFIX}-"
+    )
 
 
 def test_a_finalized_run_directory_contains_exactly_the_pinned_files(
@@ -1696,7 +1914,7 @@ def test_a_finalized_run_directory_contains_exactly_the_pinned_files(
 
     store.finalize(run, _result(execution_id))
 
-    assert {entry.name for entry in run.record_dir.iterdir()} == {
+    assert {entry.name for entry in _record_dir(store, run).iterdir()} == {
         "record.json",
         "stdout.bin",
         "stderr.bin",
@@ -1757,7 +1975,7 @@ def test_each_lifecycle_state_lands_in_the_manifest_verbatim(
     if state is RecordState.FINALIZED:
         store.finalize(run, _result(execution_id))
 
-    stored = json.loads(_manifest_bytes(run.record_dir))
+    stored = json.loads(_manifest_bytes(_record_dir(store, run)))
     assert stored["state"] == expected
 
 
@@ -1772,6 +1990,6 @@ def test_a_finalized_manifest_spells_its_outcome_discriminant_verbatim(
         _result(execution_id, outcome=SpawnAbsentOutcome(executable="x")),
     )
 
-    stored = json.loads(_manifest_bytes(run.record_dir))
+    stored = json.loads(_manifest_bytes(_record_dir(store, run)))
     assert stored["state"] == "finalized"
     assert stored["result"]["outcome"]["kind"] == "spawn_absent"

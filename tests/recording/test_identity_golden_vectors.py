@@ -18,6 +18,7 @@ from dr_exec import (
     FiniteCountLimit,
     FiniteDurationLimit,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
@@ -192,6 +193,23 @@ def test_untrusted_python_declaration_digest_is_pinned() -> None:
     )
     assert _canonical_declaration_digest(target) == (
         "efd92cff97fbb61af1c3923f8e2eff55ea02ee98eb4e728cf586d570f4659cc0"
+    )
+
+
+def test_trusted_python_declaration_digest_is_pinned() -> None:
+    request = build_identity_document(
+        schema="dr_exec.test_request",
+        schema_version=1,
+        payload={"count": 2, "label": "x"},
+    )
+    target = TrustedPythonTarget(
+        driver_source=(
+            "def dr_exec_main(request, emit):\n    emit(request)\n"
+        ),
+        request=request,
+    )
+    assert _canonical_declaration_digest(target) == (
+        "af2ac384a6371c9d1250abe823ff9caf8c308c0715bac6e70647777a41594ce1"
     )
 
 

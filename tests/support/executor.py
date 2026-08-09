@@ -3,11 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from threading import Lock, Thread
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from dr_serialize import IdentityDocument, build_identity_document
+from dr_serialize import build_identity_document
 
 from dr_exec import (
     AttemptId,
@@ -28,7 +27,9 @@ from dr_exec import (
     JobId,
     PayloadOutputs,
     RetainedPayloadStream,
+    RunRecordReference,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
@@ -105,14 +106,14 @@ def python_target(echo: str = "ran", /) -> ExecutionTarget:
     )
 
 
-def cache_scope_identity_document(
-    scope: str = "default",
-    /,
-) -> IdentityDocument:
-    return build_identity_document(
-        schema="dr_exec.test_cache_scope",
-        schema_version=1,
-        payload={"scope": scope},
+def trusted_python_target(echo: str = "ran", /) -> ExecutionTarget:
+    return TrustedPythonTarget(
+        driver_source=ECHO_DRIVER,
+        request=build_identity_document(
+            schema="dr_exec.test_request",
+            schema_version=1,
+            payload={"echo": echo},
+        ),
     )
 
 
@@ -177,6 +178,6 @@ def real_receipted_completion() -> CompletedExecution:
         result=execution_result(execution_id),
         record_receipt=CompleteRecordReceipt(
             execution_id=execution_id,
-            record_dir=Path("/dr-exec-test/records/run-0"),
+            reference=RunRecordReference(record_id=UUID(int=4)),
         ),
     )

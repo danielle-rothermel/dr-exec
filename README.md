@@ -18,8 +18,8 @@ that creates another session can outlive teardown. Isolated host Python also
 does not verify interpreter, standard-library, or package bytes.
 
 - **[Declarations](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/declarations)**
-  describe trusted commands, untrusted commands, and untrusted Python together
-  with their environment grants and resource budgets.
+  describe trusted and untrusted command and Python targets together with their
+  environment grants and resource budgets.
 - **[Execution](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/execution)**
   owns process startup, input and output transport, budget enforcement,
   cancellation, teardown, and outcome attribution.
@@ -32,7 +32,7 @@ does not verify interpreter, standard-library, or package bytes.
   with completion-order delivery and intake backpressure.
 - **[Capabilities](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/capabilities)**
   supplies the executor, runtime, and run-store boundaries together with the
-  library-owned fake and caller-scoped caching executors.
+  library-owned fake executor.
 - **[Runtime](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/runtime)**
   prepares isolated Python invocations and protects structured protocol
   messages from payload output.
@@ -65,7 +65,6 @@ class RecordReceiptKind(StrEnum):
     COMPLETE = "complete"
     DEGRADED = "degraded"
     NOT_APPLICABLE = "not_applicable"
-    CACHED = "cached"
 
 
 class CancelToken:
@@ -95,6 +94,12 @@ class UntrustedCommandTarget(ContractModel):
     containment_profile: ContainmentProfile
 
 
+class TrustedPythonTarget(ContractModel):
+    kind: Literal[ExecutionTargetKind.TRUSTED_PYTHON] = ...
+    driver_source: str
+    request: IdentityDocumentField
+
+
 class UntrustedPythonTarget(ContractModel):
     kind: Literal[ExecutionTargetKind.UNTRUSTED_PYTHON] = ...
     driver_source: str
@@ -103,7 +108,10 @@ class UntrustedPythonTarget(ContractModel):
 
 
 type ExecutionTarget = Annotated[
-    TrustedCommandTarget | UntrustedCommandTarget | UntrustedPythonTarget,
+    TrustedCommandTarget
+    | TrustedPythonTarget
+    | UntrustedCommandTarget
+    | UntrustedPythonTarget,
     Field(discriminator="kind"),
 ]
 ```
@@ -147,17 +155,68 @@ V1 accepts finite workload limits only for wall time, input bytes, and
 aggregate captured payload output. Memory, CPU time, process count, file size,
 open-file count, and disk limits must remain explicitly unbudgeted.
 
+### Importable JSON process jobs
+
+The importable JSON adapter builds an ordinary Python execution job for one
+installed module-level synchronous callable. It exchanges one strict JSON value
+in each direction; execution, cancellation, recording, and scheduling remain
+with the selected executor and pool.
+
+```python
+entry_point = ImportableEntryPoint(
+    module_name="my_package.workers",
+    attribute_name="evaluate",
+)
+job = build_untrusted_importable_json_job(
+    job_id,
+    entry_point,
+    request,
+    env=EnvGrant.none(),
+    budgets=budgets,
+)
+completed = executor.run(job)
+result = parse_importable_json_result(completed)
+```
+
+Use `build_trusted_importable_json_job` only when the effective payload is
+caller-controlled. The untrusted builder always declares
+`PROCESS_BOUNDARY_ONLY`; neither builder selects an operating-system sandbox.
+Entrypoints must be importable by the isolated installed interpreter—source
+paths, working-directory imports, expressions, and nested attribute traversal
+are unsupported. Callers enforce any entrypoint allowlist before construction.
+
+One job is one isolation, cancellation, failure, and recording unit. Its JSON
+request may be a finite caller-owned batch only when all members intentionally
+share that fate; the adapter does not interpret members or provide mapping,
+partial results, or per-item retries. High-volume callers reuse runtime,
+executor, run-store, and pool instances and configure finite input, retained
+payload-output, protocol frame, protocol total-byte, JSON-depth, and one-output
+limits from representative measurements. Bulk data remains caller-owned by
+reference or artifact rather than traveling through the compact JSON value.
+
+Run the representative resource and throughput investigation with:
+
+```console
+uv run --with ./tests/fixtures/importable-json-fixture python scripts/benchmark_importable_json.py
+```
+
+The command writes a machine-readable JSON report. Its measurements are
+observations for capacity selection, not performance pass/fail thresholds.
+
 ## Runtime
 
-The runtime boundary turns an untrusted Python target into an invocation and a
-recorded runtime description. The v1 implementation resolves and probes a host
-interpreter, then invokes it with isolated Python startup controls.
+The runtime boundary turns either Python target into an invocation and a
+recorded runtime description. Trusted and untrusted Python use the same child,
+startup, request, and protected-protocol path; only the untrusted declaration
+and record carry containment evidence. The v1 implementation resolves and
+probes a host interpreter, then invokes it with isolated Python startup
+controls.
 
 ```python
 class Runtime(Protocol):
     def prepare(
         self,
-        target: UntrustedPythonTarget,
+        target: TrustedPythonTarget | UntrustedPythonTarget,
         /,
     ) -> PreparedPythonProcess: ...
 
@@ -171,7 +230,7 @@ class IsolatedHostPythonRuntime:
 
     def prepare(
         self,
-        target: UntrustedPythonTarget,
+        target: TrustedPythonTarget | UntrustedPythonTarget,
         /,
     ) -> PreparedPythonProcess: ...
 
@@ -276,8 +335,7 @@ class CompletedExecution(ContractModel):
 type RecordReceipt = Annotated[
     CompleteRecordReceipt
     | DegradedRecordReceipt
-    | FakeRecordReceipt
-    | CachedRecordReceipt,
+    | FakeRecordReceipt,
     Field(discriminator="kind"),
 ]
 ```
@@ -309,12 +367,25 @@ class RunStore(Protocol):
         /,
     ) -> RealRecordReceipt: ...
 
-    def load(self, record_dir: Path, /) -> RunRecord: ...
+    def load(self, reference: RunRecordReference, /) -> RunRecord: ...
+
+    def read_artifact(
+        self,
+        reference: RunRecordReference,
+        artifact: OutputArtifactRecord,
+        /,
+        *,
+        max_bytes: int,
+    ) -> bytes: ...
 ```
 
 `DirectoryRunStore` publishes canonical lifecycle manifests within fixed
 structural byte and depth ceilings, then loads them through bounded,
-descriptor-pinned reads before validating the record and its sidecars.
+descriptor-pinned reads before validating the record and its sidecars. Real
+handles and receipts expose only an opaque serializable `RunRecordReference`;
+the store alone resolves its directory layout. Finalized sidecars are recovered
+with `read_artifact` under a required finite byte limit and verified for size
+and digest during the same descriptor-pinned, no-follow read.
 
 ## Scheduling
 
@@ -373,12 +444,9 @@ class ExecutionPool:
 ## Capabilities
 
 Consumers can program against the small `Executor`, `Runtime`, and `RunStore`
-Protocols while selecting concrete implementations separately. The optional
-caching wrapper replays eligible results within a caller-owned scope; the
-selected cache backend defines how long entries persist. Replayed results retain
-their source execution identity, while the receipt identifies the current job.
-An already-cancelled call bypasses replay and remains the inner executor's
-responsibility.
+Protocols while selecting concrete implementations separately. `FakeExecutor`
+preserves shared declaration and concurrency contracts without claiming host,
+process, containment, or durable-record behavior.
 
 ```python
 class FakeExecutor:
@@ -389,52 +457,6 @@ class FakeExecutor:
         *,
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution: ...
-```
-
-```python
-class CachingExecutor:
-    def __init__(
-        self,
-        inner: Executor,
-        /,
-        *,
-        cache: RecordCache,
-        cache_scope_identity: IdentityDocument,
-        cache_budget_exceeded: bool = False,
-    ) -> None: ...
-
-    def run(
-        self,
-        job: ExecutionJob,
-        /,
-        *,
-        cancellation: CancelToken | None = None,
-    ) -> CompletedExecution: ...
-```
-
-`CachingExecutor` does not own or close an injected cache; the caller owns its
-lifecycle. For a persistent SQLite cache, keep the wrapper within the managed
-cache scope:
-
-```python
-from dr_exec.capabilities import CachingExecutor
-from dr_store import SqliteRecordCache
-
-with SqliteRecordCache("cache.sqlite3") as cache:
-    executor = CachingExecutor(
-        inner,
-        cache=cache,
-        cache_scope_identity=cache_scope_identity,
-    )
-    completed = executor.run(job)
-```
-
-```python
-class CachedRecordReceipt(ContractModel):
-    kind: Literal[RecordReceiptKind.CACHED] = ...
-    requested_job_id: JobId
-    source_execution_id: ExecutionId
-    cache_key: str
 ```
 
 ## Development

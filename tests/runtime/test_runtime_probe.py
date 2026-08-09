@@ -16,6 +16,7 @@ from dr_exec import (
     IsolatedHostPythonRuntime,
     RuntimeKind,
     RuntimeRecord,
+    TrustedPythonTarget,
     UntrustedPythonTarget,
 )
 from dr_exec.runtime import host
@@ -106,7 +107,7 @@ def test_runtime_identity_maps_each_fact_from_the_probed_interpreter(
 
     runtime = IsolatedHostPythonRuntime(Path(sys.executable))
     record = runtime.describe()
-    resolved = Path(sys.executable).resolve()
+    resolved = Path(os.path.abspath(sys.executable))
 
     assert record.kind is RuntimeKind.ISOLATED_HOST_PYTHON
     assert record.resolved_executable == resolved
@@ -142,15 +143,17 @@ def test_runtime_record_rejects_a_resolved_path_identity_mismatch() -> None:
         )
 
 
-def test_runtime_identity_binds_the_resolved_executable_path(
+def test_runtime_identity_binds_the_selected_executable_path(
     tmp_path: Path,
     host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
     aliased = tmp_path / "aliased-python"
     aliased.symlink_to(Path(sys.executable).resolve())
-    assert IsolatedHostPythonRuntime(aliased).describe() == (
-        host_runtime.describe()
-    )
+    aliased_runtime = IsolatedHostPythonRuntime(aliased)
+    aliased_record = aliased_runtime.describe()
+    assert aliased_runtime.executable == aliased
+    assert aliased_record.resolved_executable == aliased
+    assert aliased_record != host_runtime.describe()
     forwarding = _write_executable(
         tmp_path / "forwarding-python",
         f'#!/bin/sh\nexec "{Path(sys.executable).resolve()}" "$@"\n',
@@ -164,17 +167,52 @@ def test_prepare_builds_the_fixed_isolated_command(
     host_runtime: IsolatedHostPythonRuntime,
     request_document: IdentityDocument,
 ) -> None:
-    target = UntrustedPythonTarget(
-        driver_source=DRIVER_SOURCE,
-        request=request_document,
-        containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+    targets = (
+        TrustedPythonTarget(
+            driver_source=DRIVER_SOURCE,
+            request=request_document,
+        ),
+        UntrustedPythonTarget(
+            driver_source=DRIVER_SOURCE,
+            request=request_document,
+            containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
+        ),
     )
-    prepared = host_runtime.prepare(target)
-    assert prepared.argv[0] == host_runtime.executable.as_posix()
-    assert prepared.argv[1:3] == ISOLATED_INVOCATION_ARGUMENTS
-    assert len(prepared.argv) == 4
-    assert prepared.request == target.request
-    assert prepared.runtime_record == host_runtime.describe()
+
+    prepared = tuple(host_runtime.prepare(target) for target in targets)
+
+    assert prepared[0] == prepared[1]
+    assert prepared[0].argv[0] == host_runtime.executable.as_posix()
+    assert prepared[0].argv[1:3] == ISOLATED_INVOCATION_ARGUMENTS
+    assert len(prepared[0].argv) == 4
+    assert prepared[0].runtime_record == host_runtime.describe()
+
+
+def test_prepare_canonicalizes_and_hashes_the_request_once(
+    host_runtime: IsolatedHostPythonRuntime,
+    request_document: IdentityDocument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transported = b'{"canonical":"request"}'
+    calls: list[IdentityDocument] = []
+
+    def capture(request: IdentityDocument) -> bytes:
+        calls.append(request)
+        return transported
+
+    monkeypatch.setattr(host, "request_transport_bytes", capture)
+    prepared = host_runtime.prepare(
+        TrustedPythonTarget(
+            driver_source=DRIVER_SOURCE,
+            request=request_document,
+        )
+    )
+
+    assert calls == [request_document]
+    assert prepared.request_bytes == transported
+    assert prepared.request_id_sha256 == (
+        "1d82e4d717aa597e04f89d4b684cc3ca57ef2d80ba82cfa95576b60b41ad7eda"
+    )
 
 
 def test_prepare_and_repeated_describe_do_not_reprobe(

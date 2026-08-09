@@ -25,8 +25,10 @@ from dr_exec import (
     OutputArtifactRecord,
     OutputOverflowPolicy,
     PayloadRetentionBudget,
+    RunRecordReference,
     StreamRetentionBudget,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedPythonTarget,
 )
 from dr_exec.core.model import ContractModel, canonical_model_bytes
@@ -65,6 +67,12 @@ def _path_and_digest_scalar_model() -> ContractModel:
         relative_path=Path("stdout.bin"),
         size_bytes=7,
         sha256=ALL_ZERO_DIGEST_WITH_TRAILING_F,
+    )
+
+
+def _run_record_reference_model() -> ContractModel:
+    return RunRecordReference(
+        record_id=UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72")
     )
 
 
@@ -128,6 +136,12 @@ SCALAR_VECTORS = (
         b'{"relative_path":"stdout.bin","sha256":"0000000000000000000000'
         b'00000000000000000000000000000000000000000f","size_bytes":7}',
         id="path-and-sha256",
+    ),
+    pytest.param(
+        _run_record_reference_model,
+        b'{"backend":"directory","record_id":'
+        b'"0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72"}',
+        id="run-record-reference",
     ),
     pytest.param(
         _enum_and_integer_scalar_model,
@@ -250,6 +264,21 @@ def test_untrusted_python_target_wire_spelling_is_pinned(
         b'{"containment_profile":"process_boundary_only","driver_source":'
         b'"def dr_exec_main(request, emit):\\n    return None\\n",'
         b'"kind":"untrusted_python","request":{"payload":{"a":[1,'
+        b'{"z":null}],"b":2},"schema":"dr_exec.test_request",'
+        b'"schema_version":1}}'
+    )
+
+
+def test_trusted_python_target_wire_spelling_is_pinned(
+    request_document: IdentityDocument,
+) -> None:
+    target = TrustedPythonTarget(
+        driver_source="def dr_exec_main(request, emit):\n    return None\n",
+        request=request_document,
+    )
+    assert canonical_model_bytes(target) == (
+        b'{"driver_source":"def dr_exec_main(request, emit):\\n    return '
+        b'None\\n","kind":"trusted_python","request":{"payload":{"a":[1,'
         b'{"z":null}],"b":2},"schema":"dr_exec.test_request",'
         b'"schema_version":1}}'
     )

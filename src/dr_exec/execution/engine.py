@@ -36,10 +36,10 @@ from dr_exec.declarations.models import (
     FiniteDurationLimit,
     FiniteOutput,
     TrustedCommandTarget,
+    TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
 )
-from dr_exec.declarations.transport import request_transport_bytes
 from dr_exec.declarations.validation import (
     granted_environment,
     validate_command_resolvability,
@@ -90,16 +90,13 @@ from dr_exec.recording.models import (
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
     TrustedCommandTargetRecord,
+    TrustedPythonTargetRecord,
     UntrustedCommandTargetRecord,
     UntrustedPythonTargetRecord,
 )
 from dr_exec.recording.provenance import _executor_source_snapshot
 from dr_exec.recording.store import FinalizableRun, PreparedRun
-from dr_exec.runtime.protocol import (
-    ProtocolStreamResult,
-    read_protocol_stream,
-    request_identity_digest,
-)
+from dr_exec.runtime.protocol import ProtocolStreamResult, read_protocol_stream
 
 SUPPORTED_PLATFORM: Final = "darwin"
 
@@ -174,21 +171,28 @@ def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
                 request_id_sha256=None,
                 wants_protocol=False,
             )
-        case UntrustedPythonTarget():
+        case TrustedPythonTarget() | UntrustedPythonTarget():
             prepared = runtime.prepare(job.target)
+            record = (
+                TrustedPythonTargetRecord(
+                    canonical_declaration_sha256=digest,
+                    request_id_sha256=prepared.request_id_sha256,
+                    runtime=prepared.runtime_record,
+                )
+                if isinstance(job.target, TrustedPythonTarget)
+                else UntrustedPythonTargetRecord(
+                    canonical_declaration_sha256=digest,
+                    request_id_sha256=prepared.request_id_sha256,
+                    containment_profile=job.target.containment_profile,
+                    runtime=prepared.runtime_record,
+                )
+            )
             return _ResolvedTarget(
                 executable=prepared.argv[0],
                 argv=prepared.argv,
-                stdin_bytes=request_transport_bytes(prepared.request),
-                record=UntrustedPythonTargetRecord(
-                    canonical_declaration_sha256=digest,
-                    request_id_sha256=request_identity_digest(
-                        prepared.request
-                    ),
-                    containment_profile=job.target.containment_profile,
-                    runtime=prepared.runtime_record,
-                ),
-                request_id_sha256=request_identity_digest(prepared.request),
+                stdin_bytes=prepared.request_bytes,
+                record=record,
+                request_id_sha256=prepared.request_id_sha256,
                 wants_protocol=True,
             )
 
@@ -695,7 +699,7 @@ def _degraded_from(
         return receipt
     return DegradedRecordReceipt(
         execution_id=receipt.execution_id,
-        record_dir=receipt.record_dir,
+        reference=receipt.reference,
         latest_state=receipt.latest_state,
         failures=(
             *prior_failures,
@@ -716,7 +720,7 @@ def _degraded_receipt(
 ) -> RealRecordReceipt:
     return DegradedRecordReceipt(
         execution_id=run.execution_id,
-        record_dir=run.record_dir,
+        reference=run.reference,
         latest_state=RecordState.PREPARED
         if isinstance(run, PreparedRun)
         else RecordState.RUNNING,

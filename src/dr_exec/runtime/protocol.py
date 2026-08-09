@@ -10,7 +10,6 @@ from dr_serialize import (
     Sha256Digest,
     StrictJsonDecodeError,
     canonical_json_bytes,
-    identity_document_hash,
 )
 from pydantic import TypeAdapter, ValidationError
 
@@ -26,6 +25,10 @@ from dr_exec.declarations.models import (
     ExecutorSelfBudgets,
     FiniteByteLimit,
     FiniteCountLimit,
+)
+from dr_exec.declarations.transport import (
+    request_transport_bytes,
+    request_transport_digest,
 )
 from dr_exec.runtime.wire import (
     FRAME_TERMINATOR,
@@ -71,7 +74,7 @@ class ProtocolStreamResult:
 
 
 def request_identity_digest(request: IdentityDocument, /) -> Sha256Digest:
-    return identity_document_hash(request)
+    return request_transport_digest(request_transport_bytes(request))
 
 
 def encode_frame(frame: ProtocolFrame, /) -> bytes:
