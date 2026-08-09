@@ -291,7 +291,7 @@ class ProcessExecutor:
 
 Per-job outcomes are closed typed data rather than raw process status or
 synthetic return codes. Each completed execution also carries a receipt for a
-complete or degraded durable record, a fake result, or a cached replay.
+complete or degraded durable record or a fake result.
 
 ```python
 class OutcomeKind(StrEnum):

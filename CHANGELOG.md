@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-08
+
+### Fixed
+
+- Corrected the package documentation and run-record contract to remove stale
+  cached-replay claims after the caching capability was removed in 0.1.6.
+
 ## [0.1.6] - 2026-08-08
 
 ### Added
