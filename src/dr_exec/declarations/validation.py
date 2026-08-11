@@ -4,10 +4,12 @@ import os
 from pathlib import Path
 
 from dr_exec.core.errors import DeclarationError
+from dr_exec.core.kinds import EnvGrantKind
 from dr_exec.declarations.models import (
     EnvGrant,
     ExecutionJob,
     FiniteByteLimit,
+    InProcessImportableJsonTarget,
     TrustedCommandTarget,
     TrustedPythonTarget,
     UntrustedCommandTarget,
@@ -24,7 +26,11 @@ def declared_input_bytes(job: ExecutionJob, /) -> bytes:
     match job.target:
         case TrustedCommandTarget() | UntrustedCommandTarget():
             return job.target.stdin
-        case TrustedPythonTarget() | UntrustedPythonTarget():
+        case (
+            TrustedPythonTarget()
+            | UntrustedPythonTarget()
+            | InProcessImportableJsonTarget()
+        ):
             return request_transport_bytes(job.target.request)
 
 
@@ -67,6 +73,13 @@ def validate_command_resolvability(
 def validate_declaration(job: ExecutionJob, /) -> None:
     validate_input_budget(job, declared_input_bytes(job))
     match job.target:
+        case InProcessImportableJsonTarget():
+            if job.env.kind is not EnvGrantKind.NONE:
+                raise DeclarationError(
+                    "in-process importable JSON jobs accept no environment "
+                    "grant"
+                )
+            return
         case TrustedCommandTarget() | UntrustedCommandTarget():
             validate_command_resolvability(
                 job.target.argv, granted_environment(job.env)

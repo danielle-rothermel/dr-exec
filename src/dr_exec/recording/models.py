@@ -86,11 +86,20 @@ class UntrustedPythonTargetRecord(ContractModel):
     runtime: RuntimeRecord
 
 
+class InProcessImportableJsonTargetRecord(ContractModel):
+    kind: Literal[ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON] = (
+        ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON
+    )
+    canonical_declaration_sha256: Sha256Digest
+    request_id_sha256: Sha256Digest
+
+
 type ExecutionTargetRecord = Annotated[
     TrustedCommandTargetRecord
     | TrustedPythonTargetRecord
     | UntrustedCommandTargetRecord
-    | UntrustedPythonTargetRecord,
+    | UntrustedPythonTargetRecord
+    | InProcessImportableJsonTargetRecord,
     Field(discriminator="kind"),
 ]
 
@@ -416,9 +425,17 @@ class FakeRecordReceipt(ContractModel):
     execution_id: ExecutionId
 
 
+class InProcessRecordReceipt(ContractModel):
+    kind: Literal[RecordReceiptKind.IN_PROCESS] = RecordReceiptKind.IN_PROCESS
+    execution_id: ExecutionId
+
+
 type RealRecordReceipt = CompleteRecordReceipt | DegradedRecordReceipt
 type RecordReceipt = Annotated[
-    CompleteRecordReceipt | DegradedRecordReceipt | FakeRecordReceipt,
+    CompleteRecordReceipt
+    | DegradedRecordReceipt
+    | FakeRecordReceipt
+    | InProcessRecordReceipt,
     Field(discriminator="kind"),
 ]
 
@@ -454,6 +471,8 @@ __all__ = [
     "ExitedOutcomeRecord",
     "FakeRecordReceipt",
     "FinalizedRecord",
+    "InProcessImportableJsonTargetRecord",
+    "InProcessRecordReceipt",
     "OutputArtifactRecord",
     "OutputArtifactRecords",
     "PayloadOutputRecords",

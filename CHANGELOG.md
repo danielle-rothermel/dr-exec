@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-10
+
+### Added
+
+- Added `ImportableJsonExecutor` for trusted in-process importable JSON
+  execution through the existing pool scheduler without subprocess overhead.
+- Added `InProcessImportableJsonTarget`, `build_in_process_importable_json_job`,
+  and `InProcessRecordReceipt` for explicit in-process job declarations and
+  non-durable completions.
+
+### Changed
+
+- Scoped macOS-only production execution claims to `ProcessExecutor` and
+  documented cooperative in-process cancellation semantics.
+
 ## [0.1.7] - 2026-08-08
 
 ### Fixed

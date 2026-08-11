@@ -29,6 +29,7 @@ from dr_exec.core.model import (
     IdentityDocumentField,
 )
 from dr_exec.core.names import JobId
+from dr_exec.importable_json_entry_point import ImportableEntryPoint
 
 
 class UnbudgetedLimit(ContractModel):
@@ -355,11 +356,20 @@ class UntrustedPythonTarget(ContractModel):
     )
 
 
+class InProcessImportableJsonTarget(ContractModel):
+    kind: Literal[ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON] = (
+        ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON
+    )
+    entry_point: ImportableEntryPoint
+    request: IdentityDocumentField
+
+
 type ExecutionTarget = Annotated[
     TrustedCommandTarget
     | TrustedPythonTarget
     | UntrustedCommandTarget
-    | UntrustedPythonTarget,
+    | UntrustedPythonTarget
+    | InProcessImportableJsonTarget,
     Field(discriminator="kind"),
 ]
 
@@ -387,6 +397,7 @@ __all__ = [
     "FiniteCountLimit",
     "FiniteDurationLimit",
     "FiniteOutput",
+    "InProcessImportableJsonTarget",
     "OutputBudget",
     "PayloadRetentionBudget",
     "StreamRetentionBudget",

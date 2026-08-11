@@ -39,6 +39,7 @@ class ExecutionTargetKind(StrEnum):
     TRUSTED_PYTHON = "trusted_python"
     UNTRUSTED_COMMAND = "untrusted_command"
     UNTRUSTED_PYTHON = "untrusted_python"
+    IN_PROCESS_IMPORTABLE_JSON = "in_process_importable_json"
 
 
 @verify(UNIQUE)
@@ -93,6 +94,7 @@ class RecordReceiptKind(StrEnum):
     COMPLETE = "complete"
     DEGRADED = "degraded"
     NOT_APPLICABLE = "not_applicable"
+    IN_PROCESS = "in_process"
 
 
 @verify(UNIQUE)

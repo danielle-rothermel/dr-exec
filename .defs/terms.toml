@@ -172,6 +172,19 @@ is_a = [
 ]
 
 [[terms]]
+name = "in-process importable JSON job"
+definition = """
+An execution job whose target names one trusted importable entry point and one \
+canonical JSON request for synchronous invocation in the caller interpreter. It \
+accepts no environment grant, creates no durable run record, and provides \
+throughput rather than process isolation."""
+exported_symbols = [
+  "dr_exec.InProcessImportableJsonTarget",
+  "dr_exec.ImportableJsonExecutor",
+  "dr_exec.build_in_process_importable_json_job",
+]
+
+[[terms]]
 name = "run record reference"
 definition = """
 A serializable opaque locator through which the selected run store loads one \

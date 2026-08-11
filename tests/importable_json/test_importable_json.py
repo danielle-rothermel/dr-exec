@@ -49,7 +49,7 @@ from dr_exec import (
     build_untrusted_importable_json_job,
     parse_importable_json_result,
 )
-from dr_exec.importable_json import _driver_source
+from dr_exec.importable_json import build_in_process_importable_json_job
 from dr_exec.recording.identity import _canonical_declaration_digest
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
@@ -192,7 +192,23 @@ def test_finite_input_budget_is_enforced_before_fake_execution() -> None:
     assert executor.calls == ()
 
 
+def test_in_process_target_identity_is_deterministic_and_pinned() -> None:
+    first = build_in_process_importable_json_job(
+        JOB_ID, ENTRY_POINT, {"b": 2, "a": 1}
+    )
+    second = build_in_process_importable_json_job(
+        JOB_ID, ENTRY_POINT, {"a": 1, "b": 2}
+    )
+
+    assert first.target == second.target
+    assert str(_canonical_declaration_digest(first.target)) == (
+        "65eea7d0ae302ec439d4f6d36d88fa2a0754ea545bba5b245bdfd26a2c4a8cb4"
+    )
+
+
 def test_driver_material_is_cached_and_pinned() -> None:
+    from dr_exec.importable_json import _driver_source
+
     source = _driver_source(ENTRY_POINT)
 
     assert _driver_source(ENTRY_POINT) is source
