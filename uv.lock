@@ -99,7 +99,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dr-serialize", specifier = "==0.1.2" },
-    { name = "dr-store", specifier = "==0.2.0" },
+    { name = "dr-store", directory = "/Users/daniellerothermel/drotherm/repos/dr-store/.worktrees/seam-e-bulk-api" },
     { name = "pydantic", specifier = "==2.13.4" },
 ]
 
@@ -126,15 +126,27 @@ wheels = [
 [[package]]
 name = "dr-store"
 version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
+source = { directory = "/Users/daniellerothermel/drotherm/repos/dr-store/.worktrees/seam-e-bulk-api" }
 dependencies = [
     { name = "asyncpg" },
     { name = "dr-serialize" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/bb/36d4d77719328b8761541b64e618251eb64eca504011c2480f0ef888abd5/dr_store-0.2.0.tar.gz", hash = "sha256:8aff711c67ea6ecc944a454e551070d123c2350b2aaa384c2fe3b029e17ad0a5", size = 38337, upload-time = "2026-08-09T00:18:57.093Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/73/bb/9d43eec474e8edd756313ac5e60d3feb70113cee976a960dedbab4d35bff/dr_store-0.2.0-py3-none-any.whl", hash = "sha256:9c1bda5cbaf660db61851d6b5ce1c03b28741d446f744d68f603fe40bfe78053", size = 51651, upload-time = "2026-08-09T00:18:55.54Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.31.0" },
+    { name = "dr-serialize", specifier = ">=0.1.2" },
+    { name = "pydantic", specifier = ">=2.13.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pre-commit", specifier = ">=4.6.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "ruff", specifier = ">=0.15.18" },
+    { name = "ty", specifier = ">=0.0.51" },
 ]
 
 [[package]]
