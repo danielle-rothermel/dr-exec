@@ -66,6 +66,14 @@ BLOCK_ON_GATE = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="block_on_gate",
 )
+BLOCK_ON_BARRIER = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="block_on_barrier",
+)
+BURN_UNTIL_GATE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="burn_until_gate",
+)
 COUNT_IMPORTS = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="import_count",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -277,6 +277,43 @@ class ExecutionPool:
             if self._active_streams == 0 and self._shutdown_complete:
                 scheduler.discard_completions()
 
+    async def map_stream(
+        self,
+        submissions: AsyncIterable[ExecutionSubmission[ContextT]]
+        | Iterable[ExecutionSubmission[ContextT]],
+        /,
+        *,
+        concurrency: int | None = None,
+    ) -> AsyncIterator[ExecutionCompletion[ContextT]]:
+        """Stream completions as they finish, keeping the pool saturated.
+
+        Up to ``concurrency`` submissions are in flight at once, defaulting to
+        the pool's capacity so callers need compute nothing. The source is
+        pulled only as a slot frees, so a lazy or infinite source is never
+        drained ahead of capacity, and completions are yielded in completion
+        order rather than in submission order: one slow job delays only
+        itself. Every submission yields exactly one completion, including
+        failures.
+
+        ``concurrency`` is a parallelism width a caller may raise or lower,
+        not a resource limit.
+        """
+
+        self._require_owning_loop()
+        width = (
+            self.effective_capacity.max_active_jobs
+            if concurrency is None
+            else concurrency
+        )
+        if width < 1:
+            raise ValueError("concurrency must be positive")
+        gate = _AdmissionGate(width)
+        async for completion in self.run_stream(
+            _gated(_as_async(submissions), gate)
+        ):
+            gate.release()
+            yield completion
+
     async def drain(self) -> None:
         """Await work the scheduler still owns, then close.
 
@@ -365,6 +402,57 @@ class ExecutionPool:
             self._state = ExecutionPoolState.CLOSED
             return None
         return self._scheduler
+
+
+class _AdmissionGate:
+    """Hold the source at a fixed number of submissions in flight."""
+
+    __slots__ = ("_free", "_width")
+
+    def __init__(self, width: int, /) -> None:
+        self._width = width
+        self._free = asyncio.Semaphore(width)
+
+    async def acquire(self) -> None:
+        await self._free.acquire()
+
+    def release(self) -> None:
+        self._free.release()
+
+
+async def _gated[T](
+    source: AsyncIterator[ExecutionSubmission[T]],
+    gate: _AdmissionGate,
+    /,
+) -> AsyncIterator[ExecutionSubmission[T]]:
+    """Pull the next submission only once a slot has actually freed."""
+
+    while True:
+        await gate.acquire()
+        submission = await _next_submission(source)
+        if submission is None:
+            gate.release()
+            return
+        yield submission
+
+
+def _as_async[T](
+    submissions: AsyncIterable[ExecutionSubmission[T]]
+    | Iterable[ExecutionSubmission[T]],
+    /,
+) -> AsyncIterator[ExecutionSubmission[T]]:
+    if isinstance(submissions, AsyncIterable):
+        return aiter(
+            cast("AsyncIterable[ExecutionSubmission[T]]", submissions)
+        )
+    return _iterate(submissions)
+
+
+async def _iterate[T](
+    submissions: Iterable[ExecutionSubmission[T]], /
+) -> AsyncIterator[ExecutionSubmission[T]]:
+    for submission in submissions:
+        yield submission
 
 
 def _closed_state(broke: bool, /) -> ExecutionPoolState:

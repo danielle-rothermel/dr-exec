@@ -1463,3 +1463,119 @@ def test_each_driver_handles_an_empty_source(surface: str) -> None:
             ]
 
     assert asyncio.run(stream()) == []
+
+
+def test_map_stream_defaults_its_width_to_the_pool_capacity() -> None:
+    executor, responder = gated_executor()
+    batch = jobs(5)
+    pool = fixed_pool(executor, 2)
+    source = recording_source(batch)
+
+    async def stream() -> list[int]:
+        async with pool:
+            return [
+                completion.context
+                async for completion in pool.map_stream(source)
+            ]
+
+    streamer = in_thread(lambda: asyncio.run(stream()))
+
+    responder.await_arrival_count(2)
+    assert source.pulled == 2
+    responder.release_all(batch)
+    join(streamer)
+
+
+def test_map_stream_holds_a_narrower_width_than_the_pool_capacity() -> None:
+    executor, responder = gated_executor()
+    batch = jobs(4)
+    pool = fixed_pool(executor, 4)
+    source = recording_source(batch)
+
+    async def stream() -> list[int]:
+        async with pool:
+            return [
+                completion.context
+                async for completion in pool.map_stream(source, concurrency=1)
+            ]
+
+    streamer = in_thread(lambda: asyncio.run(stream()))
+
+    responder.await_arrival(batch[0].job_id)
+    source.await_pulled(1)
+    assert source.pulled == 1
+    assert responder.peak_active == 1
+    responder.release_all(batch)
+    join(streamer)
+
+    assert responder.peak_active == 1
+
+
+def test_map_stream_yields_every_submission_exactly_once() -> None:
+    batch = jobs(6)
+    pool = fixed_pool(immediate_executor(), 3)
+
+    async def stream() -> list[int]:
+        async with pool:
+            return [
+                completion.context
+                async for completion in pool.map_stream(submissions_of(batch))
+            ]
+
+    assert sorted(asyncio.run(stream())) == list(range(6))
+
+
+def test_map_stream_accepts_a_synchronous_iterable() -> None:
+    batch = jobs(3)
+    pool = fixed_pool(immediate_executor(), 2)
+    submissions = [
+        ExecutionSubmission(job=job, context=index)
+        for index, job in enumerate(batch)
+    ]
+
+    async def stream() -> list[int]:
+        async with pool:
+            return [
+                completion.context
+                async for completion in pool.map_stream(submissions)
+            ]
+
+    assert sorted(asyncio.run(stream())) == [0, 1, 2]
+
+
+def test_map_stream_refuses_a_non_positive_width() -> None:
+    pool = fixed_pool(immediate_executor(), 1)
+
+    async def stream() -> None:
+        async with pool:
+            stream_iterator = pool.map_stream(
+                submissions_of(jobs(1)), concurrency=0
+            )
+            await anext(stream_iterator)
+
+    with pytest.raises(ValueError, match="concurrency"):
+        asyncio.run(stream())
+
+
+def test_map_stream_delivers_in_completion_order() -> None:
+    executor, responder = gated_executor()
+    batch = jobs(3)
+    pool = fixed_pool(executor, 3)
+
+    async def stream() -> list[int]:
+        async with pool:
+            return [
+                completion.context
+                async for completion in pool.map_stream(submissions_of(batch))
+            ]
+
+    collected: list[list[int]] = []
+    streamer = in_thread(lambda: collected.append(asyncio.run(stream())))
+
+    responder.await_arrival_count(3)
+    for index in (2, 0, 1):
+        responder.release(batch[index].job_id)
+        responder.await_executor_returned(batch[index].job_id)
+    join(streamer)
+
+    assert collected == [[2, 0, 1]]

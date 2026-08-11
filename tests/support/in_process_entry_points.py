@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 # Set once per interpreter that imports this module. A worker imports its
@@ -72,6 +73,22 @@ def exit_abruptly(_value: object) -> None:
     """Kill this worker mid-job without unwinding."""
 
     os._exit(9)
+
+
+def exit_abruptly_unless_asked_to_echo(value: object) -> dict[str, object]:
+    """Kill this worker for the one input that asks for it, else echo."""
+
+    if isinstance(value, dict) and value.get("die"):
+        os._exit(9)
+    return {"value": value}
+
+
+def echo_or_block_on_gate(value: object) -> dict[str, object]:
+    """Block on a caller-opened gate when given one, else echo."""
+
+    if isinstance(value, dict) and "gate_path" in value:
+        return block_on_gate(cast("dict[str, object]", value))
+    return {"value": value}
 
 
 def block_on_barrier(value: dict[str, object]) -> dict[str, object]:
