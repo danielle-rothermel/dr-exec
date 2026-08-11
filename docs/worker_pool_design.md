@@ -67,11 +67,16 @@ The executor owns a fixed set of worker processes.
   Because the import is per worker rather than per job, a worker pool is bound
   to one entry point for its lifetime; a caller needing a different entry point
   opens a different pool.
-- A worker that fails its startup import never becomes ready. That failure is
-  reported to the caller as an executor-owned dispatch failure on the first job
-  that needed it, in the same shape the in-process executor already uses for
-  import failure (`ProtocolFailedOutcome` with `MALFORMED_FRAME` and
-  `FailureOwner.EXECUTOR`).
+- Two distinct startup failures, each with one outcome. If the OS-level spawn
+  fails and no interpreter starts, the first job that needed that worker
+  completes as `SpawnFailedOutcome(errno=..., error_message=...)`, attributed to
+  `FailureOwner.MACHINE` by `attribute_outcome`. If a spawned worker starts but
+  fails its startup import of the entry-point module, it never becomes ready,
+  and the first job that needed it completes as `ProtocolFailedOutcome` with
+  `MALFORMED_FRAME`, attributed through
+  `executor_protocol_failure_attribution` to `FailureOwner.EXECUTOR` — the same
+  shape `ImportableJsonExecutor` uses for its
+  `ImportableJsonExecutorDispatchError` branch.
 - Workers live until the pool closes. There is no recycling, no
   jobs-per-worker ceiling, and no idle timeout.
 
@@ -90,11 +95,17 @@ serialization system.
   point with the payload, and returns the result inside the same envelope.
 - The worker writes those canonical result bytes back to the parent over a
   second pipe.
-- Framing follows the existing protected-protocol shape: one canonical JSON
-  document per frame, terminated by `FRAME_TERMINATOR` (`b"\n"`), read by
-  length-then-bytes or newline-delimited reads consistent with
-  `dr_exec.runtime.protocol`. Reusing that framing keeps one grammar in the
-  repo rather than inventing a second one.
+- Framing is one canonical JSON envelope terminated by `FRAME_TERMINATOR`
+  (`b"\n"`), read by newline-delimited reads. The pool reuses the
+  `FRAME_TERMINATOR` constant and the canonical-bytes helpers
+  (`request_transport_bytes` / `canonical_json_bytes`), but not the
+  prelude/output/complete `ProtocolFrame` grammar of
+  `dr_exec.runtime.protocol`. That grammar — a `ProtocolPrelude` carrying a
+  `request_id_sha256` the parent must match, sequenced `ProtocolOutput` frames,
+  and a `ProtocolComplete` whose `output_count` must reconcile — exists to
+  protect a parent from an untrusted child's shared stdout. A worker pool runs
+  trusted code on a dedicated per-worker pipe, where that grammar buys nothing
+  and costs three frames plus a digest per result.
 
 **Pipe deadlock is a correctness invariant, not a hardening concern.** A parent
 that writes a large request into a pipe while the worker is blocked writing a
@@ -140,8 +151,10 @@ so a completion's execution mode is visible in its evidence, and so the
 conformance assertion that each executor enforces its own receipt kind extends
 to this executor.
 
-`RecordReceiptKind` members are a persisted-format contract: the new literal
-`"worker_pool"` is pinned by a golden test with the existing kinds.
+`RecordReceiptKind` members are a persisted-format contract, but no golden test
+pins those literals today — `"in_process"` was added without one. This change
+adds that golden test, covering the new `"worker_pool"` literal and the four
+existing kinds together.
 
 ### Worker death attribution
 
@@ -156,11 +169,16 @@ completion distinguishes two owners:
   point). Represented as `SignaledOutcome` when a terminating signal is
   observable, otherwise `ExitedOutcome` with the worker's exit code, attributed
   to `FailureOwner.PAYLOAD` with detail naming worker death during the job.
-- **Pool-caused death** — the worker could not be started at all, or died
-  between jobs, or the pool's own machinery failed. Represented as
-  `SpawnFailedOutcome` for start failure and attributed to
-  `FailureOwner.MACHINE` or `FailureOwner.EXECUTOR` respectively; no
-  in-flight job is silently retried on another worker.
+- **Pool-caused death** — the worker could not be spawned, or died between
+  jobs, or the pool's own machinery failed. An OS-level spawn failure is
+  `SpawnFailedOutcome`, which `attribute_outcome` attributes to
+  `FailureOwner.MACHINE`; there is no owner parameter and the pool builds no
+  attribution of its own. Every genuinely executor-owned case — worker startup
+  import failure, death between jobs, pool machinery failure — is reported as
+  `ProtocolFailedOutcome` with `MALFORMED_FRAME` and attributed through
+  `executor_protocol_failure_attribution`, which is the repo's supported
+  `FailureOwner.EXECUTOR` path. No in-flight job is silently retried on another
+  worker.
 
 In both cases the parent notices worker death by the read side of the pipe
 reaching EOF and by reaping the child, never by waiting for a timer. A job
@@ -287,13 +305,22 @@ change's own testing, and are documented with that failure when added.
 Shared conformance first — structural conformance to `Executor` does not
 establish semantic conformance.
 
-- `tests/capabilities/test_executor_conformance.py` — add the worker-pool
-  executor to `EXECUTOR_IMPLEMENTATIONS` so it runs the shared
-  invalid-declaration rejection, valid-declaration acceptance, and
-  receipt-kind assertions. Declarations it does not accept (command targets,
-  process Python targets) must be rejected the same way the in-process executor
-  rejects them, through shared validation rather than a private check.
-- `tests/execution/test_importable_json_executor.py` — the in-process behavior
+- `tests/capabilities/test_executor_conformance.py` — the worker-pool executor
+  stays out of `EXECUTOR_IMPLEMENTATIONS`, exactly as `ImportableJsonExecutor`
+  does today. That fixture is parameterized over command and process-Python
+  declarations: every entry in `VALID_DECLARATIONS` is one of those kinds, and
+  `test_each_executor_enforces_its_own_receipt_kind` runs a command target. An
+  executor that accepts only `InProcessImportableJsonTarget` cannot satisfy
+  those parameterizations. Its rejection of other target kinds is also not
+  expressible there: `validate_declaration` has no wrong-kind branch, so
+  `test_every_executor_rejects_the_same_invalid_declarations`, which requires
+  `DeclarationError`, cannot host it. The worker-pool executor follows the
+  established pattern instead — an `isinstance` guard raising `ExecutorFailure`,
+  matching `ImportableJsonExecutor` and pinned the way
+  `test_wrong_target_raises_executor_failure` pins it.
+- `tests/execution/test_importable_json_executor.py` — this is the semantic
+  conformance baseline for the worker-pool executor, in place of the shared
+  fixture. The in-process behavior
   suite is the semantic conformance baseline: echo round trip, JSON `null`
   result, import failure, non-callable attribute, entry-point exception,
   wrong-target rejection, non-empty env rejection, finite input-budget
@@ -307,8 +334,12 @@ establish semantic conformance.
   pool is backed by worker processes.
 - `tests/test_public_api.py` — the new executor, receipt model, and receipt
   kind are exported.
-- Golden vectors — `tests/core/test_scalar_golden_vectors.py` and the recording
-  identity golden vectors pin the new `"worker_pool"` receipt-kind literal.
+- Golden vectors — no golden vector pins `RecordReceiptKind` literals today, so
+  this change adds a new one. It lives in
+  `tests/recording/test_receipt_kind_golden_vectors.py` and pins every member
+  of `RecordReceiptKind` — the existing `"complete"`, `"degraded"`,
+  `"not_applicable"`, and `"in_process"` alongside the new `"worker_pool"` —
+  rather than extending an existing pin.
 
 New worker-pool-specific tests:
 
@@ -322,8 +353,9 @@ New worker-pool-specific tests:
 - worker death mid-job (entry point calls `os._exit` or raises a fatal signal)
   fails exactly that job with payload attribution, and the pool completes the
   remaining jobs on a respawned worker;
-- worker start failure (unimportable entry-point module) fails jobs loudly with
-  executor attribution instead of hanging;
+- worker startup import failure (the worker spawns, then fails to import the
+  entry-point module) fails jobs loudly as `ProtocolFailedOutcome` with
+  `FailureOwner.EXECUTOR` instead of hanging;
 - a large request and a large result round-trip without deadlock, in the same
   test, sized well beyond a pipe buffer;
 - a finite wall-time budget on a busy-loop entry point produces
@@ -351,3 +383,14 @@ records; workers are long-lived and amortize one entry-point import; wall-time
 budgets are enforced by worker termination only when declared finite; and every
 submitted job produces exactly one completion, with worker death attributed
 between payload and pool.
+
+It also amends the existing `.defs/contracts.toml` contract "Scheduling bounds
+resident work and reuses no child", whose unqualified "Every production job
+executes in a fresh child" and "Scheduling capacity is the only resource reused
+across jobs" become false once long-lived workers land. Narrow both to
+`ProcessExecutor` — "Every `ProcessExecutor` production job executes in a fresh
+child; `ProcessExecutor` provides no warm-child reuse" — and add a sentence
+stating that worker-pool importable JSON execution deliberately reuses
+long-lived worker processes for parallelism, creating no durable record and
+making no containment claim. This mirrors how "Production execution is local
+and macOS-only" was amended when the in-process executor landed.

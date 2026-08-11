@@ -291,6 +291,12 @@ the entry point is a crash in your process.
 
 ### Mode 3: worker pool (`WorkerPoolImportableJsonExecutor`)
 
+**Status: planned, not yet available.** `WorkerPoolImportableJsonExecutor` is
+not in the package; importing it fails. This section describes the designed
+behavior so the mode can be compared against the two that exist today. Until it
+lands, pick between modes 1 and 2. The implementation contract is in
+[`docs/worker_pool_design.md`](docs/worker_pool_design.md).
+
 **What actually happens.** The pool starts N long-lived worker processes (via
 `spawn`, a fresh interpreter each). Each worker imports the entry-point module
 **once**, at startup, and then waits. Jobs are sent to idle workers as the same
@@ -318,19 +324,23 @@ When your work is I/O-bound: you will pay for processes and pipes to get
 concurrency that threads already gave you for free in mode 2. And when the
 values you want to exchange are large — the transport is compact JSON, so bulk
 data should travel by reference (a path, an artifact) rather than through the
-envelope.
+envelope. And when you need to run **more than one entry point**: because the
+import is paid per worker at startup rather than per job, a pool is bound to a
+single entry point for its lifetime. A caller with several functions opens a
+pool per function; submitting jobs naming different entry points to one pool is
+not supported.
 
 ### Decision table
 
 | Your situation | Mode | Why |
 | --- | --- | --- |
-| Many trusted CPU-bound items, ms–s each | **Worker pool** | Real cores, import paid once per worker |
+| Many trusted CPU-bound items, ms–s each | **Worker pool** *(planned)* | Real cores, import paid once per worker |
 | Untrusted payload, or needs containment evidence | **Spawn-per-job** | Only mode with a containment declaration |
 | Needs a durable run record per attempt | **Spawn-per-job** | Only mode that records |
 | Few long jobs (seconds–minutes each) | **Spawn-per-job** | Startup is noise; you get records and isolation free |
 | I/O-bound entry point | **In-process** | Threads already overlap waiting; processes add cost |
 | Tiny trusted transforms, tests, fakes | **In-process** | Cheapest possible; real completion objects |
-| Needs an enforced wall-time limit | **Worker pool** or **spawn-per-job** | In-process cancellation is cooperative only |
+| Needs an enforced wall-time limit | **Worker pool** *(planned)* or **spawn-per-job** | In-process cancellation is cooperative only |
 | Needs an environment grant | **Spawn-per-job** | The other modes accept none |
 
 Budgets default to unbudgeted in every mode. A limit exists only where a caller
@@ -339,8 +349,10 @@ declares one.
 ### In-process importable JSON
 
 `ImportableJsonExecutor` runs the importable JSON contract synchronously in the
-caller interpreter. It provides throughput, not isolation or parallelism: there
-is no subprocess, no durable run record, and no environment grant. Use it with
+caller interpreter. It provides throughput, not isolation, and no parallelism
+for CPU-bound Python work — threads still overlap I/O waits, so an I/O-bound
+entry point does benefit. There is no subprocess, no durable run record, and no
+environment grant. Use it with
 `ExecutionPool` the same way as `ProcessExecutor`.
 
 ```python
@@ -366,6 +378,9 @@ semantics.
 
 ### Worker pool importable JSON
 
+**Status: planned, not yet available.** The executor below is not in the
+package; the snippet describes the designed API, not a runnable import.
+
 `WorkerPoolImportableJsonExecutor` runs the same
 `InProcessImportableJsonTarget` jobs — the same builder, the same envelope, the
 same `parse_importable_json_result` — across long-lived worker processes. The
@@ -379,6 +394,13 @@ async with executor.open_pool() as pool:
     async for item in pool.map_stream(submissions()):
         result = parse_importable_json_result(item.completed_execution)
 ```
+
+The entry point appears twice on purpose. The job carries it because it is part
+of the target — what runs. The executor takes it because each worker imports it
+once at startup, before any job arrives, which is the cost this mode exists to
+amortize. That makes the pool **bound to one entry point for its lifetime**:
+every job a pool serves must name the entry point the pool was constructed
+with, and a caller with several functions opens a pool per function.
 
 `map_stream` keeps the pool saturated and yields completions **as they
 finish**, in completion order, pulling from its source only as slots free.
