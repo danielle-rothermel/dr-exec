@@ -62,10 +62,11 @@ def main() -> None:
     attribute_name = sys.argv[2]
     request_fd = int(sys.argv[3])
     result_fd = int(sys.argv[4])
+    parent_pid = int(sys.argv[5])
 
     # Started before the entry-point import, because an import that blocks
     # forever would otherwise outlive the parent just as a job would.
-    watch_parent()
+    watch_parent(parent_pid)
 
     requests = open_request_reader(request_fd)
     # The result pipe stays unbuffered because every frame is written and
@@ -80,20 +81,25 @@ def main() -> None:
     _serve(entry_point, requests=requests, results=results)
 
 
-def watch_parent() -> threading.Thread:
+def watch_parent(parent_pid: int, /) -> threading.Thread:
     """Exit this worker once its parent process is gone.
 
     An idle worker already ends itself when the request pipe reaches end of
     file, but a worker in the middle of a job is not reading that pipe and
     would otherwise run to completion — possibly forever, at full CPU — with
     nobody left to receive its answer. The kernel reparents an orphan, so a
-    changed parent pid is the signal that the pool that owns this worker died.
+    parent pid that no longer matches is the signal that the pool that owns
+    this worker died.
+
+    The owning pid is read in the parent and handed down rather than read here
+    with ``os.getppid()``: a parent that dies before this worker reaches its
+    first poll has already been replaced by the reaper, and a worker that
+    learned its parent's identity that late would treat the reaper as its
+    owner and never notice it had been orphaned at all.
 
     This is best-effort cleanup, not supervision: it imposes no ceiling on a
     job's runtime, its payload size, or anything else a live parent asked for.
     """
-
-    parent_pid = os.getppid()
 
     def poll() -> None:
         while os.getppid() == parent_pid:

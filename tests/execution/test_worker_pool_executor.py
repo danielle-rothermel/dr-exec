@@ -461,6 +461,113 @@ def test_an_unbudgeted_job_is_never_stopped_by_the_executor(
     assert parse_importable_json_result(completed) == {"released": True}
 
 
+@pytest.mark.parametrize("stopper", ["budget", "cancel"])
+def test_a_declared_stop_condition_reaches_a_job_waiting_for_a_slot(
+    tmp_path: Path, stopper: str
+) -> None:
+    """Waiting for a worker slot is inside the caller's stop condition.
+
+    Every slot is held by an unbudgeted job the test never releases, so the
+    second job can only ever end through the condition it declared. The
+    terminal outcome is the evidence; nothing here waits on elapsed time.
+    """
+
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    ready = tmp_path / "ready"
+    gate = Gate.create(directory, "gate")
+    holder = job_for_entry_point(
+        BLOCK_ON_GATE,
+        {"ready_path": str(ready), "gate_path": str(gate.path)},
+    )
+    token = CancelToken() if stopper == "cancel" else None
+    queued = job_for_entry_point(
+        BLOCK_ON_GATE,
+        {"ready_path": str(tmp_path / "unused"), "gate_path": str(gate.path)},
+        budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=250_000_000))
+        if stopper == "budget"
+        else None,
+    )
+
+    async def run() -> CompletedExecution:
+        executor = WorkerPoolImportableJsonExecutor(
+            entry_point=BLOCK_ON_GATE, worker_count=1
+        )
+        held = asyncio.create_task(asyncio.to_thread(executor.run, holder))
+        # The only slot is occupied once the payload announces itself.
+        await asyncio.to_thread(_await_marker, ready)
+        waiting = asyncio.create_task(
+            asyncio.to_thread(executor.run, queued, cancellation=token)
+        )
+        if token is not None:
+            token.cancel()
+        completed = await waiting
+        await asyncio.to_thread(executor.close)
+        await held
+        return completed
+
+    completed = asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
+
+    outcome = completed.result.outcome
+    if stopper == "budget":
+        assert isinstance(outcome, BudgetExceededOutcome)
+        assert outcome.axis is BudgetAxis.WALL_TIME
+    else:
+        assert isinstance(outcome, CancelledOutcome)
+
+
+def test_a_worker_spawned_as_the_pool_closes_does_not_outlive_it(
+    tmp_path: Path,
+) -> None:
+    """close() must reach a worker whose spawn it raced.
+
+    The spawn is held open until close() has taken its snapshot of live
+    workers, so registration lands afterwards. The worker must still be gone
+    and the job must fail loudly rather than run where nobody can reach it.
+    """
+
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    gate = Gate.create(directory, "gate")
+    job = job_for_entry_point(
+        BLOCK_ON_GATE,
+        {
+            "ready_path": str(tmp_path / "ready"),
+            "gate_path": str(gate.path),
+        },
+    )
+    spawning = threading.Event()
+    proceed = threading.Event()
+    spawned: list[object] = []
+    real_spawn = worker_pool._spawn_worker
+
+    def held_spawn(entry_point: ImportableEntryPoint, /) -> object:
+        spawning.set()
+        proceed.wait(WATCHDOG_SECONDS)
+        worker = real_spawn(entry_point)
+        spawned.append(worker)
+        return worker
+
+    async def run() -> CompletedExecution:
+        executor = WorkerPoolImportableJsonExecutor(
+            entry_point=BLOCK_ON_GATE, worker_count=1
+        )
+        call = asyncio.create_task(asyncio.to_thread(executor.run, job))
+        # close() runs while the spawn is parked inside held_spawn.
+        await asyncio.to_thread(spawning.wait, WATCHDOG_SECONDS)
+        await asyncio.to_thread(executor.close)
+        proceed.set()
+        return await call
+
+    with mock.patch.object(worker_pool, "_spawn_worker", held_spawn):
+        completed = asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
+
+    assert isinstance(completed.result.outcome, ProtocolFailedOutcome)
+    worker = cast("worker_pool._Worker", spawned[0])
+    _await_pid_gone(worker.process.pid)
+    assert not exact_pid_exists(worker.process.pid)
+
+
 def test_the_worker_count_defaults_to_the_usable_cpu_count() -> None:
     with WorkerPoolImportableJsonExecutor(entry_point=ECHO) as executor:
         assert executor.width == usable_cpu_count()

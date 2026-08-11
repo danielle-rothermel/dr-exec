@@ -94,6 +94,12 @@ The executor owns a fixed set of worker processes.
   through the same pipe-EOF path as any other worker death. This is not a
   timeout, grace period, or join deadline: closing simply never blocks on a
   slot that may never come back.
+- Closing reaches a worker whose spawn it raced. A worker is registered as
+  live under the same lock `close()` snapshots under, so a spawn that lands
+  after that snapshot observes the closed pool and retires the worker it just
+  started instead of leaving it running where nothing can reach it. The job
+  that was starting it fails loudly rather than running on an unreachable
+  worker.
 - A worker does not outlive the pool that owns it, even when the parent dies
   abnormally and no `close()` ever runs. Two mechanisms cover the two states a
   worker can be in. An **idle** worker is blocked reading its request pipe, so
@@ -103,10 +109,14 @@ The executor owns a fixed set of worker processes.
   otherwise run to completion, possibly forever and at full CPU, with nobody
   left to receive its answer. For that case a daemon thread started before the
   entry-point import polls `os.getppid()` every
-  `PARENT_LIVENESS_POLL_SECONDS`; a changed parent pid means the kernel
+  `PARENT_LIVENESS_POLL_SECONDS` against the owning pid the parent read and
+  handed down at spawn; a parent pid that no longer matches means the kernel
   reparented this orphan, and the worker leaves through `os._exit` rather than
   unwinding, because its pipes lead nowhere and the entry point may hold locks
-  or be uninterruptible. The poll interval is a liveness heartbeat, not a
+  or be uninterruptible. The owning pid comes from the parent rather than from
+  the child's own first `os.getppid()`, because a parent that dies before the
+  child reaches that call has already been replaced by the reaper, and a worker
+  that learned its owner that late would never notice it had been orphaned. The poll interval is a liveness heartbeat, not a
   limit: it bounds only how long an orphan survives its parent, never how long
   a job may run, how large a payload may be, or anything a live parent asked
   for. This is best-effort cleanup — a `SIGKILL`ed parent gets no chance to
@@ -276,11 +286,16 @@ Caller cancellation through `CancelToken` behaves the same as the wall-time
 path when a job is already running: kill the worker, complete the job as
 `CancelledOutcome`, respawn.
 
-A declared stop condition covers the whole job, including the wait for its
-worker to finish importing the entry point. An entry-point module that blocks
-on import is otherwise indistinguishable from one that is merely slow, so a
-job whose worker never becomes ready still completes as
-`BudgetExceededOutcome` or `CancelledOutcome` rather than waiting forever.
+A declared stop condition covers the whole job: the wait for a free worker
+slot, the wait for that worker to finish importing the entry point, and the
+wait for its answer. An entry-point module that blocks on import is otherwise
+indistinguishable from one that is merely slow, so a job whose worker never
+becomes ready still completes as `BudgetExceededOutcome` or `CancelledOutcome`
+rather than waiting forever. The slot wait is inside the condition for the same
+reason: every slot may be held by an unbudgeted job that never returns one, so
+a job that declared a deadline or a cancel token gives up rather than queue
+behind work it never bounded. This narrows no job — a job that declared no stop
+condition still waits for a slot indefinitely.
 
 A job that declares neither a cancel token nor a finite wall-time budget waits
 on its worker's answer with no timeout and no periodic wakeup at all: the
@@ -326,6 +341,11 @@ Contract:
   them. Without that identity, a stream's in-flight width tracks whatever the
   shared queue happened to hand it rather than its own work, and streams
   starve each other;
+- a map stream that ends early releases the completions it still owns. They
+  are claimable by that stream alone, so leaving them buffered would hold
+  resident capacity no surviving stream could ever free — and a plain
+  `run_stream`, which ends only once no resident remains, would wait on them
+  forever;
 - backpressure is intrinsic: a caller that stops consuming stops intake.
 
 `concurrency` is a parallelism width the caller may raise or lower, not a
@@ -458,8 +478,18 @@ New worker-pool-specific tests:
 - a declared wall-time budget and a caller cancel each end a job that is still
   waiting for a worker whose entry-point import blocks, so startup is inside
   the declared stop condition rather than a window it cannot reach;
+- a declared wall-time budget and a caller cancel each end a job still waiting
+  for a worker slot held by an unbudgeted job, so the slot wait is inside the
+  declared stop condition too;
+- an abandoned `map_stream` frees the completions it still owns: a plain
+  `run_stream` sharing the pool afterwards ends instead of waiting forever on
+  residents only the departed stream could have claimed;
+- a scheduler break reaches a stream holding none of its own completions, so
+  another stream's buffered work cannot mask the break and hang it;
 - `close()` with an unbudgeted job in flight terminates the worker and
   completes that job loudly instead of blocking the caller;
+- a worker whose spawn raced `close()` is gone once `close()` returns, and the
+  job that was starting it fails loudly rather than running unreachable;
 - `SystemExit` from an entry point reports the exit code the entry point
   asked for, pinning that the parent reaps the worker before describing its
   death rather than racing interpreter shutdown;

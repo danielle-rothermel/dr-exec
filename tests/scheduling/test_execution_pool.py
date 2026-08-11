@@ -35,6 +35,7 @@ from dr_exec import (
 )
 from dr_exec.core.kinds import CapacitySource
 from dr_exec.execution.executor import _run_batch
+from dr_exec.scheduling.pool import _OwnedContext, _StreamOwner, _unowned
 from dr_exec.scheduling.scheduler import (
     SchedulerBroken,
     _AdmissionResult,
@@ -1637,6 +1638,90 @@ def test_two_map_streams_on_one_pool_each_yield_only_their_own() -> None:
     first_contexts, second_contexts = collected[0]
     assert sorted(first_contexts) == [f"first-{index}" for index in range(3)]
     assert sorted(second_contexts) == [f"second-{index}" for index in range(3)]
+
+
+def test_releasing_a_departed_owners_completions_frees_their_capacity() -> (
+    None
+):
+    """A completion no surviving driver can claim must not hold capacity.
+
+    An owned completion is claimable by exactly one driver, so once that
+    driver leaves it is unreachable while still counting against the shared
+    resident bound — and a plain stream, which ends only once no resident
+    remains, would wait on it forever.
+    """
+
+    scheduler: _ExecutionScheduler[object] = _ExecutionScheduler(
+        executor=immediate_executor(), capacity=3
+    )
+    owner = _StreamOwner()
+    stranded: _Completion[object] = _Completion(
+        _QUEUED_TICKET,
+        completion_for(jobs(1)[0].job_id),
+        _OwnedContext(owner=owner, context="stranded"),
+    )
+    scheduler._ready.append(stranded)
+    scheduler._residents += 1
+
+    # No surviving driver can claim it: a plain stream skips owned work, and
+    # every other map stream owns a different tag.
+    assert scheduler.take_completion_nowait(owned_by=_unowned) is None
+    assert scheduler.has_residents()
+
+    # Departing is what must release it.
+    scheduler.release_owned(owner.owns)
+
+    assert not scheduler.has_residents()
+
+
+def test_a_map_stream_releases_its_ownership_when_it_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The release must be wired to the end of every map stream."""
+
+    releases: list[object] = []
+
+    class _RecordingScheduler(_ExecutionScheduler[object]):
+        def release_owned(self, owned_by: Callable[[object], bool], /) -> None:
+            releases.append(owned_by)
+            super().release_owned(owned_by)
+
+    monkeypatch.setattr(
+        "dr_exec.scheduling.pool._ExecutionScheduler", _RecordingScheduler
+    )
+    pool = fixed_pool(immediate_executor(), 2)
+
+    async def stream() -> None:
+        async with pool:
+            async for _ in pool.map_stream(submissions_of(jobs(2))):
+                pass
+
+    asyncio.run(asyncio.wait_for(stream(), WATCHDOG_SECONDS))
+
+    assert len(releases) == 1
+
+
+def test_a_break_reaches_a_map_stream_holding_no_completion_of_its_own() -> (
+    None
+):
+    """Another stream's buffered work must not mask a scheduler break.
+
+    The broken scheduler can never hand this stream its own completions, so a
+    stream that waits for them instead of raising would wait forever.
+    """
+
+    scheduler: _ExecutionScheduler[object] = _ExecutionScheduler(
+        executor=FakeExecutor(), capacity=4
+    )
+    foreign: _Completion[object] = _Completion(
+        _QUEUED_TICKET, completion_for(jobs(1)[0].job_id), "foreign"
+    )
+    scheduler._ready.append(foreign)
+    scheduler._residents += 1
+    scheduler._break(RuntimeError("injected"))
+
+    with pytest.raises(SchedulerBroken):
+        scheduler.take_completion_nowait(owned_by=lambda _: False)
 
 
 def test_a_plain_stream_never_consumes_a_map_streams_completions() -> None:

@@ -92,6 +92,10 @@ class _WorkerStartupFailed(Exception):
     """A spawned worker never became ready to serve requests."""
 
 
+class _WorkerSetClosed(Exception):
+    """The pool closed while this job was spawning its worker."""
+
+
 class _StopRequested(Exception):
     """A caller cancel or a declared finite wall-time budget ended the job."""
 
@@ -272,10 +276,16 @@ class _WorkerSet:
     def width(self) -> int:
         return self._width
 
-    def lease(self) -> _WorkerLease:
-        """Take one slot, spawning its worker when the slot is empty."""
+    def lease(self, /, *, stop: _StopWatch) -> _WorkerLease:
+        """Take one slot, spawning its worker when the slot is empty.
 
-        slot = self._slots.get()
+        Waiting for a slot is inside the caller's declared stop condition:
+        every slot may be held by an unbudgeted job that never returns one, so
+        a job that declared a deadline or a cancel token must be able to give
+        up here rather than wait behind work it never bounded.
+        """
+
+        slot = self._take_slot(stop=stop)
         if slot is not None:
             return _WorkerLease(self, slot)
         try:
@@ -283,9 +293,29 @@ class _WorkerSet:
         except _SpawnFailure:
             self._slots.put(None)
             raise
+        # Registering under the same lock close() snapshots under is what
+        # keeps a worker spawned concurrently with close() from outliving it:
+        # either close() sees it here, or it is retired on the spot.
         with self._lock:
+            if self._closed.is_set():
+                worker.terminate()
+                self._slots.put(None)
+                raise _WorkerSetClosed
             self._live.add(worker)
         return _WorkerLease(self, worker)
+
+    def _take_slot(self, /, *, stop: _StopWatch) -> _Worker | None:
+        """Wait for a free slot, honoring a declared stop condition."""
+
+        if stop.unwatched:
+            return self._slots.get()
+        while True:
+            try:
+                return self._slots.get(timeout=stop.poll_seconds())
+            except queue.Empty:
+                outcome = stop.outcome()
+                if outcome is not None:
+                    raise _StopRequested(outcome) from None
 
     def release(self, worker: _Worker, /) -> None:
         if self._closed.is_set():
@@ -401,8 +431,14 @@ class WorkerPoolImportableJsonExecutor:
         deadline_ns: int | None,
         cancellation: CancelToken | None,
     ) -> CompletedExecution:
+        stop = _StopWatch(
+            deadline_ns=None
+            if deadline_ns is None
+            else execution.started_ns + deadline_ns,
+            cancellation=cancellation,
+        )
         try:
-            lease = self._workers.lease()
+            lease = self._workers.lease(stop=stop)
         except _SpawnFailure as failure:
             return execution.completed(
                 outcome=SpawnFailedOutcome(
@@ -410,12 +446,12 @@ class WorkerPoolImportableJsonExecutor:
                     error_message=failure.error_message,
                 )
             )
-        stop = _StopWatch(
-            deadline_ns=None
-            if deadline_ns is None
-            else execution.started_ns + deadline_ns,
-            cancellation=cancellation,
-        )
+        except _StopRequested as requested:
+            return execution.completed(outcome=requested.outcome)
+        except _WorkerSetClosed:
+            return execution.protocol_failed(
+                "the worker pool closed while this job was starting a worker"
+            )
         with lease:
             try:
                 lease.worker.wait_for_ready(stop=stop)
@@ -671,6 +707,9 @@ def _spawn_worker(entry_point: ImportableEntryPoint, /) -> _Worker:
                 entry_point.attribute_name,
                 str(request_read),
                 str(result_write),
+                # Read here, not in the child: a child that reads it after
+                # losing its parent would see the reaper and never orphan.
+                str(os.getpid()),
             ),
             pass_fds=(request_read, result_write),
             close_fds=True,

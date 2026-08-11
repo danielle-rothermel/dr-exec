@@ -331,18 +331,25 @@ class ExecutionPool:
             raise ValueError("concurrency must be positive")
         gate = _AdmissionGate(width)
         owner = _StreamOwner()
-        async for completion in self.run_stream(
-            _gated(_as_async(submissions), gate, owner),
-            _owned_by=owner.owns,
-        ):
-            gate.release()
-            yield ExecutionCompletion(
-                completed_execution=completion.completed_execution,
-                context=cast(
-                    "ContextT",
-                    cast("_OwnedContext", completion.context).context,
-                ),
-            )
+        scheduler = self._running_scheduler()
+        try:
+            async for completion in self.run_stream(
+                _gated(_as_async(submissions), gate, owner),
+                _owned_by=owner.owns,
+            ):
+                gate.release()
+                yield ExecutionCompletion(
+                    completed_execution=completion.completed_execution,
+                    context=cast(
+                        "ContextT",
+                        cast("_OwnedContext", completion.context).context,
+                    ),
+                )
+        finally:
+            # A caller that stops early leaves completions only this stream
+            # could ever claim. Releasing them keeps this stream's exit from
+            # holding resident capacity that no surviving stream can free.
+            scheduler.release_owned(owner.owns)
 
     async def drain(self) -> None:
         """Await work the scheduler still owns, then close.
