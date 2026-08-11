@@ -108,9 +108,13 @@ class _SpawnFailure(Exception):
     error_message: str
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class _Worker:
-    """One long-lived worker process and its two dedicated pipes."""
+    """One long-lived worker process and its two dedicated pipes.
+
+    Compared by identity: two workers are the same worker only when they are
+    the same process, which is what the live-worker registry tracks.
+    """
 
     process: subprocess.Popen[bytes]
     requests: IO[bytes]
@@ -159,12 +163,24 @@ class _Worker:
         self.reader.join()
         _close_quietly(self.requests)
 
-    def wait_for_ready(self) -> None:
-        """Block until the worker has imported its entry point, or died."""
+    def wait_for_ready(self, /, *, stop: _StopWatch) -> None:
+        """Block until the worker has imported its entry point, or died.
+
+        A startup import can run arbitrarily long, so a caller's declared stop
+        condition is observed here exactly as it is while a job runs: an
+        entry-point module that blocks on import never outlives the cancel
+        token or finite wall-time budget the caller declared.
+        """
 
         if self.ready:
             return
-        if self.frames.get() != READY_FRAME:
+        try:
+            frame = self.receive(stop=stop)
+        except _WorkerDied as died:
+            raise _WorkerStartupFailed(
+                "the worker failed its entry-point import at startup"
+            ) from died
+        if frame != READY_FRAME:
             raise _WorkerStartupFailed(
                 "the worker failed its entry-point import at startup"
             )
@@ -172,12 +188,16 @@ class _Worker:
 
     @property
     def death(self) -> ExecutionOutcome:
-        """Describe how the worker process ended, once it has been reaped."""
+        """Describe how the worker process ended.
 
-        code = self.process.poll()
-        if code is None:  # pragma: no cover - callers reap before asking
-            self.process.kill()
-            code = self.process.wait()
+        The result pipe reaches end of file as soon as the worker stops
+        holding it open, which happens before the process finishes exiting.
+        Waiting for the process is what makes the reported death the worker's
+        own: killing a worker that is already on its way out would report the
+        kill instead of the exit status the entry point asked for.
+        """
+
+        code = self.process.wait()
         if code < 0:
             return SignaledOutcome(signal_number=-code)
         return ExitedOutcome(exit_code=code)
@@ -216,13 +236,25 @@ class _WorkerLease:
         """Kill this worker so the pool respawns into its freed slot."""
 
         self._discarded = True
-        self.worker.terminate()
+        self._pool.discard(self.worker)
 
 
 class _WorkerSet:
-    """Fixed-width set of long-lived workers bound to one entry point."""
+    """Fixed-width set of long-lived workers bound to one entry point.
 
-    __slots__ = ("_closed", "_entry_point", "_slots", "_width")
+    Every spawned worker is registered as live until it is terminated, so
+    closing reaches workers whose slot is currently held by a running job as
+    well as workers idling in the slot queue.
+    """
+
+    __slots__ = (
+        "_closed",
+        "_entry_point",
+        "_live",
+        "_lock",
+        "_slots",
+        "_width",
+    )
 
     def __init__(
         self, *, entry_point: ImportableEntryPoint, width: int
@@ -231,6 +263,8 @@ class _WorkerSet:
         self._width = width
         self._slots: queue.SimpleQueue[_Worker | None] = queue.SimpleQueue()
         self._closed = threading.Event()
+        self._lock = threading.Lock()
+        self._live: set[_Worker] = set()
         for _ in range(width):
             self._slots.put(None)
 
@@ -245,14 +279,17 @@ class _WorkerSet:
         if slot is not None:
             return _WorkerLease(self, slot)
         try:
-            return _WorkerLease(self, _spawn_worker(self._entry_point))
+            worker = _spawn_worker(self._entry_point)
         except _SpawnFailure:
             self._slots.put(None)
             raise
+        with self._lock:
+            self._live.add(worker)
+        return _WorkerLease(self, worker)
 
     def release(self, worker: _Worker, /) -> None:
         if self._closed.is_set():
-            worker.terminate()
+            self._retire(worker)
             self._slots.put(None)
             return
         self._slots.put(worker)
@@ -260,20 +297,35 @@ class _WorkerSet:
     def release_empty(self) -> None:
         self._slots.put(None)
 
+    def discard(self, worker: _Worker, /) -> None:
+        """Kill one worker and forget it, freeing its slot for a respawn."""
+
+        self._retire(worker)
+
     def close(self) -> None:
-        """Terminate every worker, waiting for slots still held by jobs."""
+        """Terminate every live worker without waiting for any job to end.
+
+        Closing never blocks on a slot: a slot held by a running job may never
+        come back, because an unbudgeted job runs as long as it likes. Killing
+        the worker directly ends that job loudly through the pipe-EOF path the
+        executor already attributes, rather than hanging the caller.
+        """
 
         if self._closed.is_set():
             return
         self._closed.set()
-        reclaimed: list[None] = []
-        for _ in range(self._width):
-            slot = self._slots.get()
-            if slot is not None:
-                slot.terminate()
-            reclaimed.append(None)
-        for empty in reclaimed:
-            self._slots.put(empty)
+        with self._lock:
+            live = tuple(self._live)
+            self._live.clear()
+        for worker in live:
+            worker.terminate()
+
+    def _retire(self, worker: _Worker, /) -> None:
+        with self._lock:
+            present = worker in self._live
+            self._live.discard(worker)
+        if present:
+            worker.terminate()
 
 
 @dataclass(slots=True)
@@ -358,22 +410,22 @@ class WorkerPoolImportableJsonExecutor:
                     error_message=failure.error_message,
                 )
             )
+        stop = _StopWatch(
+            deadline_ns=None
+            if deadline_ns is None
+            else execution.started_ns + deadline_ns,
+            cancellation=cancellation,
+        )
         with lease:
             try:
-                lease.worker.wait_for_ready()
+                lease.worker.wait_for_ready(stop=stop)
+            except _StopRequested as requested:
+                lease.discard()
+                return execution.completed(outcome=requested.outcome)
             except _WorkerStartupFailed as failure:
                 lease.discard()
                 return execution.protocol_failed(str(failure))
-            return _exchange(
-                lease,
-                execution,
-                stop=_StopWatch(
-                    deadline_ns=None
-                    if deadline_ns is None
-                    else execution.started_ns + deadline_ns,
-                    cancellation=cancellation,
-                ),
-            )
+            return _exchange(lease, execution, stop=stop)
 
     def run_many(
         self,
@@ -638,7 +690,9 @@ def _spawn_worker(entry_point: ImportableEntryPoint, /) -> _Worker:
     os.close(request_read)
     os.close(result_write)
     frames: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
-    results = os.fdopen(result_read, "rb", buffering=0)
+    # Buffered so a frame is read in blocks rather than a byte at a time; the
+    # reader still consumes exactly one frame at a time and never bounds it.
+    results = os.fdopen(result_read, "rb")
     reader = threading.Thread(
         target=_drain_frames,
         args=(results, frames),

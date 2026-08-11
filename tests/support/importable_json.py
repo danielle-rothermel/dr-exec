@@ -25,6 +25,7 @@ from dr_exec.capabilities.protocols import Executor
 
 ENTRY_POINT_MODULE = "support.in_process_entry_points"
 IMPORT_FAIL_MODULE = "support.in_process_import_fail"
+IMPORT_BLOCKS_MODULE = "support.in_process_import_blocks"
 
 ECHO = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
@@ -60,6 +61,10 @@ SLEEP_LONG = ImportableEntryPoint(
 )
 IMPORT_FAIL = ImportableEntryPoint(
     module_name=IMPORT_FAIL_MODULE,
+    attribute_name="echo",
+)
+IMPORT_BLOCKS = ImportableEntryPoint(
+    module_name=IMPORT_BLOCKS_MODULE,
     attribute_name="echo",
 )
 BLOCK_ON_GATE = ImportableEntryPoint(

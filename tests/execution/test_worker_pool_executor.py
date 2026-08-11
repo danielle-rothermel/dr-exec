@@ -14,14 +14,22 @@ are never the evidence a case passed.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import queue
+import subprocess
+import sys
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import cast
+from time import monotonic
+from typing import IO, cast
+from unittest import mock
 from uuid import uuid4
 
 import pytest
 from dr_serialize import Jsonable
+from support import orphan_parent
 from support.importable_json import (
     BLOCK_ON_BARRIER,
     BLOCK_ON_GATE,
@@ -29,9 +37,11 @@ from support.importable_json import (
     COUNT_IMPORTS,
     ECHO,
     EXIT_ABRUPTLY,
+    IMPORT_BLOCKS,
     IMPORT_FAIL,
+    RAISE_SYSTEM_EXIT,
 )
-from support.process import Gate
+from support.process import Gate, cleanup_exact_pids, exact_pid_exists
 
 from dr_exec import (
     BudgetExceededOutcome,
@@ -47,17 +57,25 @@ from dr_exec import (
     ImportableEntryPoint,
     JobId,
     ProtocolFailedOutcome,
+    SignaledOutcome,
     WorkerPoolImportableJsonExecutor,
     WorkerPoolRecordReceipt,
     build_in_process_importable_json_job,
     parse_importable_json_result,
 )
 from dr_exec.core.kinds import BudgetAxis
+from dr_exec.execution import worker_pool, worker_pool_worker
+from dr_exec.execution.worker_pool import _spawn_worker, _StopWatch
 from dr_exec.scheduling.scheduler import usable_cpu_count
 
 pytestmark = [pytest.mark.integration, pytest.mark.subprocess]
 
 WATCHDOG_SECONDS = 60.0
+
+ORPHAN_PARENT_SCRIPT = Path(orphan_parent.__file__)
+
+# Only keeps the orphan poll from spinning; the pid probe is the evidence.
+_ORPHAN_POLL_SECONDS = 0.05
 
 
 @pytest.fixture(autouse=True)
@@ -193,6 +211,30 @@ def test_a_worker_death_mid_job_fails_that_job_with_payload_attribution(
     assert isinstance(completed.record_receipt, WorkerPoolRecordReceipt)
 
 
+def test_system_exit_from_an_entry_point_reports_the_requested_exit_code(
+    tmp_path: Path,
+) -> None:
+    """The worker's own exit status is what the job reports.
+
+    ``SystemExit`` leaves the worker through interpreter shutdown, so its
+    result pipe reaches end of file before the process finishes exiting.
+    Describing the death without reaping the process first would report a
+    kill by the pool instead of the code the entry point asked for.
+    """
+
+    with WorkerPoolImportableJsonExecutor(
+        entry_point=RAISE_SYSTEM_EXIT, worker_count=1
+    ) as executor:
+        completed = executor.run(
+            job_for_entry_point(RAISE_SYSTEM_EXIT, {"ignored": True})
+        )
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 7
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
 def test_the_pool_respawns_and_keeps_serving_after_a_worker_dies() -> None:
     """A killed worker costs its job, not the jobs behind it."""
 
@@ -247,19 +289,77 @@ def test_a_multi_megabyte_request_and_result_round_trip_without_deadlock() -> (
 
     The payload is far larger than any pipe buffer in both directions, so a
     parent that wrote the request before draining the result would wedge.
+
+    The returned payload is the evidence. The watchdog bounds a wedge only;
+    read throughput is pinned structurally by the buffered-framing test rather
+    than by how long this one takes.
     """
 
     payload = "x" * (4 * 1024 * 1024)
 
-    with WorkerPoolImportableJsonExecutor(
-        entry_point=ECHO, worker_count=1
-    ) as executor:
-        completed = executor.run(job_for_entry_point(ECHO, {"blob": payload}))
+    async def run() -> CompletedExecution:
+        with WorkerPoolImportableJsonExecutor(
+            entry_point=ECHO, worker_count=1
+        ) as executor:
+            return await asyncio.to_thread(
+                executor.run, job_for_entry_point(ECHO, {"blob": payload})
+            )
+
+    completed = asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
 
     assert parse_importable_json_result(completed) == {
         "value": {"blob": payload}
     }
     assert completed.result.measurements.input_bytes > 4 * 1024 * 1024
+
+
+def test_frames_are_read_over_a_buffered_reader() -> None:
+    """Framing reads must not degrade into one syscall per byte.
+
+    A newline-delimited read on an unbuffered stream reads a byte at a time,
+    which costs about a second per megabyte — unusable for a mode that exists
+    for throughput. This pins the mechanism rather than a duration: an
+    elapsed-time threshold would make speed the property under test, and a
+    byte-at-a-time reader still eventually returns the right bytes.
+    """
+
+    drained: list[IO[bytes]] = []
+    real_drain = worker_pool._drain_frames
+
+    def recording_drain(
+        stream: IO[bytes], frames: queue.SimpleQueue[bytes | None], /
+    ) -> None:
+        drained.append(stream)
+        real_drain(stream, frames)
+
+    with mock.patch.object(worker_pool, "_drain_frames", recording_drain):
+        worker = _spawn_worker(ECHO)
+        try:
+            worker.wait_for_ready(stop=_StopWatch(None, None))
+        finally:
+            worker.terminate()
+
+    assert [type(stream) for stream in drained] == [io.BufferedReader]
+
+
+def test_the_worker_reads_requests_over_a_buffered_reader() -> None:
+    """The worker's half of the framing must be buffered for the same reason.
+
+    Both directions carry whole frames, so an unbuffered reader on the worker
+    side reintroduces the byte-at-a-time cost for requests. The worker opens
+    its pipes in another interpreter before any job arrives, so the reader it
+    builds is checked by running that same call here.
+    """
+
+    request_read, request_write = os.pipe()
+    try:
+        requests = worker_pool_worker.open_request_reader(request_read)
+        try:
+            assert isinstance(requests, io.BufferedReader)
+        finally:
+            requests.close()
+    finally:
+        os.close(request_write)
 
 
 def test_a_finite_wall_time_budget_kills_a_worker_that_ignores_cancellation(
@@ -568,3 +668,154 @@ def test_execution_ids_are_unique_per_job(tmp_path: Path) -> None:
         completed.record_receipt.execution_id == completed.result.execution_id
         for completed in completions
     )
+
+
+def test_a_wall_time_budget_stops_a_job_waiting_on_a_blocking_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Startup is inside the budget, not a window the budget cannot reach.
+
+    The worker's entry-point import blocks on a gate the test never opens, so
+    the job is waiting for the worker to become ready. Only the declared
+    wall-time budget can end it; the terminal outcome is the evidence.
+    """
+
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    gate = Gate.create(directory, "import-gate")
+    monkeypatch.setenv("DR_EXEC_TEST_IMPORT_GATE", str(gate.path))
+    job = job_for_entry_point(
+        IMPORT_BLOCKS,
+        {"ignored": True},
+        budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=250_000_000)),
+    )
+
+    with WorkerPoolImportableJsonExecutor(
+        entry_point=IMPORT_BLOCKS, worker_count=1
+    ) as executor:
+        completed = executor.run(job)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, BudgetExceededOutcome)
+    assert outcome.axis is BudgetAxis.WALL_TIME
+
+
+def test_a_caller_cancel_stops_a_job_waiting_on_a_blocking_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel token reaches a job still waiting for its worker to start."""
+
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    gate = Gate.create(directory, "import-gate")
+    monkeypatch.setenv("DR_EXEC_TEST_IMPORT_GATE", str(gate.path))
+    token = CancelToken()
+    job = job_for_entry_point(IMPORT_BLOCKS, {"ignored": True})
+
+    async def run() -> CompletedExecution:
+        with WorkerPoolImportableJsonExecutor(
+            entry_point=IMPORT_BLOCKS, worker_count=1
+        ) as executor:
+            call = asyncio.create_task(
+                asyncio.to_thread(executor.run, job, cancellation=token)
+            )
+            # The token is the only thing that can end this job: the worker
+            # never becomes ready, so no result frame will ever arrive.
+            token.cancel()
+            return await call
+
+    completed = asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
+
+    assert isinstance(completed.result.outcome, CancelledOutcome)
+
+
+def test_close_ends_an_unbudgeted_job_in_flight_rather_than_waiting(
+    tmp_path: Path,
+) -> None:
+    """Closing must not wait on a slot a running job may never return.
+
+    The job declares no budget, so nothing bounds it but the caller's gate,
+    which is never opened. Closing terminates the worker; the job completes
+    loudly through worker death instead of hanging its caller.
+    """
+
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    ready = tmp_path / "ready"
+    gate = Gate.create(directory, "gate")
+    job = job_for_entry_point(
+        BLOCK_ON_GATE,
+        {"ready_path": str(ready), "gate_path": str(gate.path)},
+    )
+
+    async def run() -> CompletedExecution:
+        executor = WorkerPoolImportableJsonExecutor(
+            entry_point=BLOCK_ON_GATE, worker_count=2
+        )
+        call = asyncio.create_task(asyncio.to_thread(executor.run, job))
+        await asyncio.to_thread(_await_marker, ready)
+        await asyncio.to_thread(executor.close)
+        return await call
+
+    completed = asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
+
+    assert isinstance(completed.result.outcome, SignaledOutcome)
+    assert completed.result.attribution.detail is not None
+    assert "worker" in completed.result.attribution.detail
+
+
+@pytest.mark.parametrize("mode", [orphan_parent.IDLE, orphan_parent.BUSY])
+def test_a_worker_does_not_outlive_a_parent_that_died_abnormally(
+    mode: str,
+) -> None:
+    """A worker whose pool died must not keep running with no one to answer.
+
+    The parent is killed with SIGKILL, so nothing it owns gets to clean up:
+    whatever ends the worker has to come from the worker itself. An idle
+    worker ends at the request pipe's end of file; a worker inside a job that
+    never returns is not reading that pipe, so its parent-liveness watchdog is
+    the only thing that can. The terminal state -- the worker pid gone -- is
+    the assertion, and elapsed time appears only as the watchdog bound on a
+    hang.
+    """
+
+    parent = subprocess.Popen(
+        (sys.executable, str(ORPHAN_PARENT_SCRIPT), mode),
+        stdout=subprocess.PIPE,
+        env=_tests_on_path(),
+    )
+    with cleanup_exact_pids() as registered:
+        registered.append(parent.pid)
+        assert parent.stdout is not None
+        # The parent prints only after the worker is ready and, for the busy
+        # case, after its endless job has been dispatched.
+        worker_pid = int(parent.stdout.readline())
+        registered.append(worker_pid)
+        assert exact_pid_exists(worker_pid)
+
+        parent.kill()
+        parent.wait()
+
+        _await_pid_gone(worker_pid)
+
+    assert not exact_pid_exists(worker_pid)
+
+
+def _await_pid_gone(pid: int, /) -> None:
+    """Block until the process is gone, failing if it never is."""
+
+    deadline = monotonic() + WATCHDOG_SECONDS
+    poll_gate = threading.Event()
+    while exact_pid_exists(pid):
+        if monotonic() >= deadline:
+            pytest.fail(f"worker {pid} outlived its parent")
+        # The state probe is the evidence; this only avoids a busy loop.
+        poll_gate.wait(_ORPHAN_POLL_SECONDS)
+
+
+def _tests_on_path() -> dict[str, str]:
+    """Let the disposable parent import the shared test support modules."""
+
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(Path(__file__).parent.parent)
+    return environment

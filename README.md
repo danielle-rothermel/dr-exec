@@ -396,6 +396,12 @@ slot spawns its worker — and then live until the executor closes. Worker count
 defaults to the usable CPU count and is overridable with `worker_count`; it is
 a parallelism width, not a resource cap.
 
+Closing stops every live worker rather than waiting for running jobs to end.
+Because an unbudgeted job runs as long as it likes, waiting for its slot could
+block forever, so a job still in flight when the pool closes completes loudly
+as worker death instead of hanging the caller. Close when the work is done, or
+declare a budget or cancel token for jobs you may need to stop.
+
 The entry point appears twice on purpose. The job carries it because it is part
 of the target — what runs. The executor takes it because each worker imports it
 once at startup, before any job arrives, which is the cost this mode exists to
@@ -407,7 +413,9 @@ with, and a caller with several functions opens a pool per function.
 finish**, in completion order, pulling from its source only as slots free.
 Callers do not hand-roll admission windows: a window of submissions followed by
 a full drain barrier makes every worker wait on the window's slowest job, and
-this helper exists so that pattern is never necessary.
+this helper exists so that pattern is never necessary. A `map_stream` yields
+only **its own** submissions' completions, so several streams can share one
+pool without consuming each other's work.
 
 Worker-pool jobs produce ordinary `CompletedExecution` values with a
 worker-pool record receipt. A worker that dies mid-job fails **that job**
@@ -416,6 +424,13 @@ failure, and the pool respawns a replacement worker; no job silently hangs or
 disappears. Budgets remain unbudgeted by default; when a caller declares a
 finite wall-time budget, the pool enforces it by terminating the worker, which
 makes the budget real rather than advisory.
+
+Workers do not outlive the pool that owns them, even if the owning process dies
+abnormally and never gets to close anything. An idle worker ends when its
+request pipe reaches end of file; a worker in the middle of a job is not
+reading that pipe, so it instead notices that it has been reparented and exits.
+This is best-effort cleanup for an abnormal death, not supervision: it puts no
+ceiling on how long a job may run or how large a payload may be.
 
 The full implementation contract is in
 [`docs/worker_pool_design.md`](docs/worker_pool_design.md).

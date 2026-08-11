@@ -334,11 +334,19 @@ executor-owned failure, including a worker's startup import failure, is \
 `ProtocolFailedOutcome` attributed to the executor, and an operating-system \
 spawn failure is `SpawnFailedOutcome`. The pool then respawns into the freed \
 slot and continues. No job is retried, failed over, quarantined, silently \
-dropped, or left waiting on a dead pipe."""
+dropped, or left waiting on a dead pipe. Closing a pool terminates its live \
+workers rather than waiting for a slot a running job may never return, so a \
+job in flight at close completes through that same worker-death path instead \
+of blocking the caller. A worker does not outlive the parent that owns it: an \
+idle worker ends at request-pipe EOF, and a worker inside a job ends when it \
+observes that it has been reparented. That cleanup bounds only an orphan's \
+survival, never a job's runtime or a payload's size."""
 rationale = """
 Loud, attributed failure is the only honest report when a process disappears \
 mid-job, and retrying work whose side effects are unknown would be worse than \
-failing it."""
+failing it. A parent killed abnormally never gets to clean up, so a worker \
+that cannot reach anyone with its answer has to end itself rather than hold a \
+core indefinitely."""
 date = "2026-08-11"
 
 [[contracts]]
@@ -351,8 +359,11 @@ finite wall-time budget arms a deadline, enforced by terminating the worker and 
 completing the job as `BudgetExceededOutcome`; caller cancellation takes the \
 same path and completes as `CancelledOutcome`. A finite input-bytes budget is \
 checked before dispatch and a finite payload_output budget is rejected, as for \
-in-process jobs. `map_stream` concurrency is a parallelism width whose default \
-saturates the workers rather than throttling them."""
+in-process jobs. A declared stop condition covers the whole job, including the \
+wait for a worker's entry-point import, so a blocking import cannot outlive it. \
+`map_stream` concurrency is a parallelism width whose default saturates the \
+workers rather than throttling them, and a map stream delivers only its own \
+submissions' completions so streams sharing a pool never starve each other."""
 rationale = """
 Terminating a worker is what makes a declared wall-time budget real rather than \
 advisory, and confining every limit to explicit declaration keeps the mode's \

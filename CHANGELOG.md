@@ -18,7 +18,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   test pinning every receipt-kind literal.
 - Added `ExecutionPool.map_stream`, a bounded streaming map that keeps the pool
   saturated, pulls its source only as slots free, and yields completions in
-  completion order so one slow job delays only itself.
+  completion order so one slow job delays only itself. A map stream delivers
+  only its own submissions' completions, so several streams may share one pool
+  without consuming each other's work.
 
 ### Changed
 
@@ -28,6 +30,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   containment claim.
 - Consolidated importable JSON semantic conformance into one suite parameterized
   over the in-process and worker-pool executors.
+- A declared wall-time budget or cancel token now also covers the wait for a
+  worker's entry-point import, so a job whose entry-point module blocks on
+  import completes as `BudgetExceededOutcome` or `CancelledOutcome` instead of
+  waiting forever.
+- Closing a worker pool terminates its live workers rather than waiting for a
+  slot to come free, so an unbudgeted job in flight ends loudly through worker
+  death instead of blocking `close()` indefinitely.
+- Worker-pool frames are read over buffered readers instead of unbuffered
+  streams, so a newline-delimited read is no longer a byte-at-a-time syscall
+  loop. A multi-megabyte round-trip that took roughly a second per megabyte now
+  takes milliseconds; no size limit was added and payloads of any size still
+  round-trip.
+- A worker that dies mid-job is reaped before its death is described, so
+  `SystemExit` from an entry point reports the requested exit code instead of
+  racing interpreter shutdown and reporting a kill by the pool.
+- Workers no longer outlive a parent that died abnormally. An idle worker
+  already exited at request-pipe end of file; a worker inside a job now also
+  exits once it observes that it has been reparented, instead of running on at
+  full CPU with nobody left to receive its answer. This bounds only an orphan's
+  survival — no job runtime, payload size, or other limit was added.
 
 ## [0.1.8] - 2026-08-10
 

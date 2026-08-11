@@ -87,6 +87,30 @@ The executor owns a fixed set of worker processes.
   `ImportableJsonExecutorDispatchError` branch.
 - Workers live until the pool closes. There is no recycling, no
   jobs-per-worker ceiling, and no idle timeout.
+- Closing terminates every live worker rather than waiting for one to come
+  free. Because an unbudgeted job runs as long as it likes, a slot held by a
+  running job may never return, so waiting for it would make `close()`
+  unbounded. A job whose worker is terminated by close completes loudly
+  through the same pipe-EOF path as any other worker death. This is not a
+  timeout, grace period, or join deadline: closing simply never blocks on a
+  slot that may never come back.
+- A worker does not outlive the pool that owns it, even when the parent dies
+  abnormally and no `close()` ever runs. Two mechanisms cover the two states a
+  worker can be in. An **idle** worker is blocked reading its request pipe, so
+  losing the parent closes that pipe's last writer and the read reaches end of
+  file; the worker returns from its serve loop and exits. A worker **inside a
+  job** is not reading that pipe, so end of file cannot reach it — it would
+  otherwise run to completion, possibly forever and at full CPU, with nobody
+  left to receive its answer. For that case a daemon thread started before the
+  entry-point import polls `os.getppid()` every
+  `PARENT_LIVENESS_POLL_SECONDS`; a changed parent pid means the kernel
+  reparented this orphan, and the worker leaves through `os._exit` rather than
+  unwinding, because its pipes lead nowhere and the entry point may hold locks
+  or be uninterruptible. The poll interval is a liveness heartbeat, not a
+  limit: it bounds only how long an orphan survives its parent, never how long
+  a job may run, how large a payload may be, or anything a live parent asked
+  for. This is best-effort cleanup — a `SIGKILL`ed parent gets no chance to
+  clean up after itself, so the worker has to end itself.
 
 ## Dispatch and wire format
 
@@ -113,7 +137,12 @@ serialization system.
 - The worker answers on a dedicated pipe rather than on stdout, so anything the
   entry point prints cannot corrupt the channel.
 - Framing is one canonical JSON envelope terminated by `FRAME_TERMINATOR`
-  (`b"\n"`), read by newline-delimited reads. The pool reuses the
+  (`b"\n"`), read by newline-delimited reads over **buffered** readers on both
+  sides. Buffering is a correctness concern for a mode whose purpose is
+  throughput: a newline-delimited read on an unbuffered stream is a
+  byte-at-a-time syscall loop, which costs roughly a second per megabyte and
+  makes large results unusable. Buffering the reads is not a cap — a frame is
+  still read whole, of whatever size it happens to be. The pool reuses the
   `FRAME_TERMINATOR` constant and the canonical-bytes helpers
   (`request_transport_bytes` / `canonical_json_bytes`), but not the
   prelude/output/complete `ProtocolFrame` grammar of
@@ -189,7 +218,11 @@ completion distinguishes two owners:
   worker death during the job. `SystemExit` is worker death here rather than
   the in-process executor's `ExitedOutcome` translation, and lands on the same
   outcome by a different route: the worker exits with the requested code and
-  the parent reports that code.
+  the parent reports that code. The parent reaps the process before describing
+  its death, because the result pipe reaches end of file as soon as the worker
+  stops holding it open — before the process has finished exiting. Reporting
+  from an unreaped process would make the outcome a race, attributing a kill
+  by the pool to a worker that was already exiting on its own terms.
 - **Pool-caused death** — the worker could not be spawned, or died between
   jobs, or the pool's own machinery failed. An OS-level spawn failure is
   `SpawnFailedOutcome`, which `attribute_outcome` attributes to
@@ -243,6 +276,12 @@ Caller cancellation through `CancelToken` behaves the same as the wall-time
 path when a job is already running: kill the worker, complete the job as
 `CancelledOutcome`, respawn.
 
+A declared stop condition covers the whole job, including the wait for its
+worker to finish importing the entry point. An entry-point module that blocks
+on import is otherwise indistinguishable from one that is merely slow, so a
+job whose worker never becomes ready still completes as
+`BudgetExceededOutcome` or `CancelledOutcome` rather than waiting forever.
+
 A job that declares neither a cancel token nor a finite wall-time budget waits
 on its worker's answer with no timeout and no periodic wakeup at all: the
 parent blocks on the result queue until a frame arrives or the worker's pipe
@@ -280,6 +319,13 @@ Contract:
 - it yields completions **in completion order**, never window order, so one
   slow job delays only itself;
 - every submission yields exactly one completion, including failures;
+- a map stream yields **only its own** submissions' completions. Several map
+  streams may share one pool, and a plain `run_stream` sharing the pool never
+  claims a map stream's work. Each map stream tags its submissions and takes
+  only what it recognizes, leaving the rest buffered for the stream that owns
+  them. Without that identity, a stream's in-flight width tracks whatever the
+  shared queue happened to hand it rather than its own work, and streams
+  starve each other;
 - backpressure is intrinsic: a caller that stops consuming stops intake.
 
 `concurrency` is a parallelism width the caller may raise or lower, not a
@@ -405,7 +451,24 @@ New worker-pool-specific tests:
   fast ones, synchronized through explicit events rather than sleeps, and
   yields exactly one completion per submission including failures;
 - `map_stream` pulls lazily from its source: an instrumented source is not
-  advanced beyond the in-flight width.
+  advanced beyond the in-flight width;
+- two `map_stream`s sharing one pool each yield exactly their own
+  submissions, and a plain `run_stream` sharing a pool never consumes a
+  `map_stream`'s completions;
+- a declared wall-time budget and a caller cancel each end a job that is still
+  waiting for a worker whose entry-point import blocks, so startup is inside
+  the declared stop condition rather than a window it cannot reach;
+- `close()` with an unbudgeted job in flight terminates the worker and
+  completes that job loudly instead of blocking the caller;
+- `SystemExit` from an entry point reports the exit code the entry point
+  asked for, pinning that the parent reaps the worker before describing its
+  death rather than racing interpreter shutdown;
+- a worker does not outlive a parent killed with `SIGKILL`, covered for both
+  states a worker can be in: idle at the request pipe, and inside a job that
+  never returns on its own. A disposable parent process is killed hard so
+  nothing it owns can clean up, and the case polls for the terminal state —
+  the worker pid gone — with elapsed time appearing only as the watchdog bound
+  on a hang.
 
 Tests synchronize on state, not on the passage of time. Events, barriers, and
 exact terminal outcomes control interleavings; timeouts appear only as

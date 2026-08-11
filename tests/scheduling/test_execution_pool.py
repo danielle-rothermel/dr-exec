@@ -4,6 +4,7 @@ import asyncio
 import threading
 from collections.abc import (
     AsyncIterator,
+    Callable,
     Generator,
     Iterable,
     Iterator,
@@ -365,8 +366,13 @@ def test_cancelling_a_waiting_stream_does_not_take_its_completion(
             blocking_waiter_returned.set()
             return completion
 
-        def take_completion_nowait(self) -> _Completion[object] | None:
-            completion = super().take_completion_nowait()
+        def take_completion_nowait(
+            self,
+            /,
+            *,
+            owned_by: Callable[[object], bool] | None = None,
+        ) -> _Completion[object] | None:
+            completion = super().take_completion_nowait(owned_by=owned_by)
             if completion is None and self.has_residents():
                 waiter_entered.set()
             return completion
@@ -1561,9 +1567,11 @@ def test_map_stream_delivers_in_completion_order() -> None:
     executor, responder = gated_executor()
     batch = jobs(3)
     pool = fixed_pool(executor, 3)
+    opened = threading.Event()
 
     async def stream() -> list[int]:
         async with pool:
+            opened.set()
             return [
                 completion.context
                 async for completion in pool.map_stream(submissions_of(batch))
@@ -1573,9 +1581,104 @@ def test_map_stream_delivers_in_completion_order() -> None:
     streamer = in_thread(lambda: collected.append(asyncio.run(stream())))
 
     responder.await_arrival_count(3)
+    wait_for(opened, what="the pool to open")
+    scheduler = pool._scheduler
+    assert scheduler is not None
     for index in (2, 0, 1):
         responder.release(batch[index].job_id)
-        responder.await_executor_returned(batch[index].job_id)
+        # The order under test is publication order, so each job must reach
+        # the ready queue before the next is released. Waiting only for the
+        # executor to return leaves the append itself racing.
+        _await_scheduler_publication(scheduler, batch[index].job_id)
     join(streamer)
 
     assert collected == [[2, 0, 1]]
+
+
+def test_two_map_streams_on_one_pool_each_yield_only_their_own() -> None:
+    """A shared pool must not let one map stream consume another's work.
+
+    Both streams are driven to completion; each submission is owed exactly one
+    delivery to the stream that made it. Before completions were routed by
+    submitting stream, permits and completions migrated between streams and
+    one of them could never finish.
+    """
+
+    executor, responder = gated_executor()
+    first = jobs(3)
+    second = jobs(3)
+    pool = fixed_pool(executor, 6)
+
+    async def stream() -> tuple[list[str], list[str]]:
+        async def submissions(
+            batch: list[ExecutionJob], tag: str, /
+        ) -> AsyncIterator[ExecutionSubmission[str]]:
+            for index, job in enumerate(batch):
+                yield ExecutionSubmission(job=job, context=f"{tag}-{index}")
+
+        async def drain(
+            source: AsyncIterator[ExecutionCompletion[str]], /
+        ) -> list[str]:
+            return [completion.context async for completion in source]
+
+        async with pool:
+            return await asyncio.gather(
+                drain(pool.map_stream(submissions(first, "first"))),
+                drain(pool.map_stream(submissions(second, "second"))),
+            )
+
+    collected: list[tuple[list[str], list[str]]] = []
+    streamer = in_thread(lambda: collected.append(asyncio.run(stream())))
+
+    responder.await_arrival_count(len(first) + len(second))
+    for job in (*first, *second):
+        responder.release(job.job_id)
+    join(streamer)
+
+    first_contexts, second_contexts = collected[0]
+    assert sorted(first_contexts) == [f"first-{index}" for index in range(3)]
+    assert sorted(second_contexts) == [f"second-{index}" for index in range(3)]
+
+
+def test_a_plain_stream_never_consumes_a_map_streams_completions() -> None:
+    """A map stream's submissions are owed to it, not to a sharing stream."""
+
+    executor, responder = gated_executor()
+    mapped = jobs(3)
+    plain = jobs(3)
+    pool = fixed_pool(executor, 6)
+
+    async def stream() -> tuple[list[str], list[int]]:
+        async def mapped_submissions() -> AsyncIterator[
+            ExecutionSubmission[str]
+        ]:
+            for index, job in enumerate(mapped):
+                yield ExecutionSubmission(job=job, context=f"mapped-{index}")
+
+        async def drain_mapped(
+            source: AsyncIterator[ExecutionCompletion[str]], /
+        ) -> list[str]:
+            return [completion.context async for completion in source]
+
+        async def drain_plain(
+            source: AsyncIterator[ExecutionCompletion[int]], /
+        ) -> list[int]:
+            return [completion.context async for completion in source]
+
+        async with pool:
+            return await asyncio.gather(
+                drain_mapped(pool.map_stream(mapped_submissions())),
+                drain_plain(pool.run_stream(submissions_of(plain))),
+            )
+
+    collected: list[tuple[list[str], list[int]]] = []
+    streamer = in_thread(lambda: collected.append(asyncio.run(stream())))
+
+    responder.await_arrival_count(len(mapped) + len(plain))
+    for job in (*mapped, *plain):
+        responder.release(job.job_id)
+    join(streamer)
+
+    mapped_contexts, plain_contexts = collected[0]
+    assert sorted(mapped_contexts) == [f"mapped-{i}" for i in range(3)]
+    assert sorted(plain_contexts) == [0, 1, 2]

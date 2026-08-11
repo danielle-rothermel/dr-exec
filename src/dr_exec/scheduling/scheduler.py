@@ -139,14 +139,24 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         with self._condition:
             return self._broken is not None
 
-    def take_completion_nowait(self) -> _Completion[ContextT] | None:
-        """Atomically hand one buffered completion to the calling driver."""
+    def take_completion_nowait(
+        self, /, *, owned_by: Callable[[ContextT], bool] | None = None
+    ) -> _Completion[ContextT] | None:
+        """Atomically hand one buffered completion to the calling driver.
+
+        With ``owned_by``, the driver takes only the oldest completion whose
+        context it recognizes as its own and leaves the rest buffered for the
+        driver that owns them, so drivers sharing one scheduler never consume
+        each other's completions.
+        """
 
         with self._condition:
             if not self._ready:
                 self._raise_if_broken()
                 return None
-            return self._take_ready()
+            if owned_by is None:
+                return self._take_ready()
+            return self._take_ready_owned(owned_by)
 
     def take_completion(self) -> _Completion[ContextT] | None:
         with self._condition:
@@ -271,6 +281,21 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         self._residents -= 1
         self._announce_change()
         return completion
+
+    def _take_ready_owned(
+        self, owned_by: Callable[[ContextT], bool], /
+    ) -> _Completion[ContextT] | None:
+        """Take the oldest completion this driver owns, preserving the rest."""
+
+        for position, completion in enumerate(self._ready):
+            if not owned_by(completion.context):
+                continue
+            del self._ready[position]
+            self._tokens.pop(completion.ticket, None)
+            self._residents -= 1
+            self._announce_change()
+            return completion
+        return None
 
     def _discard_completions(self) -> None:
         self._ready.clear()

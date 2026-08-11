@@ -11,6 +11,8 @@ import importlib
 import json
 import os
 import sys
+import threading
+import time
 from collections.abc import Callable
 from typing import IO, Final, cast
 
@@ -45,6 +47,13 @@ READY_FRAME: Final = b"ready" + FRAME_TERMINATOR
 
 _STARTUP_IMPORT_FAILED_EXIT_CODE: Final = 3
 
+# How often the worker checks that its parent is still alive. This is a
+# liveness heartbeat, not a limit: it bounds how long an orphan survives its
+# parent, and never how long a job may run or how large a payload may be.
+PARENT_LIVENESS_POLL_SECONDS: Final = 2.0
+
+ORPHANED_WORKER_EXIT_CODE: Final = 4
+
 
 def main() -> None:
     """Serve requests until the parent closes the request pipe."""
@@ -54,7 +63,13 @@ def main() -> None:
     request_fd = int(sys.argv[3])
     result_fd = int(sys.argv[4])
 
-    requests = os.fdopen(request_fd, "rb", buffering=0)
+    # Started before the entry-point import, because an import that blocks
+    # forever would otherwise outlive the parent just as a job would.
+    watch_parent()
+
+    requests = open_request_reader(request_fd)
+    # The result pipe stays unbuffered because every frame is written and
+    # flushed whole, and the parent must see it immediately.
     results = os.fdopen(result_fd, "wb", buffering=0)
     try:
         entry_point = _resolve_entry_point(module_name, attribute_name)
@@ -63,6 +78,46 @@ def main() -> None:
         sys.exit(_STARTUP_IMPORT_FAILED_EXIT_CODE)
     _write_frame(results, READY_FRAME)
     _serve(entry_point, requests=requests, results=results)
+
+
+def watch_parent() -> threading.Thread:
+    """Exit this worker once its parent process is gone.
+
+    An idle worker already ends itself when the request pipe reaches end of
+    file, but a worker in the middle of a job is not reading that pipe and
+    would otherwise run to completion — possibly forever, at full CPU — with
+    nobody left to receive its answer. The kernel reparents an orphan, so a
+    changed parent pid is the signal that the pool that owns this worker died.
+
+    This is best-effort cleanup, not supervision: it imposes no ceiling on a
+    job's runtime, its payload size, or anything else a live parent asked for.
+    """
+
+    parent_pid = os.getppid()
+
+    def poll() -> None:
+        while os.getppid() == parent_pid:
+            time.sleep(PARENT_LIVENESS_POLL_SECONDS)
+        # The pipes lead nowhere and the entry point may hold locks or be
+        # uninterruptible, so leave immediately rather than unwinding.
+        os._exit(ORPHANED_WORKER_EXIT_CODE)
+
+    watchdog = threading.Thread(
+        target=poll, name="dr-exec-worker-parent-watchdog", daemon=True
+    )
+    watchdog.start()
+    return watchdog
+
+
+def open_request_reader(request_fd: int, /) -> IO[bytes]:
+    """Open the request pipe buffered, so frames are read in blocks.
+
+    A newline-delimited read on an unbuffered stream reads one byte per
+    syscall, which costs roughly a second per megabyte. Buffering bounds
+    nothing: a frame is still read whole, at whatever size it arrives.
+    """
+
+    return os.fdopen(request_fd, "rb")
 
 
 def _resolve_entry_point(
