@@ -51,6 +51,7 @@ from dr_exec.declarations.models import (
 )
 from dr_exec.execution.executor import ProcessExecutor
 from dr_exec.execution.importable_json_executor import ImportableJsonExecutor
+from dr_exec.execution.worker_pool import WorkerPoolImportableJsonExecutor
 from dr_exec.importable_json import (
     ImportableEntryPoint,
     ImportableJsonResultError,
@@ -108,6 +109,7 @@ from dr_exec.recording.models import (
     TrustedPythonTargetRecord,
     UntrustedCommandTargetRecord,
     UntrustedPythonTargetRecord,
+    WorkerPoolRecordReceipt,
 )
 from dr_exec.recording.store import (
     DirectoryRunStore,
@@ -248,6 +250,8 @@ __all__ = [
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTarget",
     "UntrustedPythonTargetRecord",
+    "WorkerPoolImportableJsonExecutor",
+    "WorkerPoolRecordReceipt",
     "build_in_process_importable_json_job",
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",

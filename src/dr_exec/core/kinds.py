@@ -95,6 +95,7 @@ class RecordReceiptKind(StrEnum):
     DEGRADED = "degraded"
     NOT_APPLICABLE = "not_applicable"
     IN_PROCESS = "in_process"
+    WORKER_POOL = "worker_pool"
 
 
 @verify(UNIQUE)
