@@ -194,6 +194,35 @@ payload-output, protocol frame, protocol total-byte, JSON-depth, and one-output
 limits from representative measurements. Bulk data remains caller-owned by
 reference or artifact rather than traveling through the compact JSON value.
 
+### In-process importable JSON
+
+When the caller already trusts the entry point and only needs throughput,
+`ImportableJsonExecutor` runs the same importable JSON contract synchronously
+in the caller interpreter. It provides throughput, not isolation: there is no
+subprocess, no durable run record, and no environment grant. Use it with
+`ExecutionPool` the same way as `ProcessExecutor`.
+
+```python
+job = build_in_process_importable_json_job(
+    job_id,
+    entry_point,
+    request,
+    budgets=budgets,
+)
+executor = ImportableJsonExecutor()
+
+async with executor.open_pool() as pool:
+    async for item in pool.run_stream(submissions()):
+        result = parse_importable_json_result(item.completed_execution)
+```
+
+`ImportableJsonExecutor.run()` never raises for entry-point failures; it
+returns typed outcomes instead so pools stay healthy. That includes
+`KeyboardInterrupt`: Ctrl+C during an in-process job is mapped to
+`ExitedOutcome(1)` rather than propagating through `run()`, so CLI callers
+should cancel through `CancelToken` when they need explicit cancellation
+semantics.
+
 Run the representative resource and throughput investigation with:
 
 ```console

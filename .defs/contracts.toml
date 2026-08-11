@@ -291,7 +291,9 @@ statement = """
 For in-process importable JSON jobs, finite wall time arms a one-shot cancel \
 signal when the budget expires. The worker thread cannot hard-stop arbitrary \
 Python user code; cancellation is observed before dispatch and after the entry \
-point returns."""
+point returns. `ImportableJsonExecutor.run()` also maps `KeyboardInterrupt` to \
+`ExitedOutcome(1)` so pools stay healthy; Ctrl+C does not propagate through \
+`run()`."""
 rationale = """
 Honest cancellation semantics avoid presenting in-process execution as \
 forcibly bounded when only cooperative observation is available."""
