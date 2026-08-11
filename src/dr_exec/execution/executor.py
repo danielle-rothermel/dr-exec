@@ -11,7 +11,7 @@ from dr_exec.recording.models import CompletedExecution
 from dr_exec.scheduling.pool import (
     ExecutionPool,
     ExecutionPoolConfig,
-    _resolve_capacity,
+    resolve_pool_capacity,
 )
 from dr_exec.scheduling.scheduler import _AdmissionResult, _ExecutionScheduler
 
@@ -56,7 +56,7 @@ class ProcessExecutor:
         return _run_batch(
             self,
             jobs,
-            capacity=_resolve_capacity(
+            capacity=resolve_pool_capacity(
                 (config or ExecutionPoolConfig()).capacity
             ).max_active_jobs,
         )

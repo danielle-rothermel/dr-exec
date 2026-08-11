@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -71,7 +71,14 @@ class ExecutionCompletion(Generic[ContextT]):  # noqa: UP046
     context: ContextT
 
 
-def _resolve_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity:
+def resolve_pool_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity:
+    """Resolve a declared capacity to the width a pool would actually use.
+
+    Callers that must size something alongside a pool — a worker count, a
+    second pool — resolve the caller's declared capacity here rather than
+    reimplementing what ``AutoPoolCapacity`` means.
+    """
+
     cpus = usable_cpu_count()
     match capacity:
         case AutoPoolCapacity():
@@ -138,7 +145,7 @@ class ExecutionPool:
             raise ExecutorFailure(
                 f"an execution pool in state {self._state} cannot be opened"
             )
-        capacity = _resolve_capacity(self._config.capacity)
+        capacity = resolve_pool_capacity(self._config.capacity)
         self._effective_capacity = capacity
         self._owning_loop = asyncio.get_running_loop()
         self._scheduler = _ExecutionScheduler(
@@ -171,12 +178,16 @@ class ExecutionPool:
         self,
         submissions: AsyncIterable[ExecutionSubmission[ContextT]],
         /,
+        *,
+        _owned_by: Callable[[object], bool] | None = None,
     ) -> AsyncIterator[ExecutionCompletion[ContextT]]:
         """Yield shared-queue completions under one resident bound.
 
-        All streams on a pool consume the same completion queue, so a stream
-        may yield a completion for another stream's submission, paired with
-        that submission's context.
+        Plain streams on a pool consume the same completion queue, so such a
+        stream may yield a completion for another plain stream's submission,
+        paired with that submission's context. A ``map_stream`` is excluded
+        from that sharing in both directions: it claims only its own
+        submissions, and no other stream may claim them for it.
         A scheduler break drains only completions already buffered before it
         raises; queued admitted work may already have been dropped.
         """
@@ -192,6 +203,9 @@ class ExecutionPool:
         wakeup = asyncio.Event()
         self._stream_wakeups.add(wakeup)
         self._active_streams += 1
+        # A map stream ends on its own outstanding work; the shared resident
+        # count also counts jobs it will never be handed.
+        outstanding = 0
         try:
             while True:
                 wakeup.clear()
@@ -201,8 +215,11 @@ class ExecutionPool:
                     await _cancel_source_pull(source_pull)
                     source_pull = None
 
-                completion = scheduler.take_completion_nowait()
+                completion = scheduler.take_completion_nowait(
+                    owned_by=_owned_by if _owned_by is not None else _unowned
+                )
                 if completion is not None:
+                    outstanding -= 1
                     if (
                         not exhausted
                         and carried is None
@@ -221,7 +238,11 @@ class ExecutionPool:
                 if (
                     exhausted
                     and carried is None
-                    and not scheduler.has_residents()
+                    and (
+                        outstanding == 0
+                        if _owned_by is not None
+                        else not scheduler.has_residents()
+                    )
                 ):
                     return
 
@@ -229,6 +250,7 @@ class ExecutionPool:
                     match scheduler.admit(carried.job, carried.context):
                         case _AdmissionResult.ADMITTED:
                             carried = None
+                            outstanding += 1
                             continue
                         case _AdmissionResult.INTAKE_CLOSED:
                             carried = None
@@ -276,6 +298,65 @@ class ExecutionPool:
             self._active_streams -= 1
             if self._active_streams == 0 and self._shutdown_complete:
                 scheduler.discard_completions()
+
+    async def map_stream(
+        self,
+        submissions: AsyncIterable[ExecutionSubmission[ContextT]]
+        | Iterable[ExecutionSubmission[ContextT]],
+        /,
+        *,
+        concurrency: int | None = None,
+    ) -> AsyncIterator[ExecutionCompletion[ContextT]]:
+        """Stream completions as they finish, keeping the pool saturated.
+
+        Up to ``concurrency`` submissions are in flight at once, defaulting to
+        the pool's capacity so callers need compute nothing. The source is
+        pulled only as a slot frees, so a lazy or infinite source is never
+        drained ahead of capacity, and completions are yielded in completion
+        order rather than in submission order: one slow job delays only
+        itself. Every submission yields exactly one completion, including
+        failures.
+
+        Unlike ``run_stream``, a ``map_stream`` yields only completions for
+        its own submissions, so several map streams may share one pool: each
+        tags its submissions and claims only what it recognizes, leaving the
+        rest buffered for the stream that owns them. That identity is what
+        ties a stream's in-flight width to its own work rather than to
+        whatever the shared queue happened to deliver.
+
+        ``concurrency`` is a parallelism width a caller may raise or lower,
+        not a resource limit.
+        """
+
+        self._require_owning_loop()
+        width = (
+            self.effective_capacity.max_active_jobs
+            if concurrency is None
+            else concurrency
+        )
+        if width < 1:
+            raise ValueError("concurrency must be positive")
+        gate = _AdmissionGate(width)
+        owner = _StreamOwner()
+        scheduler = self._running_scheduler()
+        try:
+            async for completion in self.run_stream(
+                _gated(_as_async(submissions), gate, owner),
+                _owned_by=owner.owns,
+            ):
+                gate.release()
+                yield ExecutionCompletion(
+                    completed_execution=completion.completed_execution,
+                    context=cast(
+                        "ContextT",
+                        cast("_OwnedContext", completion.context).context,
+                    ),
+                )
+        finally:
+            # A caller that stops early leaves completions only this stream
+            # could ever claim. Releasing them keeps this stream's exit from
+            # holding resident capacity that no surviving stream can free.
+            scheduler.release_owned(owner.owns)
 
     async def drain(self) -> None:
         """Await work the scheduler still owns, then close.
@@ -367,6 +448,98 @@ class ExecutionPool:
         return self._scheduler
 
 
+class _AdmissionGate:
+    """Hold the source at a fixed number of submissions in flight."""
+
+    __slots__ = ("_free", "_width")
+
+    def __init__(self, width: int, /) -> None:
+        self._width = width
+        self._free = asyncio.Semaphore(width)
+
+    async def acquire(self) -> None:
+        await self._free.acquire()
+
+    def release(self) -> None:
+        self._free.release()
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedContext:
+    """A caller context tagged with the ``map_stream`` that submitted it."""
+
+    owner: _StreamOwner
+    context: object
+
+
+class _StreamOwner:
+    """Identity of one ``map_stream``, used to recognize its completions."""
+
+    __slots__ = ()
+
+    def owns(self, context: object, /) -> bool:
+        """Report whether this stream is the one that submitted ``context``."""
+
+        return isinstance(context, _OwnedContext) and context.owner is self
+
+
+async def _gated[T](
+    source: AsyncIterator[ExecutionSubmission[T]],
+    gate: _AdmissionGate,
+    owner: _StreamOwner,
+    /,
+) -> AsyncIterator[ExecutionSubmission[T]]:
+    """Pull the next submission only once a slot has actually freed.
+
+    Each submission carries this stream's identity, so its completion can be
+    routed back to the stream that made it.
+    """
+
+    while True:
+        await gate.acquire()
+        submission = await _next_submission(source)
+        if submission is None:
+            gate.release()
+            return
+        yield cast(
+            "ExecutionSubmission[T]",
+            ExecutionSubmission(
+                job=submission.job,
+                context=_OwnedContext(owner=owner, context=submission.context),
+            ),
+        )
+
+
+def _as_async[T](
+    submissions: AsyncIterable[ExecutionSubmission[T]]
+    | Iterable[ExecutionSubmission[T]],
+    /,
+) -> AsyncIterator[ExecutionSubmission[T]]:
+    if isinstance(submissions, AsyncIterable):
+        return aiter(
+            cast("AsyncIterable[ExecutionSubmission[T]]", submissions)
+        )
+    return _iterate(submissions)
+
+
+async def _iterate[T](
+    submissions: Iterable[ExecutionSubmission[T]], /
+) -> AsyncIterator[ExecutionSubmission[T]]:
+    for submission in submissions:
+        yield submission
+
+
+def _unowned(context: object, /) -> bool:
+    """Report whether no ``map_stream`` has claimed this submission.
+
+    Plain streams keep sharing each other's completions, but a ``map_stream``
+    owes its caller exactly one delivery per submission, so its work is never
+    consumed by a stream that did not submit it.
+    """
+
+    return not isinstance(context, _OwnedContext)
+
+
 def _closed_state(broke: bool, /) -> ExecutionPoolState:
     return ExecutionPoolState.BROKEN if broke else ExecutionPoolState.CLOSED
 
@@ -401,4 +574,5 @@ __all__ = [
     "ExecutionSubmission",
     "FixedPoolCapacity",
     "PoolCapacity",
+    "resolve_pool_capacity",
 ]

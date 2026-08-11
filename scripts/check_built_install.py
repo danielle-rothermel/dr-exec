@@ -13,7 +13,7 @@ from dr_serialize import Jsonable, validate_strict_json
 
 import dr_exec
 
-EXPECTED_ROOT_EXPORT_COUNT = 120
+EXPECTED_ROOT_EXPORT_COUNT = 123
 WATCHDOG_SECONDS = 30.0
 
 

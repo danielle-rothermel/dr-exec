@@ -139,14 +139,32 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         with self._condition:
             return self._broken is not None
 
-    def take_completion_nowait(self) -> _Completion[ContextT] | None:
-        """Atomically hand one buffered completion to the calling driver."""
+    def take_completion_nowait(
+        self, /, *, owned_by: Callable[[ContextT], bool] | None = None
+    ) -> _Completion[ContextT] | None:
+        """Atomically hand one buffered completion to the calling driver.
+
+        With ``owned_by``, the driver takes only the oldest completion whose
+        context it recognizes as its own and leaves the rest buffered for the
+        driver that owns them, so drivers sharing one scheduler never consume
+        each other's completions.
+
+        A break surfaces to a driver that finds nothing of its own, even while
+        another driver's completions are still buffered: those are results this
+        driver can never take, so treating the queue as non-empty would hide
+        the break behind work that will never be handed over.
+        """
 
         with self._condition:
             if not self._ready:
                 self._raise_if_broken()
                 return None
-            return self._take_ready()
+            if owned_by is None:
+                return self._take_ready()
+            completion = self._take_ready_owned(owned_by)
+            if completion is None:
+                self._raise_if_broken()
+            return completion
 
     def take_completion(self) -> _Completion[ContextT] | None:
         with self._condition:
@@ -193,6 +211,28 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
         with self._condition:
             self._discard_completions()
+            self._announce_change()
+
+    def release_owned(self, owned_by: Callable[[ContextT], bool], /) -> None:
+        """Drop completions only a departed driver could ever have taken.
+
+        An owned completion is claimable by exactly one driver, so once that
+        driver is gone its completions are unreachable while still counting
+        against the shared resident bound. Releasing them is what keeps a
+        driver that ended early from stalling the drivers that outlive it.
+        """
+
+        with self._condition:
+            kept = deque(
+                completion
+                for completion in self._ready
+                if not owned_by(completion.context)
+            )
+            for completion in self._ready:
+                if owned_by(completion.context):
+                    self._tokens.pop(completion.ticket, None)
+                    self._residents -= 1
+            self._ready = kept
             self._announce_change()
 
     def _ensure_worker(self) -> None:
@@ -271,6 +311,21 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         self._residents -= 1
         self._announce_change()
         return completion
+
+    def _take_ready_owned(
+        self, owned_by: Callable[[ContextT], bool], /
+    ) -> _Completion[ContextT] | None:
+        """Take the oldest completion this driver owns, preserving the rest."""
+
+        for position, completion in enumerate(self._ready):
+            if not owned_by(completion.context):
+                continue
+            del self._ready[position]
+            self._tokens.pop(completion.ticket, None)
+            self._residents -= 1
+            self._announce_change()
+            return completion
+        return None
 
     def _discard_completions(self) -> None:
         self._ready.clear()

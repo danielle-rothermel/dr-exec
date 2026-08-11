@@ -430,12 +430,20 @@ class InProcessRecordReceipt(ContractModel):
     execution_id: ExecutionId
 
 
+class WorkerPoolRecordReceipt(ContractModel):
+    kind: Literal[RecordReceiptKind.WORKER_POOL] = (
+        RecordReceiptKind.WORKER_POOL
+    )
+    execution_id: ExecutionId
+
+
 type RealRecordReceipt = CompleteRecordReceipt | DegradedRecordReceipt
 type RecordReceipt = Annotated[
     CompleteRecordReceipt
     | DegradedRecordReceipt
     | FakeRecordReceipt
-    | InProcessRecordReceipt,
+    | InProcessRecordReceipt
+    | WorkerPoolRecordReceipt,
     Field(discriminator="kind"),
 ]
 
@@ -501,4 +509,5 @@ __all__ = [
     "TrustedPythonTargetRecord",
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTargetRecord",
+    "WorkerPoolRecordReceipt",
 ]

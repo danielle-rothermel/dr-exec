@@ -120,10 +120,13 @@ EXPECTED_PUBLIC_API = (
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTarget",
     "UntrustedPythonTargetRecord",
+    "WorkerPoolImportableJsonExecutor",
+    "WorkerPoolRecordReceipt",
     "build_in_process_importable_json_job",
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",
     "parse_importable_json_result",
+    "resolve_pool_capacity",
 )
 
 

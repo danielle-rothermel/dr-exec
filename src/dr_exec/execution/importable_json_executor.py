@@ -47,7 +47,7 @@ from dr_exec.recording.models import (
 from dr_exec.scheduling.pool import (
     ExecutionPool,
     ExecutionPoolConfig,
-    _resolve_capacity,
+    resolve_pool_capacity,
 )
 
 _ENVELOPE_SCHEMA = "dr_exec.importable_json"
@@ -246,7 +246,7 @@ class ImportableJsonExecutor:
         return _run_batch(
             self,
             jobs,
-            capacity=_resolve_capacity(
+            capacity=resolve_pool_capacity(
                 (config or ExecutionPoolConfig()).capacity
             ).max_active_jobs,
         )
