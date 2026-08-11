@@ -5,6 +5,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-08-11
+
+### Added
+
+- Added `WorkerPoolImportableJsonExecutor`, which runs the existing in-process
+  importable JSON jobs across long-lived spawned worker processes that import
+  their entry point once, giving trusted CPU-bound fan-out real parallelism and
+  making a declared finite wall-time budget enforceable by worker termination.
+- Added `WorkerPoolRecordReceipt` and `RecordReceiptKind.WORKER_POOL` so a
+  completion's execution mode is visible in its evidence, together with a golden
+  test pinning every receipt-kind literal.
+- Added `ExecutionPool.map_stream`, a bounded streaming map that keeps the pool
+  saturated, pulls its source only as slots free, and yields completions in
+  completion order so one slow job delays only itself.
+
+### Changed
+
+- Scoped the scheduling contract's fresh-child and reuse guarantees to
+  `ProcessExecutor`, and recorded that worker-pool execution reuses long-lived
+  workers for parallelism while creating no durable record and making no
+  containment claim.
+- Consolidated importable JSON semantic conformance into one suite parameterized
+  over the in-process and worker-pool executors.
+
 ## [0.1.8] - 2026-08-10
 
 ### Added

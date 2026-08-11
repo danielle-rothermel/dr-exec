@@ -4,7 +4,8 @@ statement = """
 `ProcessExecutor` v1 production execution runs one machine-local child per job \
 on macOS through one direct-argv execution path. It invokes no shell or remote \
 executor. In-process importable JSON execution uses a separate executor and is \
-not isolated by a child process."""
+not isolated by a child process. Worker pool importable JSON execution uses a \
+separate executor whose worker processes provide parallelism, not isolation."""
 rationale = """
 One qualified platform and one lifecycle owner keep spawning, transport, \
 budget enforcement, teardown, attribution, and recording on the same path."""
@@ -174,13 +175,16 @@ title = "Scheduling bounds resident work and reuses no child"
 statement = """
 The host-local scheduler keeps admitted and completed-but-undelivered jobs \
 within one shared capacity bound, backpressures its source, and delivers \
-completions in completion order. Every production job executes in a fresh \
-child. V1 provides no warm-child reuse, dimension model, or cross-product \
-batching."""
+completions in completion order. Every `ProcessExecutor` production job \
+executes in a fresh child; `ProcessExecutor` provides no warm-child reuse. \
+Worker pool importable JSON execution deliberately reuses long-lived worker \
+processes for parallelism, creating no durable record and making no containment \
+claim. V1 provides no dimension model or cross-product batching."""
 rationale = """
 One resident bound prevents unbounded intake while keeping domain dimensions \
 and completeness outside execution infrastructure. Scheduling capacity is the \
-only resource reused across jobs."""
+only resource `ProcessExecutor` reuses across jobs; where a mode reuses more, \
+it says so and gives up the guarantees the fresh child provided."""
 date = "2026-08-05"
 
 [[contracts]]
@@ -298,3 +302,59 @@ rationale = """
 Honest cancellation semantics avoid presenting in-process execution as \
 forcibly bounded when only cooperative observation is available."""
 date = "2026-08-10"
+
+[[contracts]]
+title = "Worker pools give parallelism, not isolation or records"
+statement = """
+`WorkerPoolImportableJsonExecutor` runs trusted `InProcessImportableJsonTarget` \
+jobs across long-lived worker processes. Workers are freshly spawned \
+interpreters, never forked, and each imports its entry point exactly once, so a \
+pool is bound to one entry point for its lifetime and rejects jobs naming \
+another. Worker processes exist for parallelism on real cores: the mode creates \
+no durable run record, accepts no environment grant, and makes no containment \
+or isolation claim, though crash containment follows as a side effect. The \
+parent and worker exchange the existing importable JSON envelope as canonical \
+JSON over dedicated pipes with no pickle in either direction, and the parent \
+drains a worker's results concurrently with writing its requests so no payload \
+size can deadlock the pair."""
+rationale = """
+Trusted CPU-bound fan-out has no execution mode when spawn-per-job startup \
+dominates millisecond work and in-process threads serialize under the GIL. \
+Naming what worker processes do not provide keeps the isolation and evidence \
+guarantees where they are actually enforced."""
+date = "2026-08-11"
+
+[[contracts]]
+title = "Every worker pool job produces exactly one completion"
+statement = """
+A worker that dies while a job is in flight fails that job immediately, \
+observed through pipe EOF and child reaping rather than through elapsed time. \
+Job-caused death is the worker's signal or exit code attributed to the payload; \
+executor-owned failure, including a worker's startup import failure, is \
+`ProtocolFailedOutcome` attributed to the executor, and an operating-system \
+spawn failure is `SpawnFailedOutcome`. The pool then respawns into the freed \
+slot and continues. No job is retried, failed over, quarantined, silently \
+dropped, or left waiting on a dead pipe."""
+rationale = """
+Loud, attributed failure is the only honest report when a process disappears \
+mid-job, and retrying work whose side effects are unknown would be worse than \
+failing it."""
+date = "2026-08-11"
+
+[[contracts]]
+title = "Worker pool budgets stay unbudgeted until declared"
+statement = """
+Worker pool jobs default to `Budgets.unbudgeted()` and receive no deadline, \
+timer, watchdog, size limit, queue bound, worker recycling, jobs-per-worker \
+ceiling, idle timeout, restart budget, or heartbeat. Only a caller-declared \
+finite wall-time budget arms a deadline, enforced by terminating the worker and \
+completing the job as `BudgetExceededOutcome`; caller cancellation takes the \
+same path and completes as `CancelledOutcome`. A finite input-bytes budget is \
+checked before dispatch and a finite payload_output budget is rejected, as for \
+in-process jobs. `map_stream` concurrency is a parallelism width whose default \
+saturates the workers rather than throttling them."""
+rationale = """
+Terminating a worker is what makes a declared wall-time budget real rather than \
+advisory, and confining every limit to explicit declaration keeps the mode's \
+defaults honest about imposing none."""
+date = "2026-08-11"

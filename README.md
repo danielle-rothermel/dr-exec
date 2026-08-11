@@ -291,14 +291,11 @@ the entry point is a crash in your process.
 
 ### Mode 3: worker pool (`WorkerPoolImportableJsonExecutor`)
 
-**Status: planned, not yet available.** `WorkerPoolImportableJsonExecutor` is
-not in the package; importing it fails. This section describes the designed
-behavior so the mode can be compared against the two that exist today. Until it
-lands, pick between modes 1 and 2. The implementation contract is in
+The implementation contract is in
 [`docs/worker_pool_design.md`](docs/worker_pool_design.md).
 
-**What actually happens.** The pool starts N long-lived worker processes (via
-`spawn`, a fresh interpreter each). Each worker imports the entry-point module
+**What actually happens.** The pool starts N long-lived worker processes, each
+a freshly spawned interpreter. Each worker imports the entry-point module
 **once**, at startup, and then waits. Jobs are sent to idle workers as the same
 JSON envelope over OS pipes, and results come back the same way. Workers stay
 alive across jobs, so the expensive import is paid N times total instead of
@@ -334,13 +331,13 @@ not supported.
 
 | Your situation | Mode | Why |
 | --- | --- | --- |
-| Many trusted CPU-bound items, ms–s each | **Worker pool** *(planned)* | Real cores, import paid once per worker |
+| Many trusted CPU-bound items, ms–s each | **Worker pool** | Real cores, import paid once per worker |
 | Untrusted payload, or needs containment evidence | **Spawn-per-job** | Only mode with a containment declaration |
 | Needs a durable run record per attempt | **Spawn-per-job** | Only mode that records |
 | Few long jobs (seconds–minutes each) | **Spawn-per-job** | Startup is noise; you get records and isolation free |
 | I/O-bound entry point | **In-process** | Threads already overlap waiting; processes add cost |
 | Tiny trusted transforms, tests, fakes | **In-process** | Cheapest possible; real completion objects |
-| Needs an enforced wall-time limit | **Worker pool** *(planned)* or **spawn-per-job** | In-process cancellation is cooperative only |
+| Needs an enforced wall-time limit | **Worker pool** or **spawn-per-job** | In-process cancellation is cooperative only |
 | Needs an environment grant | **Spawn-per-job** | The other modes accept none |
 
 Budgets default to unbudgeted in every mode. A limit exists only where a caller
@@ -378,9 +375,6 @@ semantics.
 
 ### Worker pool importable JSON
 
-**Status: planned, not yet available.** The executor below is not in the
-package; the snippet describes the designed API, not a runnable import.
-
 `WorkerPoolImportableJsonExecutor` runs the same
 `InProcessImportableJsonTarget` jobs — the same builder, the same envelope, the
 same `parse_importable_json_result` — across long-lived worker processes. The
@@ -388,12 +382,19 @@ target says what runs; the executor says where it runs.
 
 ```python
 job = build_in_process_importable_json_job(job_id, entry_point, request)
-executor = WorkerPoolImportableJsonExecutor(entry_point=entry_point)
 
-async with executor.open_pool() as pool:
-    async for item in pool.map_stream(submissions()):
-        result = parse_importable_json_result(item.completed_execution)
+with WorkerPoolImportableJsonExecutor(entry_point=entry_point) as executor:
+    async with executor.open_pool() as pool:
+        async for item in pool.map_stream(submissions()):
+            result = parse_importable_json_result(item.completed_execution)
 ```
+
+The executor owns worker processes, so it is a context manager: leaving the
+`with` block stops every worker. A caller that cannot use `with` calls
+`close()` instead. Workers start lazily — the first job that needs a given
+slot spawns its worker — and then live until the executor closes. Worker count
+defaults to the usable CPU count and is overridable with `worker_count`; it is
+a parallelism width, not a resource cap.
 
 The entry point appears twice on purpose. The job carries it because it is part
 of the target — what runs. The executor takes it because each worker imports it

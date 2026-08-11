@@ -185,6 +185,21 @@ exported_symbols = [
 ]
 
 [[terms]]
+name = "worker pool importable JSON execution"
+definition = """
+An execution mode that runs in-process importable JSON jobs across long-lived \
+worker processes, each a freshly spawned interpreter that imports the job's \
+entry point once and then serves jobs over dedicated pipes. It provides \
+parallelism on real cores and enforces a declared finite wall-time budget by \
+terminating the worker; it accepts no environment grant, creates no durable run \
+record, and makes no containment or isolation claim. A pool is bound to one \
+entry point for its lifetime."""
+exported_symbols = [
+  "dr_exec.WorkerPoolImportableJsonExecutor",
+  "dr_exec.WorkerPoolRecordReceipt",
+]
+
+[[terms]]
 name = "run record reference"
 definition = """
 A serializable opaque locator through which the selected run store loads one \

@@ -53,11 +53,19 @@ create no durable run record.
 
 The executor owns a fixed set of worker processes.
 
-- Workers start on `multiprocessing`'s `spawn` start method, or an equivalent
-  explicit fresh-interpreter spawn. Never `fork`: forking a process that has
-  already imported large packages, holds threads, or holds locks is the classic
-  source of nondeterministic child deadlock, and the caller of this executor is
-  precisely a process that has imported large packages.
+- Workers start as explicit fresh interpreters: `subprocess` invoking
+  `sys.executable` on the worker module, with the two pipe descriptors passed
+  through and the parent's `sys.path` propagated so the worker resolves the
+  caller's entry-point module. Never `fork`: forking a process that has already
+  imported large packages, holds threads, or holds locks is the classic source
+  of nondeterministic child deadlock, and the caller of this executor is
+  precisely a process that has imported large packages. This is `spawn`
+  semantics without `multiprocessing`'s pickle-based bootstrap, which the
+  no-pickle rule rules out anyway.
+- Workers start lazily. A pool holds a fixed number of slots; the first job
+  that needs an empty slot spawns its worker. A pool that is opened and never
+  used starts no processes, and a slot freed by a dead worker is refilled by
+  the next job that needs it rather than eagerly.
 - Worker count defaults to the pool capacity model already in the repo
   (`usable_cpu_count()` via `AutoPoolCapacity`), and is overridable by the
   caller. It is a parallelism width, not a resource cap.
@@ -92,9 +100,18 @@ serialization system.
 - The worker validates the envelope exactly as `_invoke_importable_entry_point`
   does today (schema and schema version must match `dr_exec.importable_json`
   version 1; the payload must be strict JSON), calls the pre-resolved entry
-  point with the payload, and returns the result inside the same envelope.
+  point with the payload, and answers inside the same envelope.
 - The worker writes those canonical result bytes back to the parent over a
-  second pipe.
+  second pipe. The result envelope's payload carries one `status` field —
+  `ok`, `payload_raised`, `payload_result_invalid`, or `executor_rejected` —
+  alongside either the entry point's `result` or a failure `detail`. That one
+  field is what lets the parent distinguish a payload failure from a
+  dispatch-side rejection without a second frame kind or a digest. On success
+  the parent rebuilds the plain `dr_exec.importable_json` result envelope as
+  the completion's single protocol output, so `parse_importable_json_result`
+  works unchanged.
+- The worker answers on a dedicated pipe rather than on stdout, so anything the
+  entry point prints cannot corrupt the channel.
 - Framing is one canonical JSON envelope terminated by `FRAME_TERMINATOR`
   (`b"\n"`), read by newline-delimited reads. The pool reuses the
   `FRAME_TERMINATOR` constant and the canonical-bytes helpers
@@ -165,10 +182,14 @@ A worker that dies while a job is in flight fails that job immediately. The
 completion distinguishes two owners:
 
 - **Job-caused death** — the worker died while executing a job (segfault,
-  `os._exit`, `MemoryError` kill, an uncaught fatal signal from the entry
-  point). Represented as `SignaledOutcome` when a terminating signal is
-  observable, otherwise `ExitedOutcome` with the worker's exit code, attributed
-  to `FailureOwner.PAYLOAD` with detail naming worker death during the job.
+  `os._exit`, `SystemExit` from the entry point, `MemoryError` kill, an
+  uncaught fatal signal from the entry point). Represented as `SignaledOutcome`
+  when a terminating signal is observable, otherwise `ExitedOutcome` with the
+  worker's exit code, attributed to `FailureOwner.PAYLOAD` with detail naming
+  worker death during the job. `SystemExit` is worker death here rather than
+  the in-process executor's `ExitedOutcome` translation, and lands on the same
+  outcome by a different route: the worker exits with the requested code and
+  the parent reports that code.
 - **Pool-caused death** — the worker could not be spawned, or died between
   jobs, or the pool's own machinery failed. An OS-level spawn failure is
   `SpawnFailedOutcome`, which `attribute_outcome` attributes to
@@ -221,6 +242,15 @@ Enforcement machinery exists but activates only on explicit caller opt-in:
 Caller cancellation through `CancelToken` behaves the same as the wall-time
 path when a job is already running: kill the worker, complete the job as
 `CancelledOutcome`, respawn.
+
+A job that declares neither a cancel token nor a finite wall-time budget waits
+on its worker's answer with no timeout and no periodic wakeup at all: the
+parent blocks on the result queue until a frame arrives or the worker's pipe
+reaches EOF. Only a job that declared a stop condition re-checks it while
+waiting, because `CancelToken` exposes an `Event` that cannot be waited on
+jointly with the result queue. That re-check interval is an implementation
+detail of observing a caller's own declared condition, never a deadline
+synthesized for a job that declared none.
 
 ## Bounded streaming map
 
@@ -318,16 +348,21 @@ establish semantic conformance.
   established pattern instead — an `isinstance` guard raising `ExecutorFailure`,
   matching `ImportableJsonExecutor` and pinned the way
   `test_wrong_target_raises_executor_failure` pins it.
-- `tests/execution/test_importable_json_executor.py` — this is the semantic
-  conformance baseline for the worker-pool executor, in place of the shared
-  fixture. The in-process behavior
-  suite is the semantic conformance baseline: echo round trip, JSON `null`
-  result, import failure, non-callable attribute, entry-point exception,
-  wrong-target rejection, non-empty env rejection, finite input-budget
-  enforcement, finite payload-output rejection, pre-cancelled token,
-  concurrent-call safety, pool streaming, and pool health after a failing job.
-  Every one of those must hold for the worker pool; parameterize the shared
-  cases across both executors rather than copying them.
+- `tests/execution/test_importable_json_semantics.py` — the semantic
+  conformance baseline for both importable-JSON executors, in place of the
+  shared fixture: echo round trip, JSON `null` result, import failure,
+  non-callable attribute, module-initialization failure, entry-point exception,
+  non-strict-JSON return, wrong-target rejection, non-empty env rejection,
+  finite input-budget enforcement, finite payload-output rejection,
+  pre-cancelled token, receipt kind, unbudgeted default, concurrent calls, pool
+  streaming, and pool health after a failing job. Every case is parameterized
+  over both executors through one harness rather than copied, and the shared
+  cases are removed from the in-process suite so each lives in exactly one
+  place. `tests/execution/test_importable_json_executor.py` keeps only what is
+  specific to running in the caller interpreter: cooperative wall-time
+  semantics, `SystemExit` mapped to `ExitedOutcome` without worker death,
+  caller-cancel precedence over a wall-time budget, and `ProcessExecutor`'s
+  rejection of in-process targets.
 - `tests/scheduling/test_execution_pool.py` and
   `tests/scheduling/test_pool_real_engine.py` — capacity resolution, completion
   ordering, context pairing, drain, and abort must behave identically when the
@@ -343,10 +378,13 @@ establish semantic conformance.
 
 New worker-pool-specific tests:
 
-- real parallelism: a CPU-bound entry point across N workers completes in
-  measurably less wall time than the same work on one worker (the one place
-  elapsed time is the property under test, asserted as a coarse ratio, never as
-  a proxy for ordering or readiness);
+- real parallelism, proven by state rather than by elapsed time: N jobs each
+  announce arrival in a shared directory and then block until every peer has
+  arrived. No job can finish unless all N are simultaneously in flight in
+  distinct processes, which one worker — or N threads under one GIL — can never
+  satisfy. The terminal evidence is the completions plus N distinct worker
+  PIDs, none of them the caller's; a wall-time ratio would be weaker and would
+  make duration the property under test;
 - amortized import: a worker imports the entry-point module once regardless of
   how many jobs it serves, observed through a state marker rather than a
   duration;
