@@ -1,27 +1,28 @@
 from __future__ import annotations
 
-import keyword
+import importlib
 from functools import cache
 from typing import Final
 
 from dr_serialize import (
     IdentityDocument,
     Jsonable,
+    StrictJsonError,
     build_identity_document,
     validate_strict_json,
 )
-from pydantic import field_validator
 
 from dr_exec.core.kinds import ContainmentProfile
-from dr_exec.core.model import ContractModel
 from dr_exec.core.names import JobId
 from dr_exec.declarations.models import (
     Budgets,
     EnvGrant,
     ExecutionJob,
+    InProcessImportableJsonTarget,
     TrustedPythonTarget,
     UntrustedPythonTarget,
 )
+from dr_exec.importable_json_entry_point import ImportableEntryPoint
 from dr_exec.recording.models import CompletedExecution, ExitedOutcome
 
 # Persisted-format contract: these fixed envelope literals are shared by the
@@ -30,35 +31,24 @@ _ENVELOPE_SCHEMA: Final = "dr_exec.importable_json"
 _ENVELOPE_SCHEMA_VERSION: Final = 1
 
 
-class ImportableEntryPoint(ContractModel):
-    """One absolute module and one exact module-level attribute."""
-
-    module_name: str
-    attribute_name: str
-
-    @field_validator("module_name")
-    @classmethod
-    def module_name_must_be_absolute(cls, value: str) -> str:
-        parts = value.split(".")
-        if not parts or any(
-            not part.isidentifier() or keyword.iskeyword(part)
-            for part in parts
-        ):
-            raise ValueError(
-                "module_name must be an absolute dotted Python module name"
-            )
-        return value
-
-    @field_validator("attribute_name")
-    @classmethod
-    def attribute_name_must_be_exact(cls, value: str) -> str:
-        if not value.isidentifier() or keyword.iskeyword(value):
-            raise ValueError("attribute_name must be one Python identifier")
-        return value
-
-
 class ImportableJsonResultError(ValueError):
     """A completion is not one successful importable-JSON result."""
+
+
+class ImportableJsonDispatchError(Exception):
+    """An importable JSON entry point could not run."""
+
+
+class ImportableJsonExecutorDispatchError(ImportableJsonDispatchError):
+    """The executor, not the entry point, rejected dispatch."""
+
+
+class ImportableJsonPayloadDispatchError(ImportableJsonDispatchError):
+    """The entry point raised while running."""
+
+
+class ImportableJsonPayloadResultError(ImportableJsonDispatchError):
+    """The entry point returned non-strict JSON."""
 
 
 def build_trusted_importable_json_job(
@@ -106,6 +96,27 @@ def build_untrusted_importable_json_job(
     )
 
 
+def build_in_process_importable_json_job(
+    job_id: JobId,
+    entry_point: ImportableEntryPoint,
+    request: Jsonable,
+    /,
+    *,
+    budgets: Budgets | None = None,
+) -> ExecutionJob:
+    """Build one trusted in-process importable JSON job without spawning."""
+
+    return ExecutionJob(
+        job_id=job_id,
+        target=InProcessImportableJsonTarget(
+            entry_point=entry_point,
+            request=_envelope(request),
+        ),
+        env=EnvGrant.none(),
+        budgets=Budgets.unbudgeted() if budgets is None else budgets,
+    )
+
+
 def parse_importable_json_result(completed: CompletedExecution, /) -> Jsonable:
     """Return the one matching JSON result or reject the completion."""
 
@@ -128,6 +139,55 @@ def parse_importable_json_result(completed: CompletedExecution, /) -> Jsonable:
             "the importable JSON output does not use the required envelope"
         )
     return validate_strict_json(output.payload)
+
+
+def _invoke_importable_entry_point(
+    entry_point: ImportableEntryPoint,
+    request: IdentityDocument,
+    /,
+) -> Jsonable:
+    if (
+        request.schema != _ENVELOPE_SCHEMA
+        or request.schema_version != _ENVELOPE_SCHEMA_VERSION
+    ):
+        raise ImportableJsonExecutorDispatchError(
+            "request does not use the importable JSON envelope"
+        )
+    try:
+        payload = validate_strict_json(request.payload)
+    except StrictJsonError as error:
+        raise ImportableJsonExecutorDispatchError(
+            "request payload is not strict JSON"
+        ) from error
+    try:
+        module = importlib.import_module(entry_point.module_name)
+    except Exception as error:
+        raise ImportableJsonExecutorDispatchError(
+            f"could not import {entry_point.module_name!r}"
+        ) from error
+    try:
+        callable_entry = getattr(module, entry_point.attribute_name)
+    except AttributeError as error:
+        raise ImportableJsonExecutorDispatchError(
+            f"{entry_point.module_name!r} has no attribute "
+            f"{entry_point.attribute_name!r}"
+        ) from error
+    if not callable(callable_entry):
+        raise ImportableJsonExecutorDispatchError(
+            "the imported module attribute is not callable"
+        )
+    try:
+        result = callable_entry(payload)
+    except Exception as error:
+        raise ImportableJsonPayloadDispatchError(
+            "the importable JSON entry point raised"
+        ) from error
+    try:
+        return validate_strict_json(result)
+    except StrictJsonError as error:
+        raise ImportableJsonPayloadResultError(
+            "the importable JSON entry point returned non-strict JSON"
+        ) from error
 
 
 def _envelope(payload: Jsonable, /) -> IdentityDocument:
@@ -172,7 +232,12 @@ def dr_exec_main(request, emit):
 
 __all__ = [
     "ImportableEntryPoint",
+    "ImportableJsonDispatchError",
+    "ImportableJsonExecutorDispatchError",
+    "ImportableJsonPayloadDispatchError",
+    "ImportableJsonPayloadResultError",
     "ImportableJsonResultError",
+    "build_in_process_importable_json_job",
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",
     "parse_importable_json_result",

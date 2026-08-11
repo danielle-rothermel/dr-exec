@@ -38,6 +38,7 @@ from dr_exec.declarations.models import (
     FiniteCountLimit,
     FiniteDurationLimit,
     FiniteOutput,
+    InProcessImportableJsonTarget,
     OutputBudget,
     PayloadRetentionBudget,
     StreamRetentionBudget,
@@ -49,9 +50,11 @@ from dr_exec.declarations.models import (
     UntrustedPythonTarget,
 )
 from dr_exec.execution.executor import ProcessExecutor
+from dr_exec.execution.importable_json_executor import ImportableJsonExecutor
 from dr_exec.importable_json import (
     ImportableEntryPoint,
     ImportableJsonResultError,
+    build_in_process_importable_json_job,
     build_trusted_importable_json_job,
     build_untrusted_importable_json_job,
     parse_importable_json_result,
@@ -76,6 +79,7 @@ from dr_exec.recording.models import (
     ExitedOutcomeRecord,
     FakeRecordReceipt,
     FinalizedRecord,
+    InProcessRecordReceipt,
     OutputArtifactRecord,
     OutputArtifactRecords,
     PayloadOutputRecords,
@@ -185,7 +189,10 @@ __all__ = [
     "FiniteOutput",
     "FixedPoolCapacity",
     "ImportableEntryPoint",
+    "ImportableJsonExecutor",
     "ImportableJsonResultError",
+    "InProcessImportableJsonTarget",
+    "InProcessRecordReceipt",
     "IsolatedHostPythonRuntime",
     "JobId",
     "LimitKind",
@@ -241,6 +248,7 @@ __all__ = [
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTarget",
     "UntrustedPythonTargetRecord",
+    "build_in_process_importable_json_job",
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",
     "parse_importable_json_result",

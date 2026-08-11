@@ -35,6 +35,7 @@ from dr_exec.declarations.models import (
     ExecutorSelfBudgets,
     FiniteDurationLimit,
     FiniteOutput,
+    InProcessImportableJsonTarget,
     TrustedCommandTarget,
     TrustedPythonTarget,
     UntrustedCommandTarget,
@@ -194,6 +195,11 @@ def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
                 record=record,
                 request_id_sha256=prepared.request_id_sha256,
                 wants_protocol=True,
+            )
+        case InProcessImportableJsonTarget():
+            raise ExecutorFailure(
+                "the process executor cannot run in-process importable JSON "
+                "targets"
             )
 
 
@@ -748,6 +754,11 @@ class _EngineCall:
         *,
         cancellation: CancelToken | None,
     ) -> CompletedExecution:
+        if isinstance(job.target, InProcessImportableJsonTarget):
+            raise ExecutorFailure(
+                "the process executor cannot run in-process importable JSON "
+                "targets"
+            )
         _validate_platform()
         target = _target_of(job, self.runtime)
         validate_input_budget(job, target.stdin_bytes)

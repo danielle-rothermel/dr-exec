@@ -1,9 +1,10 @@
 [[contracts]]
 title = "Production execution is local and macOS-only"
 statement = """
-dr-exec v1 production execution runs one machine-local child per job on macOS \
-through one direct-argv execution path. It invokes no shell, remote executor, \
-or in-process evaluator."""
+`ProcessExecutor` v1 production execution runs one machine-local child per job \
+on macOS through one direct-argv execution path. It invokes no shell or remote \
+executor. In-process importable JSON execution uses a separate executor and is \
+not isolated by a child process."""
 rationale = """
 One qualified platform and one lifecycle owner keep spawning, transport, \
 budget enforcement, teardown, attribution, and recording on the same path."""
@@ -268,3 +269,32 @@ rationale = """
 Opaque access permits another store layout without changing persisted receipts \
 or teaching callers to join storage paths."""
 date = "2026-08-08"
+
+[[contracts]]
+title = "In-process importable JSON provides throughput, not isolation"
+statement = """
+`ImportableJsonExecutor` runs trusted `InProcessImportableJsonTarget` jobs \
+synchronously in the caller interpreter through one importable entry point \
+lookup and one JSON call. It creates no durable run record, accepts no \
+environment grant, rejects process and untrusted targets, rejects finite \
+payload_output budgets, and makes no containment claim beyond caller-side \
+trust in the declared entry point."""
+rationale = """
+Trusted preprocessing and similar workloads need pool-driven throughput without \
+a second thread pool or subprocess overhead. The separate target kind keeps \
+isolation expectations explicit."""
+date = "2026-08-10"
+
+[[contracts]]
+title = "In-process cancellation is cooperative"
+statement = """
+For in-process importable JSON jobs, finite wall time arms a one-shot cancel \
+signal when the budget expires. The worker thread cannot hard-stop arbitrary \
+Python user code; cancellation is observed before dispatch and after the entry \
+point returns. `ImportableJsonExecutor.run()` also maps `KeyboardInterrupt` to \
+`ExitedOutcome(1)` so pools stay healthy; Ctrl+C does not propagate through \
+`run()`."""
+rationale = """
+Honest cancellation semantics avoid presenting in-process execution as \
+forcibly bounded when only cooperative observation is available."""
+date = "2026-08-10"
