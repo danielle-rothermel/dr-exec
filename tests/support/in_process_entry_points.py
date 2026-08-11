@@ -16,6 +16,10 @@ def raise_error(_value: object) -> None:
     raise RuntimeError("entry point failed")
 
 
+def raise_system_exit(_value: object) -> None:
+    raise SystemExit(7)
+
+
 NOT_CALLABLE = "sentinel"
 
 

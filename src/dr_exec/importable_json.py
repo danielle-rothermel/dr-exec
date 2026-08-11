@@ -161,7 +161,7 @@ def _invoke_importable_entry_point(
         ) from error
     try:
         module = importlib.import_module(entry_point.module_name)
-    except ImportError as error:
+    except Exception as error:
         raise ImportableJsonExecutorDispatchError(
             f"could not import {entry_point.module_name!r}"
         ) from error

@@ -9,6 +9,7 @@ from dr_exec.declarations.models import (
     EnvGrant,
     ExecutionJob,
     FiniteByteLimit,
+    FiniteOutput,
     InProcessImportableJsonTarget,
     TrustedCommandTarget,
     TrustedPythonTarget,
@@ -78,6 +79,11 @@ def validate_declaration(job: ExecutionJob, /) -> None:
                 raise DeclarationError(
                     "in-process importable JSON jobs accept no environment "
                     "grant"
+                )
+            if isinstance(job.budgets.payload_output, FiniteOutput):
+                raise DeclarationError(
+                    "in-process importable JSON jobs accept no finite "
+                    "payload_output budget"
                 )
             return
         case TrustedCommandTarget() | UntrustedCommandTarget():

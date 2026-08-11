@@ -276,8 +276,9 @@ statement = """
 `ImportableJsonExecutor` runs trusted `InProcessImportableJsonTarget` jobs \
 synchronously in the caller interpreter through one importable entry point \
 lookup and one JSON call. It creates no durable run record, accepts no \
-environment grant, rejects process and untrusted targets, and makes no \
-containment claim beyond caller-side trust in the declared entry point."""
+environment grant, rejects process and untrusted targets, rejects finite \
+payload_output budgets, and makes no containment claim beyond caller-side \
+trust in the declared entry point."""
 rationale = """
 Trusted preprocessing and similar workloads need pool-driven throughput without \
 a second thread pool or subprocess overhead. The separate target kind keeps \

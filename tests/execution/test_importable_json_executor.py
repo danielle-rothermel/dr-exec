@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -15,6 +17,7 @@ from dr_exec import (
     Budgets,
     CancelledOutcome,
     CancelToken,
+    CompletedExecution,
     DeclarationError,
     DirectoryRunStore,
     EnvGrant,
@@ -26,15 +29,19 @@ from dr_exec import (
     FailureOwner,
     FiniteByteLimit,
     FiniteDurationLimit,
+    FiniteOutput,
     FixedPoolCapacity,
     ImportableEntryPoint,
     ImportableJsonExecutor,
     InProcessRecordReceipt,
     IsolatedHostPythonRuntime,
     JobId,
+    OutputOverflowPolicy,
+    PayloadRetentionBudget,
     ProcessExecutor,
     ProtocolFailedOutcome,
     RecordReceiptKind,
+    StreamRetentionBudget,
     build_in_process_importable_json_job,
     parse_importable_json_result,
 )
@@ -65,6 +72,14 @@ RETURN_NULL = ImportableEntryPoint(
 SLEEP_LONG = ImportableEntryPoint(
     module_name="support.in_process_entry_points",
     attribute_name="sleep_long",
+)
+IMPORT_FAIL = ImportableEntryPoint(
+    module_name="support.in_process_import_fail",
+    attribute_name="echo",
+)
+RAISE_SYSTEM_EXIT = ImportableEntryPoint(
+    module_name="support.in_process_entry_points",
+    attribute_name="raise_system_exit",
 )
 
 requires_macos = pytest.mark.skipif(
@@ -279,3 +294,157 @@ def test_open_pool_streams_parsed_results() -> None:
         ("context-0", {"value": {"index": 0}}),
         ("context-1", {"value": {"index": 1}}),
     ]
+
+
+def test_system_exit_maps_to_exited_outcome_without_breaking_pool() -> None:
+    exit_job = build_in_process_importable_json_job(
+        JobId(UUID(int=1)),
+        RAISE_SYSTEM_EXIT,
+        {"ignored": True},
+    )
+    echo_job = build_in_process_importable_json_job(
+        JobId(UUID(int=2)),
+        ENTRY_POINT,
+        {"index": 2},
+    )
+    executor = ImportableJsonExecutor()
+
+    async def run() -> list[tuple[str, object, object | None]]:
+        async def submissions():
+            yield ExecutionSubmission(job=exit_job, context="exit")
+            yield ExecutionSubmission(job=echo_job, context="echo")
+
+        async with executor.open_pool(
+            config=ExecutionPoolConfig(
+                capacity=FixedPoolCapacity(max_active_jobs=1)
+            )
+        ) as pool:
+            outcomes: list[tuple[str, object, object | None]] = []
+            async for item in pool.run_stream(submissions()):
+                outcomes.append(
+                    (
+                        item.context,
+                        item.completed_execution.result.outcome,
+                        parse_importable_json_result(item.completed_execution)
+                        if item.context == "echo"
+                        else None,
+                    )
+                )
+            return outcomes
+
+    returned = asyncio.run(run())
+
+    assert len(returned) == 2
+    exit_context, exit_outcome, _ = returned[0]
+    echo_context, _, echo_value = returned[1]
+    assert exit_context == "exit"
+    assert echo_context == "echo"
+    assert isinstance(exit_outcome, ExitedOutcome)
+    assert exit_outcome.exit_code == 7
+    assert echo_value == {"value": {"index": 2}}
+
+
+def test_import_initialization_failure_maps_to_protocol_failure() -> None:
+    executor = ImportableJsonExecutor()
+    completed = executor.run(build_job(entry_point=IMPORT_FAIL))
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ProtocolFailedOutcome)
+    assert completed.result.attribution.owner is FailureOwner.EXECUTOR
+
+
+def test_import_initialization_failure_does_not_break_pool() -> None:
+    fail_job = build_in_process_importable_json_job(
+        JobId(UUID(int=3)),
+        IMPORT_FAIL,
+        {"ignored": True},
+    )
+    echo_job = build_in_process_importable_json_job(
+        JobId(UUID(int=4)),
+        ENTRY_POINT,
+        {"index": 4},
+    )
+    executor = ImportableJsonExecutor()
+
+    async def run() -> list[tuple[str, object, object | None]]:
+        async def submissions():
+            yield ExecutionSubmission(job=fail_job, context="fail")
+            yield ExecutionSubmission(job=echo_job, context="echo")
+
+        async with executor.open_pool(
+            config=ExecutionPoolConfig(
+                capacity=FixedPoolCapacity(max_active_jobs=1)
+            )
+        ) as pool:
+            values: list[tuple[str, object, object | None]] = []
+            async for item in pool.run_stream(submissions()):
+                values.append(
+                    (
+                        item.context,
+                        item.completed_execution.result.outcome,
+                        parse_importable_json_result(item.completed_execution)
+                        if item.context == "echo"
+                        else None,
+                    )
+                )
+            return values
+
+    returned = asyncio.run(run())
+
+    fail_outcome = returned[0][1]
+    echo_value = returned[1][2]
+    assert isinstance(fail_outcome, ProtocolFailedOutcome)
+    assert echo_value == {"value": {"index": 4}}
+
+
+def test_caller_cancel_wins_over_wall_time_budget() -> None:
+    job = build_job(
+        entry_point=SLEEP_LONG,
+        request={"seconds": 0.5},
+        budgets=Budgets(
+            wall_time=FiniteDurationLimit(max_ns=50_000_000),
+        ),
+    )
+    executor = ImportableJsonExecutor()
+    token = CancelToken()
+    completed_holder: list[CompletedExecution] = []
+
+    def run_job() -> None:
+        completed_holder.append(
+            executor.run(job, cancellation=token),
+        )
+
+    thread = threading.Thread(target=run_job)
+    thread.start()
+    time.sleep(0.01)
+    token.cancel()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert len(completed_holder) == 1
+    assert isinstance(completed_holder[0].result.outcome, CancelledOutcome)
+    assert not isinstance(
+        completed_holder[0].result.outcome, BudgetExceededOutcome
+    )
+
+
+def test_finite_payload_output_budget_is_rejected_before_run() -> None:
+    job = build_in_process_importable_json_job(
+        JOB_ID,
+        ENTRY_POINT,
+        {"ok": True},
+        budgets=Budgets(
+            payload_output=FiniteOutput(
+                max_bytes=100,
+                overflow_policy=OutputOverflowPolicy.MARKED_TRUNCATION,
+                retention=PayloadRetentionBudget(
+                    stdout=StreamRetentionBudget(head_bytes=100, tail_bytes=0),
+                    stderr=StreamRetentionBudget(head_bytes=0, tail_bytes=0),
+                ),
+            ),
+        ),
+    )
+    executor = ImportableJsonExecutor()
+
+    with pytest.raises(DeclarationError, match="payload_output"):
+        executor.run(job)
