@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 import threading
 from collections.abc import (
     AsyncIterator,
@@ -1567,29 +1568,27 @@ def test_map_stream_delivers_in_completion_order() -> None:
     executor, responder = gated_executor()
     batch = jobs(3)
     pool = fixed_pool(executor, 3)
-    opened = threading.Event()
+    delivered: queue.SimpleQueue[int] = queue.SimpleQueue()
 
     async def stream() -> list[int]:
         async with pool:
-            opened.set()
-            return [
-                completion.context
-                async for completion in pool.map_stream(submissions_of(batch))
-            ]
+            collected_contexts: list[int] = []
+            async for completion in pool.map_stream(submissions_of(batch)):
+                collected_contexts.append(completion.context)
+                delivered.put(completion.context)
+            return collected_contexts
 
     collected: list[list[int]] = []
     streamer = in_thread(lambda: collected.append(asyncio.run(stream())))
 
     responder.await_arrival_count(3)
-    wait_for(opened, what="the pool to open")
-    scheduler = pool._scheduler
-    assert scheduler is not None
     for index in (2, 0, 1):
         responder.release(batch[index].job_id)
-        # The order under test is publication order, so each job must reach
-        # the ready queue before the next is released. Waiting only for the
-        # executor to return leaves the append itself racing.
-        _await_scheduler_publication(scheduler, batch[index].job_id)
+        # The order under test is delivery order, so each job must be handed
+        # to the caller before the next is released. Synchronizing on what the
+        # stream delivered -- rather than on the scheduler's ready queue, which
+        # this very consumer drains -- is state the test cannot miss.
+        assert delivered.get(timeout=WATCHDOG_SECONDS) == index
     join(streamer)
 
     assert collected == [[2, 0, 1]]
