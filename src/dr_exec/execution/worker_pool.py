@@ -73,7 +73,7 @@ from dr_exec.scheduling.pool import (
     ExecutionPool,
     ExecutionPoolConfig,
     FixedPoolCapacity,
-    _resolve_capacity,
+    resolve_pool_capacity,
 )
 
 _WORKER_MODULE: Final = "dr_exec.execution.worker_pool_worker"
@@ -374,7 +374,7 @@ class WorkerPoolImportableJsonExecutor:
 
     def __post_init__(self) -> None:
         width = (
-            _resolve_capacity(AutoPoolCapacity()).max_active_jobs
+            resolve_pool_capacity(AutoPoolCapacity()).max_active_jobs
             if self.worker_count is None
             else self.worker_count
         )
@@ -508,7 +508,7 @@ class WorkerPoolImportableJsonExecutor:
     def _pool_capacity(self, config: ExecutionPoolConfig | None, /) -> int:
         if config is None:
             return self.width
-        return _resolve_capacity(config.capacity).max_active_jobs
+        return resolve_pool_capacity(config.capacity).max_active_jobs
 
 
 @dataclass(frozen=True, slots=True)

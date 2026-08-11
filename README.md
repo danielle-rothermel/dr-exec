@@ -654,7 +654,15 @@ type PoolCapacity = AutoPoolCapacity | FixedPoolCapacity
 @dataclass(frozen=True, slots=True)
 class ExecutionPoolConfig:
     capacity: PoolCapacity = ...
+
+
+def resolve_pool_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity: ...
 ```
+
+A pool resolves its own capacity when it opens, and reports it as
+`pool.effective_capacity`. A caller that must size something *alongside* a pool
+— a worker count, a second pool — calls `resolve_pool_capacity` on the declared
+capacity instead of reimplementing what `AutoPoolCapacity` means.
 
 Submissions carry caller context through scheduling without serializing it,
 and completions return that same context paired with the completed execution.

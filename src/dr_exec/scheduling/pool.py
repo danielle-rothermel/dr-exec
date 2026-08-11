@@ -71,7 +71,14 @@ class ExecutionCompletion(Generic[ContextT]):  # noqa: UP046
     context: ContextT
 
 
-def _resolve_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity:
+def resolve_pool_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity:
+    """Resolve a declared capacity to the width a pool would actually use.
+
+    Callers that must size something alongside a pool — a worker count, a
+    second pool — resolve the caller's declared capacity here rather than
+    reimplementing what ``AutoPoolCapacity`` means.
+    """
+
     cpus = usable_cpu_count()
     match capacity:
         case AutoPoolCapacity():
@@ -138,7 +145,7 @@ class ExecutionPool:
             raise ExecutorFailure(
                 f"an execution pool in state {self._state} cannot be opened"
             )
-        capacity = _resolve_capacity(self._config.capacity)
+        capacity = resolve_pool_capacity(self._config.capacity)
         self._effective_capacity = capacity
         self._owning_loop = asyncio.get_running_loop()
         self._scheduler = _ExecutionScheduler(
@@ -567,4 +574,5 @@ __all__ = [
     "ExecutionSubmission",
     "FixedPoolCapacity",
     "PoolCapacity",
+    "resolve_pool_capacity",
 ]

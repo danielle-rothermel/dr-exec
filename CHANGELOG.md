@@ -21,6 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   completion order so one slow job delays only itself. A map stream delivers
   only its own submissions' completions, so several streams may share one pool
   without consuming each other's work.
+- Added `resolve_pool_capacity`, the capacity resolution every executor and
+  pool already used internally, so a caller sizing something alongside a pool
+  resolves a declared `PoolCapacity` here instead of reimplementing what
+  `AutoPoolCapacity` means.
 
 ### Changed
 

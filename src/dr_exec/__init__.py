@@ -131,6 +131,7 @@ from dr_exec.scheduling.pool import (
     ExecutionSubmission,
     FixedPoolCapacity,
     PoolCapacity,
+    resolve_pool_capacity,
 )
 
 __all__ = [
@@ -256,4 +257,5 @@ __all__ = [
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",
     "parse_importable_json_result",
+    "resolve_pool_capacity",
 ]

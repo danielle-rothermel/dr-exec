@@ -126,6 +126,7 @@ EXPECTED_PUBLIC_API = (
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",
     "parse_importable_json_result",
+    "resolve_pool_capacity",
 )
 
 
