@@ -22,7 +22,8 @@ does not verify interpreter, standard-library, or package bytes.
   environment grants and resource budgets.
 - **[Execution](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/execution)**
   owns process startup, input and output transport, budget enforcement,
-  cancellation, teardown, and outcome attribution.
+  cancellation, teardown, and outcome attribution, across spawn-per-job,
+  in-process, and worker-pool execution modes.
 - **[Recording](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/recording)**
   represents outcomes as typed data and preserves
   declarations, process evidence, retained output, measurements, and recording
@@ -42,6 +43,10 @@ does not verify interpreter, standard-library, or package bytes.
 
 The abbreviated signatures below show the durable public contract shapes;
 `...` marks validation and implementation detail intentionally left out.
+
+If you are here to run one Python function over many items and want to know
+which execution mode to pick, start at
+[Choosing an execution mode](#choosing-an-execution-mode-a-parallelism-guide).
 
 ## Core
 
@@ -194,12 +199,148 @@ payload-output, protocol frame, protocol total-byte, JSON-depth, and one-output
 limits from representative measurements. Bulk data remains caller-owned by
 reference or artifact rather than traveling through the compact JSON value.
 
+## Choosing an execution mode: a parallelism guide
+
+If you have a list of items and one Python function to run over each of them,
+this section tells you which of the three execution modes to use. It assumes no
+background in parallelism.
+
+### The one fact that decides everything: the GIL
+
+CPython has a **global interpreter lock (GIL)**: within a single Python
+process, only one thread executes Python bytecode at a time, no matter how many
+threads or CPU cores you have.
+
+Three consequences follow, and they are the whole reason there are three modes:
+
+- **CPU-bound Python work** (arithmetic, parsing, tokenizing, string munging,
+  pure-Python transforms) gets **no speedup from threads**. Sixteen threads
+  doing CPU-bound Python finish in about the same wall time as one.
+- **I/O-bound work** (waiting on a network call, a disk read, a database)
+  *does* benefit from threads, because a thread waiting on I/O releases the GIL
+  and lets another thread run.
+- To get real parallelism for CPU-bound Python you need **multiple processes**.
+  Each process has its own interpreter and its own GIL, so they genuinely run
+  at the same time on different cores.
+
+The cost of processes is that they do not share memory. Anything a job needs
+has to be sent to the process, and anything it produces has to be sent back —
+which is why every mode below exchanges the same small, strict JSON value in
+each direction.
+
+The second fact worth knowing: starting a Python process is expensive.
+Launching a fresh interpreter and importing a large package (numpy, torch,
+pandas, a big first-party package) commonly costs on the order of a second.
+Whether you pay that once or once *per item* is the difference between the
+first and third modes below.
+
+### Mode 1: spawn-per-job (`ProcessExecutor`)
+
+**What actually happens.** For each job, dr-exec starts a brand-new Python
+interpreter, hands it the job's JSON request on a private pipe, waits for it to
+emit exactly one JSON result on a protected protocol channel, tears the process
+down, and writes a durable run record. The child is a fresh session and process
+group; the entry-point module is imported inside that child, for that one job.
+
+**What it costs per job.** Interpreter startup plus the entry-point module's
+imports, every time. Roughly a second when the entry point imports a large
+package; a few tens of milliseconds when it imports almost nothing. Plus JSON
+encode/decode on both sides.
+
+**When to use it.** When each job is *substantial* — seconds to minutes of work
+— so startup is noise. When you need a durable run record for every attempt.
+When the payload is untrusted, or when you need an environment grant, a real
+enforced wall-time budget, or crash containment with full evidence. This is the
+only mode that gives you all of that.
+
+**When NOT to use it.** When jobs take milliseconds. Paying a second of startup
+for five milliseconds of work is a several-hundred-fold tax, and no amount of
+parallelism recovers it — you are simply spending all your cores on `import`.
+
+### Mode 2: in-process inline (`ImportableJsonExecutor`)
+
+**What actually happens.** No subprocess at all. The executor imports the entry
+point in *your* interpreter and calls it directly, then wraps the return value
+in the same result envelope the other modes produce. When you drive it with
+`ExecutionPool`, the pool runs those calls on worker *threads* inside your one
+process.
+
+**What it costs per job.** Almost nothing: one function call plus JSON
+validation. Startup is paid once, by your own process, when the module is first
+imported.
+
+**When to use it.** Recorded inline calls: tests and fakes that need real
+completion objects; I/O-bound entry points, where threads genuinely overlap;
+and tiny trusted transforms where the work per item is smaller than the cost of
+sending it anywhere. It is the mode that keeps the dr-exec job/completion
+vocabulary while doing essentially nothing extra.
+
+**When NOT to use it.** Be honest about two limits.
+
+- **It provides no parallelism for CPU-bound work.** Because of the GIL, a pool
+  with one worker and a pool with thirty-two workers produce the same
+  throughput on CPU-bound Python. Threads here buy overlap for waiting, not for
+  computing.
+- **Its budgets are advisory.** A finite wall-time budget arms a cancel signal
+  that is checked *before* the entry point is called and *after* it returns. It
+  cannot interrupt a running call. An entry point that spins forever spins
+  forever. Cancellation is cooperative, not enforced.
+
+Also: no isolation, no durable run record, no environment grant, and a crash in
+the entry point is a crash in your process.
+
+### Mode 3: worker pool (`WorkerPoolImportableJsonExecutor`)
+
+**What actually happens.** The pool starts N long-lived worker processes (via
+`spawn`, a fresh interpreter each). Each worker imports the entry-point module
+**once**, at startup, and then waits. Jobs are sent to idle workers as the same
+JSON envelope over OS pipes, and results come back the same way. Workers stay
+alive across jobs, so the expensive import is paid N times total instead of
+once per job. Because the workers are separate processes, each has its own GIL
+and CPU-bound work runs genuinely in parallel.
+
+**What it costs per job.** Encoding the request, a pipe write, a pipe read, and
+decoding the result — microseconds to low milliseconds for compact JSON values.
+No interpreter startup, no re-import.
+
+**When to use it.** This is the default choice for **trusted, CPU-bound
+fan-out**: many items, milliseconds to seconds each, one function, one machine.
+It is also the mode where a wall-time budget is real — if you declare one, the
+pool enforces it by killing the worker, which does stop arbitrary running
+Python.
+
+**When NOT to use it.** When the payload is untrusted or you need containment
+evidence — worker processes are a parallelism mechanism, not a sandbox, and
+carry no containment claim. When you need a durable run record per attempt
+(worker-pool executions create none). When you have only a handful of items and
+each is long: mode 1 gives you records and isolation for the same wall time.
+When your work is I/O-bound: you will pay for processes and pipes to get
+concurrency that threads already gave you for free in mode 2. And when the
+values you want to exchange are large — the transport is compact JSON, so bulk
+data should travel by reference (a path, an artifact) rather than through the
+envelope.
+
+### Decision table
+
+| Your situation | Mode | Why |
+| --- | --- | --- |
+| Many trusted CPU-bound items, ms–s each | **Worker pool** | Real cores, import paid once per worker |
+| Untrusted payload, or needs containment evidence | **Spawn-per-job** | Only mode with a containment declaration |
+| Needs a durable run record per attempt | **Spawn-per-job** | Only mode that records |
+| Few long jobs (seconds–minutes each) | **Spawn-per-job** | Startup is noise; you get records and isolation free |
+| I/O-bound entry point | **In-process** | Threads already overlap waiting; processes add cost |
+| Tiny trusted transforms, tests, fakes | **In-process** | Cheapest possible; real completion objects |
+| Needs an enforced wall-time limit | **Worker pool** or **spawn-per-job** | In-process cancellation is cooperative only |
+| Needs an environment grant | **Spawn-per-job** | The other modes accept none |
+
+Budgets default to unbudgeted in every mode. A limit exists only where a caller
+declares one.
+
 ### In-process importable JSON
 
-When the caller already trusts the entry point and only needs throughput,
-`ImportableJsonExecutor` runs the same importable JSON contract synchronously
-in the caller interpreter. It provides throughput, not isolation: there is no
-subprocess, no durable run record, and no environment grant. Use it with
+`ImportableJsonExecutor` runs the importable JSON contract synchronously in the
+caller interpreter. It provides throughput, not isolation or parallelism: there
+is no subprocess, no durable run record, and no environment grant. Use it with
 `ExecutionPool` the same way as `ProcessExecutor`.
 
 ```python
@@ -223,6 +364,41 @@ returns typed outcomes instead so pools stay healthy. That includes
 should cancel through `CancelToken` when they need explicit cancellation
 semantics.
 
+### Worker pool importable JSON
+
+`WorkerPoolImportableJsonExecutor` runs the same
+`InProcessImportableJsonTarget` jobs — the same builder, the same envelope, the
+same `parse_importable_json_result` — across long-lived worker processes. The
+target says what runs; the executor says where it runs.
+
+```python
+job = build_in_process_importable_json_job(job_id, entry_point, request)
+executor = WorkerPoolImportableJsonExecutor(entry_point=entry_point)
+
+async with executor.open_pool() as pool:
+    async for item in pool.map_stream(submissions()):
+        result = parse_importable_json_result(item.completed_execution)
+```
+
+`map_stream` keeps the pool saturated and yields completions **as they
+finish**, in completion order, pulling from its source only as slots free.
+Callers do not hand-roll admission windows: a window of submissions followed by
+a full drain barrier makes every worker wait on the window's slowest job, and
+this helper exists so that pattern is never necessary.
+
+Worker-pool jobs produce ordinary `CompletedExecution` values with a
+worker-pool record receipt. A worker that dies mid-job fails **that job**
+loudly, with attribution distinguishing a payload-caused crash from a pool
+failure, and the pool respawns a replacement worker; no job silently hangs or
+disappears. Budgets remain unbudgeted by default; when a caller declares a
+finite wall-time budget, the pool enforces it by terminating the worker, which
+makes the budget real rather than advisory.
+
+The full implementation contract is in
+[`docs/worker_pool_design.md`](docs/worker_pool_design.md).
+
+### Measuring your own workload
+
 Run the representative resource and throughput investigation with:
 
 ```console
@@ -230,7 +406,9 @@ uv run --with ./tests/fixtures/importable-json-fixture python scripts/benchmark_
 ```
 
 The command writes a machine-readable JSON report. Its measurements are
-observations for capacity selection, not performance pass/fail thresholds.
+observations for capacity selection, not performance pass/fail thresholds. If
+you are unsure which mode fits, measure one item end to end: if a single job
+takes far less time than your entry point's import, you want the worker pool.
 
 ## Runtime
 
