@@ -46,7 +46,7 @@ def attribute_outcome(outcome: ExecutionOutcome, /) -> ExecutionAttribution:
             if outcome.axis is BudgetAxis.WALL_TIME:
                 return ExecutionAttribution(
                     owner=FailureOwner.EXECUTOR,
-                    detail="the executor enforced the wall-time budget",
+                    detail="the wall-time budget was exceeded",
                 )
             return ExecutionAttribution(
                 owner=FailureOwner.PAYLOAD,
