@@ -11,7 +11,11 @@ from dr_serialize import build_identity_document
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
-from dr_exec.core.kinds import BudgetAxis, ProtocolFailureCode
+from dr_exec.core.kinds import (
+    BudgetAxis,
+    ExecutorFailureCode,
+    ProtocolFailureCode,
+)
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
@@ -96,7 +100,8 @@ class ImportableJsonExecutor:
         if not isinstance(target, InProcessImportableJsonTarget):
             raise ExecutorFailure(
                 "the importable JSON executor accepts only in-process "
-                "importable JSON targets"
+                "importable JSON targets",
+                code=ExecutorFailureCode.IMPORTABLE_JSON_TARGET_MISMATCH,
             )
         execution_id, started_at, started_ns, input_bytes = _run_preamble(
             job, target
@@ -300,7 +305,8 @@ def _keyboard_interrupt_completion(job: ExecutionJob, /) -> CompletedExecution:
     if not isinstance(target, InProcessImportableJsonTarget):
         raise ExecutorFailure(
             "the importable JSON executor accepts only in-process "
-            "importable JSON targets"
+            "importable JSON targets",
+            code=ExecutorFailureCode.IMPORTABLE_JSON_TARGET_MISMATCH,
         )
     execution_id, started_at, started_ns, input_bytes = _run_preamble(
         job, target
@@ -389,7 +395,8 @@ def _in_process_receipted(
     if not isinstance(completed.record_receipt, InProcessRecordReceipt):
         raise ExecutorFailure(
             "in-process completions must carry an in-process record receipt, "
-            f"not {completed.record_receipt.kind}"
+            f"not {completed.record_receipt.kind}",
+            code=ExecutorFailureCode.IMPORTABLE_JSON_RECEIPT_MISMATCH,
         )
     return completed
 

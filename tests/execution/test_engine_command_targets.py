@@ -41,6 +41,7 @@ from dr_exec import (
     ExecutionJob,
     ExecutionResult,
     ExecutorFailure,
+    ExecutorFailureCode,
     ExecutorSelfBudgets,
     ExitedOutcome,
     FailureOwner,
@@ -1560,7 +1561,10 @@ class _UnwritableStore(DirectoryRunStore):
         result: ExecutionResult,
         /,
     ) -> RealRecordReceipt:
-        raise ExecutorFailure("finalization refused by the test")
+        raise ExecutorFailure(
+            "finalization refused by the test",
+            code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+        )
 
 
 @requires_macos
@@ -1596,7 +1600,10 @@ class _UnmarkableStore(DirectoryRunStore):
         process: ProcessRecord,
         /,
     ) -> RunningRun:
-        raise ExecutorFailure("running publication refused by the test")
+        raise ExecutorFailure(
+            "running publication refused by the test",
+            code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+        )
 
 
 @requires_macos
@@ -1628,7 +1635,10 @@ def test_a_failed_running_publication_degrades_the_receipt_by_name(
 
 class _UnpreparableStore(DirectoryRunStore):
     def prepare(self, record: PreparedRecord, /) -> PreparedRun:
-        raise ExecutorFailure("preparation refused by the test")
+        raise ExecutorFailure(
+            "preparation refused by the test",
+            code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+        )
 
 
 @requires_macos

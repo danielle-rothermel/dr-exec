@@ -313,6 +313,22 @@ or teaching callers to join storage paths."""
 date = "2026-08-08"
 
 [[contracts]]
+title = "Degraded receipts discriminate executor infrastructure faults"
+statement = """
+When recording degrades because executor machinery raised `ExecutorFailure` or \
+`SchedulerBroken`, each `RecordingFailure` carries the closed \
+`failure_code` from that exception and leaves `detail` unset. When finalize \
+degrades from a storage-layer fault such as `DocumentDirectoryError`, \
+`RecordingFailure.detail` names the sanitized exception class and \
+`failure_code` stays unset. Both shapes are pinned on the receipt wire \
+contract."""
+rationale = """
+Closed executor codes survive receipt serialization without collapsing distinct \
+raise sites into one class name, while storage faults keep the existing \
+sanitized detail channel."""
+date = "2026-08-12"
+
+[[contracts]]
 title = "Run-record load is for cross-process recovery"
 statement = """
 `RunStore.load()` validates a lifecycle record and every finalized sidecar for \

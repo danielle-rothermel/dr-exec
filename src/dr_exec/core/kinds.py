@@ -82,6 +82,30 @@ class ProtocolFailureCode(StrEnum):
 
 
 @verify(UNIQUE)
+class ExecutorFailureCode(StrEnum):
+    TARGET_NOT_SUPPORTED = "target_not_supported"
+    BOOTSTRAP_TIMEOUT = "bootstrap_timeout"
+    TRANSPORT_WORKER_FAILED = "transport_worker_failed"
+    STDIN_TRANSPORT_TAKEN = "stdin_transport_taken"
+    PROTOCOL_TRANSPORT_TAKEN = "protocol_transport_taken"
+    TRANSPORT_JOIN_TIMEOUT = "transport_join_timeout"
+    BOOTSTRAP_START_FAILED = "bootstrap_start_failed"
+    NO_DRAIN_STATE = "no_drain_state"
+    RECORDING_OPERATION_FAILED = "recording_operation_failed"
+    POOL_CAPACITY_UNRESOLVED = "pool_capacity_unresolved"
+    POOL_INVALID_STATE = "pool_invalid_state"
+    POOL_WRONG_EVENT_LOOP = "pool_wrong_event_loop"
+    POOL_NO_SCHEDULER = "pool_no_scheduler"
+    SCHEDULER_BROKEN = "scheduler_broken"
+    WORKER_POOL_TARGET_MISMATCH = "worker_pool_target_mismatch"
+    WORKER_POOL_ENTRY_POINT_MISMATCH = "worker_pool_entry_point_mismatch"
+    IMPORTABLE_JSON_TARGET_MISMATCH = "importable_json_target_mismatch"
+    IMPORTABLE_JSON_RECEIPT_MISMATCH = "importable_json_receipt_mismatch"
+    FAKE_NO_RESPONSE = "fake_no_response"
+    FAKE_RECEIPT_MISMATCH = "fake_receipt_mismatch"
+
+
+@verify(UNIQUE)
 class FailureOwner(StrEnum):
     NONE = "none"
     PAYLOAD = "payload"
@@ -127,6 +151,7 @@ __all__ = [
     "EnvGrantKind",
     "ExecutionPoolState",
     "ExecutionTargetKind",
+    "ExecutorFailureCode",
     "FailureOwner",
     "LimitKind",
     "OutcomeKind",

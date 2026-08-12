@@ -1432,6 +1432,8 @@ def test_finalization_faults_preserve_the_latest_manifest_and_degrade(
     failure = receipt.failures[0]
     assert failure.operation == "finalize"
     assert failure.errno == error_number
+    assert failure.failure_code is None
+    assert failure.detail is not None
     assert failure.detail.isidentifier()
     assert SECRET_ERROR_DETAIL not in failure.detail
     assert _manifest_bytes(_record_dir(store, running_run)) == committed
@@ -1543,6 +1545,8 @@ def test_a_recording_failure_names_no_rejected_value(
 
     assert isinstance(receipt, DegradedRecordReceipt)
     failure = receipt.failures[0]
+    assert failure.failure_code is None
+    assert failure.detail is not None
     assert SECRET_EXECUTABLE not in failure.detail
     assert SECRET_STDIN.decode() not in failure.detail
     # The detail is a sanitized category, not the dependency's message.
@@ -1884,7 +1888,7 @@ def test_load_rejects_an_equal_content_external_sidecar_symlink(
     stdout_path.unlink()
     stdout_path.symlink_to(external_path)
 
-    with pytest.raises(RecordLoadError, match="does not match its record"):
+    with pytest.raises(RecordLoadError, match="is not a regular file"):
         store.load(run.reference)
 
 

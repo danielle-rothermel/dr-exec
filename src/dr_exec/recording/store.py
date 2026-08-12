@@ -20,14 +20,16 @@ from dr_store import (
     AllocationError,
     DocumentDirectory,
     DocumentDirectoryError,
+    RegularChildFailureReason,
     SidecarSummary,
+    SidecarVerificationError,
     VerifiedRegularChildReadError,
     read_verified_regular_child,
 )
 from pydantic import TypeAdapter, ValidationError
 
 from dr_exec.core.errors import ExecutorFailure, RecordLoadError
-from dr_exec.core.kinds import RecordState
+from dr_exec.core.kinds import ExecutorFailureCode, RecordState
 from dr_exec.core.model import (
     STRUCTURAL_DEPTH_CEILING,
     ContractModel,
@@ -192,6 +194,28 @@ def _artifact_record(
         size_bytes=summary.head_length + summary.tail_length,
         sha256=Sha256Digest(summary.sidecar_hash),
     )
+
+
+def _regular_child_load_error_message(
+    child_label: str,
+    record_dir: Path,
+    reason: RegularChildFailureReason,
+    /,
+) -> str:
+    match reason:
+        case RegularChildFailureReason.MISSING:
+            return f"{child_label} at {record_dir} is missing"
+        case RegularChildFailureReason.NOT_REGULAR:
+            return f"{child_label} at {record_dir} is not a regular file"
+        case RegularChildFailureReason.BOUNDS_EXCEEDED:
+            return f"{child_label} at {record_dir} exceeds read bounds"
+        case RegularChildFailureReason.UNSUPPORTED_PLATFORM:
+            return (
+                f"{child_label} at {record_dir} cannot be verified on "
+                "this platform"
+            )
+        case RegularChildFailureReason.MISMATCH:
+            return f"{child_label} at {record_dir} does not match its record"
 
 
 def _recording_failure(
@@ -363,8 +387,11 @@ class DirectoryRunStore:
             )
         except VerifiedRegularChildReadError as error:
             raise RecordLoadError(
-                f"artifact {artifact.relative_path.as_posix()!r} at "
-                f"{record_dir} does not match its record"
+                _regular_child_load_error_message(
+                    f"artifact {artifact.relative_path.as_posix()!r}",
+                    record_dir,
+                    error.reason,
+                )
             ) from error
 
     def _publish_finalized(
@@ -488,7 +515,10 @@ def _executor_failure(operation: str, /) -> Iterator[None]:
     try:
         yield
     except (DocumentDirectoryError, RecordLoadError) as error:
-        raise ExecutorFailure(f"could not {operation}") from error
+        raise ExecutorFailure(
+            f"could not {operation}",
+            code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+        ) from error
 
 
 def _directory(record_dir: Path, /) -> DocumentDirectory:
@@ -563,10 +593,18 @@ def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:
                 expected_head_length=stream.head_bytes,
                 expected_tail_length=stream.tail_bytes,
             )
+        except SidecarVerificationError as error:
+            raise RecordLoadError(
+                _regular_child_load_error_message(
+                    f"sidecar {artifact.relative_path}",
+                    record_dir,
+                    error.reason,
+                )
+            ) from error
         except DocumentDirectoryError as error:
             raise RecordLoadError(
-                f"sidecar {artifact.relative_path} at {record_dir} does not "
-                "match its record"
+                f"could not verify sidecar {artifact.relative_path} at "
+                f"{record_dir}"
             ) from error
 
 

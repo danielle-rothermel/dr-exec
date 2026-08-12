@@ -6,6 +6,7 @@ from threading import Lock
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
+from dr_exec.core.kinds import ExecutorFailureCode
 from dr_exec.declarations.models import ExecutionJob
 from dr_exec.declarations.validation import validate_declaration
 from dr_exec.recording.models import CompletedExecution, FakeRecordReceipt
@@ -77,7 +78,8 @@ class FakeExecutor:
     def _next_response(self) -> CompletedExecution:
         if not self._responses:
             raise ExecutorFailure(
-                "the fake executor has no scripted response left"
+                "the fake executor has no scripted response left",
+                code=ExecutorFailureCode.FAKE_NO_RESPONSE,
             )
         return self._responses.popleft()
 
@@ -92,7 +94,8 @@ def _fake_receipted(completed: CompletedExecution, /) -> CompletedExecution:
     if not isinstance(completed.record_receipt, FakeRecordReceipt):
         raise ExecutorFailure(
             "fake completions must carry a fake record receipt, not "
-            f"{completed.record_receipt.kind}"
+            f"{completed.record_receipt.kind}",
+            code=ExecutorFailureCode.FAKE_RECEIPT_MISMATCH,
         )
     return completed
 

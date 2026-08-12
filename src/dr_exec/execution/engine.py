@@ -23,6 +23,7 @@ from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import DeclarationError, ExecutorFailure
 from dr_exec.core.kinds import (
     BudgetAxis,
+    ExecutorFailureCode,
     OutputOverflowPolicy,
     RecordState,
 )
@@ -196,7 +197,8 @@ def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
         case InProcessImportableJsonTarget():
             raise ExecutorFailure(
                 "the process executor cannot run in-process importable JSON "
-                "targets"
+                "targets",
+                code=ExecutorFailureCode.TARGET_NOT_SUPPORTED,
             )
 
 
@@ -354,7 +356,8 @@ def _read_setup_status(descriptor: int, startup_ns: int | None, /) -> bytes:
                 if remaining <= 0 or not selector.select(remaining):
                     raise ExecutorFailure(
                         "the execution bootstrap did not reach the payload "
-                        "within the startup budget"
+                        "within the startup budget",
+                        code=ExecutorFailureCode.BOOTSTRAP_TIMEOUT,
                     )
             try:
                 chunk = os.read(descriptor, _DRAIN_CHUNK_BYTES)
@@ -393,7 +396,8 @@ class _TransportWorker:
         if error is None:
             return
         raise ExecutorFailure(
-            f"the {self.name} transport worker failed"
+            f"the {self.name} transport worker failed",
+            code=ExecutorFailureCode.TRANSPORT_WORKER_FAILED,
         ) from error
 
 
@@ -555,14 +559,20 @@ class _Transports:
     def take_stdin(self) -> int:
         descriptor = self.stdin_write
         if descriptor is None:  # pragma: no cover - one call per attempt
-            raise ExecutorFailure("the stdin transport was already taken")
+            raise ExecutorFailure(
+                "the stdin transport was already taken",
+                code=ExecutorFailureCode.STDIN_TRANSPORT_TAKEN,
+            )
         self.stdin_write = None
         return descriptor
 
     def take_protocol_reader(self) -> int:
         descriptor = self.protocol_forward_read
         if descriptor is None:  # pragma: no cover - one call per attempt
-            raise ExecutorFailure("the protocol transport was already taken")
+            raise ExecutorFailure(
+                "the protocol transport was already taken",
+                code=ExecutorFailureCode.PROTOCOL_TRANSPORT_TAKEN,
+            )
         self.protocol_forward_read = None
         return descriptor
 
@@ -593,7 +603,8 @@ class _Transports:
             worker.thread.join(remaining)
         if any(worker.thread.is_alive() for worker in self.threads):
             raise ExecutorFailure(
-                "payload transports did not reach EOF within the join budget"
+                "payload transports did not reach EOF within the join budget",
+                code=ExecutorFailureCode.TRANSPORT_JOIN_TIMEOUT,
             )
         for worker in self.threads:
             worker.raise_if_failed()
@@ -661,8 +672,13 @@ def _degraded_from(
 ) -> RealRecordReceipt:
     try:
         receipt = store.finalize(run, result)
-    except ExecutorFailure:
-        return _degraded_receipt(run, "finalize", prior_failures)
+    except ExecutorFailure as error:
+        return _degraded_receipt(
+            run,
+            "finalize",
+            prior_failures,
+            failure_code=error.code,
+        )
     if not prior_failures:
         return receipt
     return DegradedRecordReceipt(
@@ -685,6 +701,8 @@ def _degraded_receipt(
     operation: str,
     prior_failures: tuple[RecordingFailure, ...] = (),
     /,
+    *,
+    failure_code: ExecutorFailureCode,
 ) -> RealRecordReceipt:
     return DegradedRecordReceipt(
         execution_id=run.execution_id,
@@ -697,7 +715,7 @@ def _degraded_receipt(
             RecordingFailure(
                 operation=operation,
                 errno=None,
-                detail=ExecutorFailure.__name__,
+                failure_code=failure_code,
             ),
         ),
     )
@@ -719,7 +737,8 @@ class _EngineCall:
         if isinstance(job.target, InProcessImportableJsonTarget):
             raise ExecutorFailure(
                 "the process executor cannot run in-process importable JSON "
-                "targets"
+                "targets",
+                code=ExecutorFailureCode.TARGET_NOT_SUPPORTED,
             )
         _validate_platform()
         target = _target_of(job, self.runtime)
@@ -863,7 +882,8 @@ class _EngineCall:
             _close_descriptors(child_ends)
             transports.close()
             raise ExecutorFailure(
-                "could not start the execution bootstrap"
+                "could not start the execution bootstrap",
+                code=ExecutorFailureCode.BOOTSTRAP_START_FAILED,
             ) from error
         # Parent copies of child ends would suppress EOF.
         _close_descriptors(child_ends)
@@ -928,7 +948,10 @@ class _EngineCall:
             )
         state = observation.reached_payload()
         if state is None:  # pragma: no cover - a raise already left the call
-            raise ExecutorFailure("the attempt produced no drain state")
+            raise ExecutorFailure(
+                "the attempt produced no drain state",
+                code=ExecutorFailureCode.NO_DRAIN_STATE,
+            )
         protocol = state.protocol_result
         return self._complete(
             observation.latest_run(),
@@ -1007,7 +1030,7 @@ class _EngineCall:
                 RecordingFailure(
                     operation="mark_running",
                     errno=None,
-                    detail=type(error).__name__,
+                    failure_code=error.code,
                 ),
             )
 

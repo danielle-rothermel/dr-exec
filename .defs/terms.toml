@@ -153,6 +153,17 @@ exported_symbols = [
 ]
 
 [[terms]]
+name = "executor failure code"
+definition = """
+A closed discriminator for executor-side infrastructure faults surfaced on \
+`ExecutorFailure` and, when recording degrades, persisted on \
+`RecordingFailure.failure_code`. Storage-layer finalize faults continue to \
+report a sanitized exception class name in `RecordingFailure.detail` instead."""
+exported_symbols = [
+  "dr_exec.ExecutorFailureCode",
+]
+
+[[terms]]
 name = "importable entry point"
 definition = """
 An exact Python module name and module-level callable name resolved in the \

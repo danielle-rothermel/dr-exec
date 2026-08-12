@@ -33,15 +33,15 @@ from dr_exec import (
     FixedPoolCapacity,
     JobId,
 )
-from dr_exec.core.kinds import CapacitySource
+from dr_exec.core.kinds import CapacitySource, ExecutorFailureCode
 from dr_exec.execution.executor import _run_batch
 from dr_exec.scheduling.pool import _OwnedContext, _StreamOwner, _unowned
 from dr_exec.scheduling.scheduler import (
+    AdmissionResult,
+    ExecutionScheduler,
     SchedulerBroken,
-    _AdmissionResult,
     _Admitted,
     _Completion,
-    _ExecutionScheduler,
 )
 
 if TYPE_CHECKING:
@@ -234,12 +234,12 @@ def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
     executor, responder = gated_executor()
     batch = jobs(3)
     first, second, third = batch
-    scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
+    scheduler: ExecutionScheduler[None] = ExecutionScheduler(
         executor=executor, capacity=2
     )
     try:
-        assert scheduler.admit(first, None) is _AdmissionResult.ADMITTED
-        assert scheduler.admit(second, None) is _AdmissionResult.ADMITTED
+        assert scheduler.admit(first, None) is AdmissionResult.ADMITTED
+        assert scheduler.admit(second, None) is AdmissionResult.ADMITTED
         responder.await_arrival_count(2)
         assert set(responder.started) == {first.job_id, second.job_id}
         assert not scheduler.can_admit()
@@ -256,7 +256,7 @@ def test_a_completed_result_keeps_its_slot_until_it_is_delivered() -> None:
         )
         assert scheduler.can_admit()
 
-        assert scheduler.admit(third, None) is _AdmissionResult.ADMITTED
+        assert scheduler.admit(third, None) is AdmissionResult.ADMITTED
         responder.await_arrival(third.job_id)
     finally:
         responder.release_all(batch)
@@ -360,7 +360,7 @@ def test_cancelling_a_waiting_stream_does_not_take_its_completion(
     blocking_waiter_entered = threading.Event()
     blocking_waiter_returned = threading.Event()
 
-    class _ObservedScheduler(_ExecutionScheduler[object]):
+    class _ObservedScheduler(ExecutionScheduler[object]):
         def take_completion(self) -> _Completion[object] | None:
             blocking_waiter_entered.set()
             waiter_entered.set()
@@ -380,7 +380,7 @@ def test_cancelling_a_waiting_stream_does_not_take_its_completion(
             return completion
 
     monkeypatch.setattr(
-        "dr_exec.scheduling.pool._ExecutionScheduler", _ObservedScheduler
+        "dr_exec.scheduling.pool.ExecutionScheduler", _ObservedScheduler
     )
     executor, responder = gated_executor()
     only = jobs(1)[0]
@@ -681,7 +681,7 @@ def test_drain_lets_admitted_work_finish_uncancelled() -> None:
         async with pool:
             scheduler = pool._scheduler
             assert scheduler is not None
-            assert scheduler.admit(only, None) is _AdmissionResult.ADMITTED
+            assert scheduler.admit(only, None) is AdmissionResult.ADMITTED
             await asyncio.to_thread(responder.await_arrival, only.job_id)
             draining = asyncio.create_task(pool.drain())
             await asyncio.to_thread(_await_closed_intake, scheduler)
@@ -710,7 +710,7 @@ def test_cancelling_a_close_still_finishes_pool_cleanup(
         await pool.__aenter__()
         scheduler = pool._scheduler
         assert scheduler is not None
-        assert scheduler.admit(only, None) is _AdmissionResult.ADMITTED
+        assert scheduler.admit(only, None) is AdmissionResult.ADMITTED
         await asyncio.to_thread(responder.await_arrival, only.job_id)
 
         close = pool.drain if close_kind == "drain" else pool.abort
@@ -885,7 +885,10 @@ def test_a_failing_executor_call_breaks_the_pool() -> None:
     def explode(
         _job: ExecutionJob, _token: CancelToken | None, /
     ) -> CompletedExecution:
-        raise ExecutorFailure("machinery failed")
+        raise ExecutorFailure(
+            "machinery failed",
+            code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+        )
 
     pool = fixed_pool(FakeExecutor(responder=explode), 1)
 
@@ -912,7 +915,10 @@ def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
     ) -> CompletedExecution:
         arrived.set()
         wait_for(release, what="the failing call to be released")
-        raise ExecutorFailure("machinery failed")
+        raise ExecutorFailure(
+            "machinery failed",
+            code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+        )
 
     pool = fixed_pool(FakeExecutor(responder=explode_when_released), 1)
 
@@ -921,7 +927,7 @@ def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
             scheduler = pool._scheduler
             assert scheduler is not None
             assert (
-                scheduler.admit(jobs(1)[0], None) is _AdmissionResult.ADMITTED
+                scheduler.admit(jobs(1)[0], None) is AdmissionResult.ADMITTED
             )
             await asyncio.to_thread(
                 wait_for, arrived, what="the failing call to start"
@@ -941,7 +947,7 @@ def test_a_break_landing_during_a_close_is_the_state_the_close_lands_in(
     assert pool.state is ExecutionPoolState.BROKEN
 
 
-def _await_closed_intake(scheduler: _ExecutionScheduler[object], /) -> None:
+def _await_closed_intake(scheduler: ExecutionScheduler[object], /) -> None:
     with scheduler._condition:
         if not scheduler._condition.wait_for(
             lambda: scheduler._intake_closed, WATCHDOG_SECONDS
@@ -950,7 +956,7 @@ def _await_closed_intake(scheduler: _ExecutionScheduler[object], /) -> None:
 
 
 def _await_scheduler_publication(
-    scheduler: _ExecutionScheduler[object], *job_ids: JobId
+    scheduler: ExecutionScheduler[object], *job_ids: JobId
 ) -> None:
     expected = set(job_ids)
     with scheduler._condition:
@@ -971,7 +977,7 @@ def _await_scheduler_publication(
 
 
 def _await_ready_count(
-    scheduler: _ExecutionScheduler[object], count: int, /
+    scheduler: ExecutionScheduler[object], count: int, /
 ) -> None:
     with scheduler._condition:
         if not scheduler._condition.wait_for(
@@ -982,7 +988,7 @@ def _await_ready_count(
             )
 
 
-def _await_scheduler_break[T](scheduler: _ExecutionScheduler[T], /) -> None:
+def _await_scheduler_break[T](scheduler: ExecutionScheduler[T], /) -> None:
     with scheduler._condition:
         if not scheduler._condition.wait_for(
             lambda: scheduler._broken is not None, WATCHDOG_SECONDS
@@ -1002,15 +1008,18 @@ def test_a_job_queued_behind_a_failing_call_is_never_started() -> None:
         started.append(job.job_id)
         failing_arrived.set()
         wait_for(release_failing, what="the failing call to be released")
-        raise ExecutorFailure("machinery failed")
+        raise ExecutorFailure(
+            "machinery failed",
+            code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+        )
 
-    scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
+    scheduler: ExecutionScheduler[None] = ExecutionScheduler(
         executor=FakeExecutor(responder=explode_on_the_failing_call),
         capacity=1,
     )
     queued_token = CancelToken()
     try:
-        assert scheduler.admit(failing, None) is _AdmissionResult.ADMITTED
+        assert scheduler.admit(failing, None) is AdmissionResult.ADMITTED
         wait_for(failing_arrived, what="the failing call to start")
         # The bound is full and the one worker is inside the failing
         # call, so this is the window a break must not dispatch out of.
@@ -1046,7 +1055,10 @@ class _BreakAfterBuffering:
         wait_for(self.gate(job.job_id), what=f"job {job.job_id} to release")
         try:
             if job.job_id == self._failing:
-                raise ExecutorFailure("machinery failed")
+                raise ExecutorFailure(
+                    "machinery failed",
+                    code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+                )
             return completion_for(job.job_id)
         finally:
             self.executor_returned(job.job_id).set()
@@ -1148,15 +1160,15 @@ def test_a_batch_break_delivers_the_buffered_tail_before_it_raises(
 ) -> None:
     first, second, failing = jobs(3)
     responder = _BreakAfterBuffering(failing.job_id)
-    captured: list[_ExecutionScheduler[object]] = []
+    captured: list[ExecutionScheduler[object]] = []
 
-    class _CapturingScheduler(_ExecutionScheduler[object]):
+    class _CapturingScheduler(ExecutionScheduler[object]):
         def __init__(self, *, executor: Executor, capacity: int) -> None:
             super().__init__(executor=executor, capacity=capacity)
             captured.append(self)
 
     monkeypatch.setattr(
-        "dr_exec.execution.executor._ExecutionScheduler", _CapturingScheduler
+        "dr_exec.execution.executor.ExecutionScheduler", _CapturingScheduler
     )
     parked = threading.Event()
     may_proceed = threading.Event()
@@ -1306,12 +1318,12 @@ def test_concurrent_feeders_racing_the_last_slot_never_exceed_the_bound() -> (
     may_admit = asyncio.Event()
     parked = 0
 
-    class _PeakRecordingScheduler(_ExecutionScheduler[object]):
+    class _PeakRecordingScheduler(ExecutionScheduler[object]):
         peak_residents = 0
 
         def admit(
             self, job: ExecutionJob, context: object, /
-        ) -> _AdmissionResult:
+        ) -> AdmissionResult:
             result = super().admit(job, context)
             with self._condition:
                 type(self).peak_residents = max(
@@ -1366,7 +1378,7 @@ def test_cancellation_tokens_are_bounded_by_capacity_not_by_history() -> None:
     delivered = 0
     peak_tokens = 0
     batch = jobs(40)
-    scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
+    scheduler: ExecutionScheduler[None] = ExecutionScheduler(
         executor=immediate_executor(), capacity=capacity
     )
     source = iter(batch)
@@ -1425,15 +1437,15 @@ def test_an_abandoned_batch_still_drains_its_admitted_work(
     executor, responder = gated_executor()
     batch = jobs(2)
     first, held = batch
-    captured: list[_ExecutionScheduler[object]] = []
+    captured: list[ExecutionScheduler[object]] = []
 
-    class _CapturingScheduler(_ExecutionScheduler[object]):
+    class _CapturingScheduler(ExecutionScheduler[object]):
         def __init__(self, *, executor: Executor, capacity: int) -> None:
             super().__init__(executor=executor, capacity=capacity)
             captured.append(self)
 
     monkeypatch.setattr(
-        "dr_exec.execution.executor._ExecutionScheduler", _CapturingScheduler
+        "dr_exec.execution.executor.ExecutionScheduler", _CapturingScheduler
     )
     stream = batch_of(executor, batch, slots=2)
 
@@ -1651,7 +1663,7 @@ def test_releasing_a_departed_owners_completions_frees_their_capacity() -> (
     remains, would wait on it forever.
     """
 
-    scheduler: _ExecutionScheduler[object] = _ExecutionScheduler(
+    scheduler: ExecutionScheduler[object] = ExecutionScheduler(
         executor=immediate_executor(), capacity=3
     )
     owner = _StreamOwner()
@@ -1681,13 +1693,13 @@ def test_a_map_stream_releases_its_ownership_when_it_ends(
 
     releases: list[object] = []
 
-    class _RecordingScheduler(_ExecutionScheduler[object]):
+    class _RecordingScheduler(ExecutionScheduler[object]):
         def release_owned(self, owned_by: Callable[[object], bool], /) -> None:
             releases.append(owned_by)
             super().release_owned(owned_by)
 
     monkeypatch.setattr(
-        "dr_exec.scheduling.pool._ExecutionScheduler", _RecordingScheduler
+        "dr_exec.scheduling.pool.ExecutionScheduler", _RecordingScheduler
     )
     pool = fixed_pool(immediate_executor(), 2)
 
@@ -1710,7 +1722,7 @@ def test_a_break_reaches_a_map_stream_holding_no_completion_of_its_own() -> (
     stream that waits for them instead of raising would wait forever.
     """
 
-    scheduler: _ExecutionScheduler[object] = _ExecutionScheduler(
+    scheduler: ExecutionScheduler[object] = ExecutionScheduler(
         executor=FakeExecutor(), capacity=4
     )
     foreign: _Completion[object] = _Completion(

@@ -16,6 +16,7 @@ from dr_exec.core.kinds import (
     BudgetAxis,
     ContainmentProfile,
     ExecutionTargetKind,
+    ExecutorFailureCode,
     FailureOwner,
     OutcomeKind,
     ProtocolFailureCode,
@@ -404,7 +405,24 @@ type RunRecord = Annotated[
 class RecordingFailure(ContractModel):
     operation: str
     errno: int | None
-    detail: str
+    detail: str | None = None
+    failure_code: ExecutorFailureCode | None = None
+
+    @model_validator(mode="after")
+    def failure_discriminator_is_exclusive(self) -> RecordingFailure:
+        has_detail = self.detail is not None
+        has_code = self.failure_code is not None
+        if has_detail == has_code:
+            raise ValueError(
+                "RecordingFailure must carry either detail or failure_code, "
+                "not both or neither"
+            )
+        if has_detail and not self.detail.isidentifier():
+            raise ValueError(
+                "RecordingFailure detail must be a sanitized exception "
+                "class name"
+            )
+        return self
 
 
 class CompleteRecordReceipt(ContractModel):
