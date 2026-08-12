@@ -4,7 +4,7 @@ import os
 import sys
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -39,6 +39,7 @@ from dr_exec import (
     IsolatedHostPythonRuntime,
     JobId,
     OutputArtifactRecord,
+    PreparedPythonProcess,
     PreparedRecord,
     ProcessExecutor,
     ProcessRecord,
@@ -48,6 +49,8 @@ from dr_exec import (
     RecordState,
     RunRecord,
     RunRecordReference,
+    RuntimeRecord,
+    SpawnAbsentOutcome,
     TrustedPythonTarget,
     TrustedPythonTargetRecord,
     UntrustedPythonTarget,
@@ -262,6 +265,25 @@ def sole_mapping(completed: CompletedExecution, /) -> Mapping[str, object]:
     (payload,) = payloads_of(completed)
     assert isinstance(payload, Mapping)
     return cast("Mapping[str, object]", payload)
+
+
+@dataclass(frozen=True, slots=True)
+class _RelativeArgvRuntime:
+    """A nonconforming runtime whose ``prepare()`` returns a relative argv[0]."""
+
+    delegate: IsolatedHostPythonRuntime
+    name: str
+
+    def prepare(
+        self,
+        target: TrustedPythonTarget | UntrustedPythonTarget,
+        /,
+    ) -> PreparedPythonProcess:
+        prepared = self.delegate.prepare(target)
+        return replace(prepared, argv=(self.name, *prepared.argv[1:]))
+
+    def describe(self) -> RuntimeRecord:
+        return self.delegate.describe()
 
 
 def protocol_failure_of(
@@ -766,6 +788,28 @@ def test_the_record_carries_python_specific_durable_evidence(
         ContainmentProfile.PROCESS_BOUNDARY_ONLY
     )
     assert target.runtime == harness.executor.runtime.describe()
+
+
+@requires_macos
+def test_a_relative_prepared_argv_fails_classified_without_a_granted_path(
+    harness: Harness,
+) -> None:
+    executor = ProcessExecutor(
+        runtime=_RelativeArgvRuntime(
+            delegate=cast(
+                "IsolatedHostPythonRuntime", harness.executor.runtime
+            ),
+            name="python3-does-not-exist",
+        ),
+        run_store=harness.executor.run_store,
+    )
+
+    completed = executor.run_blocking(harness.job(ECHO_DRIVER))
+
+    assert completed.result.outcome == SpawnAbsentOutcome(
+        executable="python3-does-not-exist"
+    )
+    assert completed.result.attribution.owner is FailureOwner.EXECUTOR
 
 
 @requires_macos

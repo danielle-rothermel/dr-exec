@@ -34,9 +34,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on `asyncio.Semaphore` with an unread width field.
 - Removed the `_owned_by` private keyword parameter from the public
   `ExecutionPool.run_stream`.
+- **Breaking:** Removed `ExecutorFailureCode.NO_DRAIN_STATE` along with the
+  defensive engine raise that produced it for a state the attempt flow cannot
+  reach; the golden receipt-kind vectors re-pin without it.
+- Removed the engine's `_AttemptObservation` mutable out-parameter, which
+  carried five fields across three methods; `_observe_attempt` now returns a
+  frozen `_SetupFailed | _ReachedPayload` result that `_carry_attempt` matches
+  on, and `_mark_running` returns its run-and-failures pair instead of
+  mutating.
 
 ### Changed
 
+- **Breaking:** `ProcessExecutor` admits jobs through the same
+  `validate_declaration` gate every other executor uses, called right after the
+  platform check, so one function answers what dr-exec checks before it spawns.
+  The engine's own `validate_input_budget` call and the resolvability check
+  buried inside `_resolve_executable` are gone; `_resolve_executable` is now a
+  pure `shutil.which` lookup. The input budget is therefore checked against the
+  job's declared input bytes rather than the bytes the `Runtime` prepared —
+  identical for the shipped runtime, but the `Runtime` Protocol does not
+  guarantee it. In-process targets are still rejected ahead of the shared gate,
+  so they keep reporting `ExecutorFailureCode.TARGET_NOT_SUPPORTED`, and
+  `_target_of`'s unreachable in-process arm is an `AssertionError` naming that
+  ordering. The `Runtime` Protocol now documents the two conformance
+  obligations that make that pre-spawn enforcement truthful for prepared
+  artifacts — an absolute `argv[0]` and request bytes that are exactly the
+  declared request's canonical transport bytes — and `_resolve_executable`
+  reads a granted `PATH` optionally, so a nonconforming relative `argv[0]`
+  under an empty environment grant reaches the spawn and completes as a
+  classified `SpawnAbsentOutcome` instead of raising `KeyError`.
+- The engine's protocol descriptors are one `_ProtocolTransport` group on
+  `_Transports.protocol`, so the all-set-or-all-unset correlation with a
+  protocol-speaking target is expressed once at construction and the pump guard
+  is a single `is not None`.
+- Renamed the engine's `_degraded_from` to `_finalized_receipt` — it is the
+  normal finalize path, degraded or not — and made it an `_EngineCall` method
+  so the redundant store parameter drops out; the pure constructor it calls is
+  now `_degraded_from_failure`.
+- `_await_child` waits with one flattened timeout computation; the wait was
+  always cooperatively bounded, so the constant-true local that pretended
+  otherwise is gone.
+- `execution.engine.__all__` names the two symbols the package imports,
+  `run_execution` and `SCRATCH_DIRECTORY_PREFIX`; the supported-platform
+  constant is module-private.
 - One shared `execution.outcomes.completed_execution` now builds every
   record-less completion from an already-constructed receipt, so the in-process
   and worker-pool executors keep only their own receipt and their own attempt

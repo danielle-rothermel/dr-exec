@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from dr_serialize import build_identity_document
 
 from dr_exec import (
     Budgets,
@@ -13,9 +14,13 @@ from dr_exec import (
     DirectoryRunStore,
     EnvGrant,
     ExecutionJob,
+    ExecutorFailure,
+    ExecutorFailureCode,
     ExecutorSelfBudgets,
     ExitedOutcome,
     FinalizedRecord,
+    ImportableEntryPoint,
+    InProcessImportableJsonTarget,
     IsolatedHostPythonRuntime,
     JobId,
     ProcessExecutor,
@@ -97,6 +102,34 @@ def test_run_binds_the_finalized_manifest_to_the_returned_execution(
     record = store.load(reference_of(completed))
     assert isinstance(record, FinalizedRecord)
     assert record.declaration.execution_id == completed.result.execution_id
+
+
+def test_an_in_process_target_is_refused_before_declaration_validation(
+    executor: ProcessExecutor,
+) -> None:
+    job = ExecutionJob(
+        job_id=JobId(uuid4()),
+        target=InProcessImportableJsonTarget(
+            entry_point=ImportableEntryPoint(
+                module_name="support.in_process_entry_points",
+                attribute_name="echo",
+            ),
+            request=build_identity_document(
+                schema="dr_exec.test_request",
+                schema_version=1,
+                payload={"echo": "ran"},
+            ),
+        ),
+        # A grant the shared declaration gate refuses, so the reported code
+        # shows which gate ran first.
+        env=EnvGrant.fixed({"PATH": "/usr/bin"}),
+        budgets=Budgets.unbudgeted(),
+    )
+
+    with pytest.raises(ExecutorFailure) as raised:
+        executor.run_blocking(job)
+
+    assert raised.value.code is ExecutorFailureCode.TARGET_NOT_SUPPORTED
 
 
 def test_run_defaults_to_unbudgeted_self_budgets(
