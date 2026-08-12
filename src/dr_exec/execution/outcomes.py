@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dr_exec.core.kinds import FailureOwner, ProtocolFailureCode
+from dr_exec.core.kinds import BudgetAxis, FailureOwner, ProtocolFailureCode
 from dr_exec.recording.models import (
     BudgetExceededOutcome,
     CancelledOutcome,
@@ -43,6 +43,11 @@ def attribute_outcome(outcome: ExecutionOutcome, /) -> ExecutionAttribution:
                 detail="the child could not be started",
             )
         case BudgetExceededOutcome():
+            if outcome.axis is BudgetAxis.WALL_TIME:
+                return ExecutionAttribution(
+                    owner=FailureOwner.EXECUTOR,
+                    detail="the executor enforced the wall-time budget",
+                )
             return ExecutionAttribution(
                 owner=FailureOwner.PAYLOAD,
                 detail=f"the payload exceeded its {outcome.axis} budget",

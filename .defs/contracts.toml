@@ -211,6 +211,21 @@ it says so and gives up the guarantees the fresh child provided."""
 date = "2026-08-05"
 
 [[contracts]]
+title = "Scheduler break drops undelivered work"
+statement = """
+When scheduling machinery breaks, the pool raises `SchedulerBroken`. Buffered \
+completions drain before the raise; queued admitted work is cancelled with no \
+terminal outcome; in-flight results arriving after delivery ends are not \
+delivered. Consumers must reconcile the entire in-flight window rather than \
+trust per-job results alone. Generations dropped by a break have no \
+`CompletedExecution` and must be accounted as failed infrastructure, \
+requeueable by caller retry policy rather than by `dr-exec`."""
+rationale = """
+This is the only path that produces no terminal outcome. Silent under-count \
+against the planned population corrupts downstream accounting."""
+date = "2026-08-11"
+
+[[contracts]]
 title = "Importable JSON process jobs reuse the execution path"
 statement = """
 An importable JSON process job is an ordinary execution job run through the \

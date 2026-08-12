@@ -23,9 +23,7 @@ from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import DeclarationError, ExecutorFailure
 from dr_exec.core.kinds import (
     BudgetAxis,
-    FailureOwner,
     OutputOverflowPolicy,
-    ProtocolFailureCode,
     RecordState,
 )
 from dr_exec.core.names import ExecutionId
@@ -45,6 +43,7 @@ from dr_exec.declarations.validation import (
     validate_command_resolvability,
     validate_input_budget,
 )
+from dr_exec.execution.outcomes import attribute_outcome
 from dr_exec.execution.retention import PayloadRetention, StreamRetention
 from dr_exec.execution.spawn import (
     ESCALATION_SIGNAL,
@@ -71,7 +70,6 @@ from dr_exec.recording.models import (
     CancelledOutcome,
     CompletedExecution,
     DegradedRecordReceipt,
-    ExecutionAttribution,
     ExecutionMeasurements,
     ExecutionOutcome,
     ExecutionResult,
@@ -643,52 +641,6 @@ def _exit_outcome(returncode: int, /) -> ExecutionOutcome:
     return ExitedOutcome(exit_code=returncode)
 
 
-def _attribute(outcome: ExecutionOutcome, /) -> ExecutionAttribution:
-    match outcome:
-        case ExitedOutcome():
-            return ExecutionAttribution(
-                owner=FailureOwner.NONE
-                if outcome.exit_code == 0
-                else FailureOwner.PAYLOAD,
-                detail=None
-                if outcome.exit_code == 0
-                else "the payload exited nonzero",
-            )
-        case SignaledOutcome():
-            return ExecutionAttribution(
-                owner=FailureOwner.PAYLOAD,
-                detail="the payload died on a signal",
-            )
-        case SpawnAbsentOutcome():
-            return ExecutionAttribution(
-                owner=FailureOwner.EXECUTOR,
-                detail="the declared executable was not found",
-            )
-        case SpawnFailedOutcome():
-            return ExecutionAttribution(
-                owner=FailureOwner.MACHINE,
-                detail="the child could not be started",
-            )
-        case BudgetExceededOutcome():
-            return ExecutionAttribution(
-                owner=FailureOwner.PAYLOAD,
-                detail=f"the payload exceeded its {outcome.axis} budget",
-            )
-        case ProtocolFailedOutcome():
-            # Executor self-budget exhaustion outranks payload attribution.
-            return ExecutionAttribution(
-                owner=FailureOwner.EXECUTOR
-                if outcome.failure_code is ProtocolFailureCode.OVERSIZED_FRAME
-                else FailureOwner.PAYLOAD,
-                detail=outcome.failure_detail,
-            )
-        case CancelledOutcome():
-            return ExecutionAttribution(
-                owner=FailureOwner.NONE,
-                detail="the call was cancelled",
-            )
-
-
 def _empty_payload_outputs() -> PayloadOutputs:
     empty = RetainedPayloadStream(
         head=b"",
@@ -833,7 +785,7 @@ class _EngineCall:
         result = ExecutionResult(
             execution_id=prepared.execution_id,
             outcome=outcome,
-            attribution=_attribute(outcome),
+            attribution=attribute_outcome(outcome),
             protocol_outputs=(),
             payload_outputs=_empty_payload_outputs(),
             measurements=ExecutionMeasurements(
@@ -1163,7 +1115,7 @@ class _EngineCall:
         result = ExecutionResult(
             execution_id=run.execution_id,
             outcome=outcome,
-            attribution=_attribute(outcome),
+            attribution=attribute_outcome(outcome),
             protocol_outputs=protocol_outputs,
             payload_outputs=payload_outputs,
             measurements=ExecutionMeasurements(

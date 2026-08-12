@@ -118,14 +118,18 @@ def _outcome_record(outcome: ExecutionOutcome, /) -> ExecutionOutcomeRecord:
         case SignaledOutcome():
             return SignaledOutcomeRecord(signal_number=outcome.signal_number)
         case SpawnAbsentOutcome():
-            return SpawnAbsentOutcomeRecord()
+            return SpawnAbsentOutcomeRecord(executable=outcome.executable)
         case SpawnFailedOutcome():
-            return SpawnFailedOutcomeRecord(errno=outcome.errno)
+            return SpawnFailedOutcomeRecord(
+                errno=outcome.errno,
+                error_message=outcome.error_message,
+            )
         case BudgetExceededOutcome():
             return BudgetExceededOutcomeRecord(axis=outcome.axis)
         case ProtocolFailedOutcome():
             return ProtocolFailedOutcomeRecord(
                 failure_code=outcome.failure_code,
+                failure_detail=outcome.failure_detail,
                 accepted_output_count=outcome.accepted_output_count,
             )
         case CancelledOutcome():
@@ -136,7 +140,10 @@ def _attribution_record(
     attribution: ExecutionAttribution,
     /,
 ) -> ExecutionAttributionRecord:
-    return ExecutionAttributionRecord(owner=attribution.owner)
+    return ExecutionAttributionRecord(
+        owner=attribution.owner,
+        detail=attribution.detail,
+    )
 
 
 def _retained_stream_record(

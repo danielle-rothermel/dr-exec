@@ -33,7 +33,6 @@ from dr_exec import (
 )
 from dr_exec.execution.engine import (
     _COOPERATIVE_WAKE_SECONDS,
-    _attribute,
     _await_child,
     _DrainState,
     _OutputPump,
@@ -41,6 +40,7 @@ from dr_exec.execution.engine import (
     _started_thread,
     _tear_down,
 )
+from dr_exec.execution.outcomes import attribute_outcome
 from dr_exec.execution.retention import PayloadRetention
 from dr_exec.execution.spawn import (
     PAYLOAD_PROTOCOL_DESCRIPTOR,
@@ -370,6 +370,10 @@ def test_a_setup_failure_with_no_reported_errno_still_classifies() -> None:
         ),
         (
             BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME),
+            FailureOwner.EXECUTOR,
+        ),
+        (
+            BudgetExceededOutcome(axis=BudgetAxis.PAYLOAD_OUTPUT),
             FailureOwner.PAYLOAD,
         ),
         (
@@ -394,7 +398,7 @@ def test_a_setup_failure_with_no_reported_errno_still_classifies() -> None:
 def test_every_recognized_outcome_gets_one_evidence_based_owner(
     outcome: ExecutionOutcome, owner: FailureOwner
 ) -> None:
-    assert _attribute(outcome).owner is owner
+    assert attribute_outcome(outcome).owner is owner
 
 
 def test_await_child_wakes_for_transport_failure_without_a_wall_budget() -> (

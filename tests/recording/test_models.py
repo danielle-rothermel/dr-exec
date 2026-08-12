@@ -236,6 +236,7 @@ def test_recorded_protocol_failure_count_must_match_accepted_outputs() -> None:
             execution_id=execution_id,
             outcome=ProtocolFailedOutcomeRecord(
                 failure_code=ProtocolFailureCode.INCOMPLETE_STREAM,
+                failure_detail="diagnostic",
                 accepted_output_count=1,
             ),
             attribution=ExecutionAttributionRecord(owner=FailureOwner.PAYLOAD),

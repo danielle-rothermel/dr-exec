@@ -133,6 +133,7 @@ from dr_exec.scheduling.pool import (
     PoolCapacity,
     resolve_pool_capacity,
 )
+from dr_exec.scheduling.scheduler import SchedulerBroken
 
 __all__ = [
     "AttemptId",
@@ -234,6 +235,7 @@ __all__ = [
     "Runtime",
     "RuntimeKind",
     "RuntimeRecord",
+    "SchedulerBroken",
     "SignaledOutcome",
     "SignaledOutcomeRecord",
     "SpawnAbsentOutcome",

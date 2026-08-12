@@ -37,7 +37,7 @@ from dr_exec import (
     build_in_process_importable_json_job,
     parse_importable_json_result,
 )
-from dr_exec.core.kinds import BudgetAxis
+from dr_exec.core.kinds import BudgetAxis, FailureOwner
 from dr_exec.recording.models import BudgetExceededOutcome
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
@@ -90,6 +90,7 @@ def test_wall_time_budget_exceeds_on_blocking_entry_point() -> None:
 
     assert isinstance(completed.result.outcome, BudgetExceededOutcome)
     assert completed.result.outcome.axis is BudgetAxis.WALL_TIME
+    assert completed.result.attribution.owner is FailureOwner.EXECUTOR
 
 
 def test_system_exit_maps_to_exited_outcome_without_breaking_pool() -> None:

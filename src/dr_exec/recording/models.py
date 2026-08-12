@@ -266,11 +266,13 @@ class SignaledOutcomeRecord(ContractModel):
 
 class SpawnAbsentOutcomeRecord(ContractModel):
     kind: Literal[OutcomeKind.SPAWN_ABSENT] = OutcomeKind.SPAWN_ABSENT
+    executable: str
 
 
 class SpawnFailedOutcomeRecord(ContractModel):
     kind: Literal[OutcomeKind.SPAWN_FAILED] = OutcomeKind.SPAWN_FAILED
     errno: int
+    error_message: str
 
 
 class BudgetExceededOutcomeRecord(ContractModel):
@@ -281,6 +283,7 @@ class BudgetExceededOutcomeRecord(ContractModel):
 class ProtocolFailedOutcomeRecord(ContractModel):
     kind: Literal[OutcomeKind.PROTOCOL_FAILED] = OutcomeKind.PROTOCOL_FAILED
     failure_code: ProtocolFailureCode
+    failure_detail: str
     accepted_output_count: NonNegativeInt
 
 
@@ -307,6 +310,7 @@ class ExecutionAttribution(ContractModel):
 
 class ExecutionAttributionRecord(ContractModel):
     owner: FailureOwner
+    detail: str | None = None
 
 
 class ExecutionMeasurements(ContractModel):

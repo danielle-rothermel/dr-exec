@@ -103,6 +103,7 @@ EXPECTED_PUBLIC_API = (
     "Runtime",
     "RuntimeKind",
     "RuntimeRecord",
+    "SchedulerBroken",
     "SignaledOutcome",
     "SignaledOutcomeRecord",
     "SpawnAbsentOutcome",

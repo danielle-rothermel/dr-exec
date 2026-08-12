@@ -708,6 +708,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert completed.result.outcome == BudgetExceededOutcome(
         axis=BudgetAxis.WALL_TIME
     )
+    assert completed.result.attribution.owner is FailureOwner.EXECUTOR
     assert payloads_of(completed) == [{"index": 0}]
 
 
