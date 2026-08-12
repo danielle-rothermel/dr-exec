@@ -15,7 +15,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
 from typing import Final
-from uuid import uuid4
 
 from dr_serialize import IdentityDocument, Sha256Digest
 
@@ -29,7 +28,7 @@ from dr_exec.core.kinds import (
     ProtocolFailureCode,
     RecordState,
 )
-from dr_exec.core.names import AttemptId, ExecutionId
+from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
     ExecutorSelfBudgets,
@@ -96,6 +95,7 @@ from dr_exec.recording.models import (
     UntrustedPythonTargetRecord,
 )
 from dr_exec.recording.provenance import _executor_source_snapshot
+from dr_exec.recording.references import attempt_id_for_job
 from dr_exec.recording.store import FinalizableRun, PreparedRun
 from dr_exec.runtime.protocol import ProtocolStreamResult, read_protocol_stream
 
@@ -104,8 +104,7 @@ SUPPORTED_PLATFORM: Final = "darwin"
 SCRATCH_DIRECTORY_PREFIX: Final = "dr-exec-run-"
 
 _DRAIN_CHUNK_BYTES: Final = 65536
-
-_REAP_POLL_SECONDS: Final = 0.05
+_COOPERATIVE_WAKE_SECONDS: Final = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,12 +463,22 @@ def _await_child(
             return _StopReason(axis=BudgetAxis.PAYLOAD_OUTPUT, cancelled=False)
         if cancellation is not None and cancellation.cancelled:
             return _StopReason(axis=None, cancelled=True)
-        timeout = _REAP_POLL_SECONDS
+        # Every process attempt runs payload transport workers that may fail
+        # asynchronously while the child continues; cancellation and overflow
+        # need the same bounded wakeups when no wall-time budget applies.
+        needs_cooperative_wake = True
+        timeout: float | None = None
         if deadline_ns is not None:
             remaining_ns = deadline_ns - time.monotonic_ns()
             if remaining_ns <= 0:
                 return _StopReason(axis=BudgetAxis.WALL_TIME, cancelled=False)
-            timeout = min(timeout, remaining_ns / 1e9)
+            timeout = remaining_ns / 1e9
+            if needs_cooperative_wake:
+                timeout = min(timeout, _COOPERATIVE_WAKE_SECONDS)
+        elif needs_cooperative_wake:
+            # Machinery stop conditions still need wakeups when no wall-time
+            # budget bounds the wait; blocking until child exit would hide them.
+            timeout = _COOPERATIVE_WAKE_SECONDS
         with suppress(subprocess.TimeoutExpired):
             process.wait(timeout=timeout)
 
@@ -523,7 +532,8 @@ def _reaped_within(
     /,
 ) -> bool:
     if termination_ns is None:
-        return False
+        process.wait()
+        return True
     try:
         process.wait(timeout=termination_ns / 1_000_000_000)
     except subprocess.TimeoutExpired:
@@ -767,7 +777,7 @@ class _EngineCall:
 
         execution_id = ExecutionId(
             job_id=job.job_id,
-            attempt_id=AttemptId(uuid4()),
+            attempt_id=attempt_id_for_job(job.job_id),
         )
         prepared = self.run_store.prepare(
             self._prepared_record(job, target, execution_id)

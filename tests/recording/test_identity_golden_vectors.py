@@ -90,18 +90,15 @@ def test_unbudgeted_executor_config_identity_is_pinned() -> None:
         ExecutorSelfBudgets.unbudgeted()
     )
     assert canonical_identity_json_bytes(document) == (
-        b'{"payload":{"failure_detail_bytes":{"kind":"unbudgeted"},'
-        b'"join_time":{"kind":"unbudgeted"},"json_depth":{"kind":'
-        b'"unbudgeted"},"manifest_bytes":{"kind":"unbudgeted"},'
-        b'"narration_bytes":{"kind":"unbudgeted"},"protocol_frame_bytes":'
-        b'{"kind":"unbudgeted"},"protocol_output_count":{"kind":'
-        b'"unbudgeted"},"protocol_total_bytes":{"kind":"unbudgeted"},'
-        b'"recording_failure_count":{"kind":"unbudgeted"},"startup_time":'
-        b'{"kind":"unbudgeted"},"termination_time":{"kind":"unbudgeted"}},'
-        b'"schema":"dr_exec.executor_config","schema_version":1}'
+        b'{"payload":{"join_time":{"kind":"unbudgeted"},"json_depth":{"kind":'
+        b'"unbudgeted"},"protocol_frame_bytes":{"kind":"unbudgeted"},'
+        b'"protocol_output_count":{"kind":"unbudgeted"},"protocol_total_bytes":'
+        b'{"kind":"unbudgeted"},"startup_time":{"kind":"unbudgeted"},'
+        b'"termination_time":{"kind":"unbudgeted"}},"schema":'
+        b'"dr_exec.executor_config","schema_version":1}'
     )
     assert identity_document_hash(document) == (
-        "7ea3f81b8d80bd9336b20632c588eabe4fefc72a7eb4eabef8a8cfa0d5887f4e"
+        "b3cb5e10816f98a5965300e144dbf07b02aa73f39a25ccecd86638d7e2a77e93"
     )
 
 
@@ -114,19 +111,15 @@ def test_representative_finite_executor_config_identity_is_pinned() -> None:
         )
     )
     assert canonical_identity_json_bytes(document) == (
-        b'{"payload":{"failure_detail_bytes":{"kind":"unbudgeted"},'
-        b'"join_time":{"kind":"unbudgeted"},"json_depth":{"kind":'
-        b'"unbudgeted"},"manifest_bytes":{"kind":"unbudgeted"},'
-        b'"narration_bytes":{"kind":"unbudgeted"},"protocol_frame_bytes":'
-        b'{"kind":"finite","max_bytes":1024},"protocol_output_count":'
-        b'{"kind":"finite","max_count":3},"protocol_total_bytes":{"kind":'
-        b'"unbudgeted"},"recording_failure_count":{"kind":"unbudgeted"},'
-        b'"startup_time":{"kind":"finite","max_ns":5000000000},'
-        b'"termination_time":{"kind":"unbudgeted"}},"schema":'
-        b'"dr_exec.executor_config","schema_version":1}'
+        b'{"payload":{"join_time":{"kind":"unbudgeted"},"json_depth":{"kind":'
+        b'"unbudgeted"},"protocol_frame_bytes":{"kind":"finite","max_bytes":1024},'
+        b'"protocol_output_count":{"kind":"finite","max_count":3},'
+        b'"protocol_total_bytes":{"kind":"unbudgeted"},"startup_time":{"kind":'
+        b'"finite","max_ns":5000000000},"termination_time":{"kind":'
+        b'"unbudgeted"}},"schema":"dr_exec.executor_config","schema_version":1}'
     )
     assert identity_document_hash(document) == (
-        "e089d4dd127ea059d1a7275b7486d2952a477858ee131403f492b86f62a68e8c"
+        "9bee8d00b961b2ff935270b47e251a0cff7c25c4a8e1ef841a68ee79f4dc2a1e"
     )
 
 

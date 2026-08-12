@@ -96,10 +96,6 @@ class _ExecutorConfigIdentityPayload(ContractModel):
     protocol_total_bytes: ByteBudget
     protocol_output_count: CountBudget
     json_depth: CountBudget
-    manifest_bytes: ByteBudget
-    narration_bytes: ByteBudget
-    recording_failure_count: CountBudget
-    failure_detail_bytes: ByteBudget
     startup_time: DurationBudget
     termination_time: DurationBudget
     join_time: DurationBudget

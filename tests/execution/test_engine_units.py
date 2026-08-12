@@ -32,7 +32,9 @@ from dr_exec import (
     UnbudgetedOutput,
 )
 from dr_exec.execution.engine import (
+    _COOPERATIVE_WAKE_SECONDS,
     _attribute,
+    _await_child,
     _DrainState,
     _OutputPump,
     _spawn_outcome,
@@ -99,6 +101,20 @@ class _ProcessProbe:
         del timeout
         self.wait_calls += 1
         return 0
+
+
+@dataclass
+class _BlockingChild:
+    wait_timeouts: list[float | None] = field(default_factory=list)
+
+    def poll(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        import subprocess
+
+        self.wait_timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(cmd="child", timeout=timeout or 0)
 
 
 def test_an_unbudgeted_stream_retains_every_byte_in_one_segment() -> None:
@@ -381,6 +397,28 @@ def test_every_recognized_outcome_gets_one_evidence_based_owner(
     assert _attribute(outcome).owner is owner
 
 
+def test_await_child_wakes_for_transport_failure_without_a_wall_budget() -> (
+    None
+):
+    child = _BlockingChild()
+    transport_checks = iter([False, True])
+
+    def transport_failed() -> bool:
+        return next(transport_checks, True)
+
+    result = _await_child(
+        cast("subprocess.Popen[bytes]", child),
+        _DrainState(retention=PayloadRetention.for_budget(UnbudgetedOutput())),
+        deadline_ns=None,
+        fail_on_overflow=False,
+        cancellation=None,
+        transport_failed=transport_failed,
+    )
+
+    assert result is None
+    assert child.wait_timeouts == [_COOPERATIVE_WAKE_SECONDS]
+
+
 def test_a_transport_worker_captures_non_exception_base_failures() -> None:
 
     def stop_thread() -> None:
@@ -420,6 +458,30 @@ def test_session_stage_teardown_signals_only_the_direct_child(
     assert group_signals == []
     assert process.signals == [signal.SIGTERM]
     assert process.wait_calls == 1
+
+
+def test_unbudgeted_termination_grace_waits_for_sigterm_before_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _ProcessProbe()
+    group_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "dr_exec.execution.engine.signal_process_group",
+        lambda pid, number: group_signals.append((pid, number)),
+    )
+    monkeypatch.setattr(
+        "dr_exec.execution.engine._group_survives",
+        lambda *_: False,
+    )
+
+    _tear_down(
+        cast("subprocess.Popen[bytes]", process),
+        ExecutorSelfBudgets.unbudgeted(),
+    )
+
+    assert [number for _, number in group_signals] == [signal.SIGTERM]
+    assert process.signals == [signal.SIGTERM]
+    assert process.wait_calls == 2
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Generic, TypeVar, cast
 
@@ -45,7 +45,7 @@ type PoolCapacity = AutoPoolCapacity | FixedPoolCapacity
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPoolConfig:
-    capacity: PoolCapacity = field(default_factory=AutoPoolCapacity)
+    capacity: PoolCapacity
 
 
 class EffectivePoolCapacity(ContractModel):

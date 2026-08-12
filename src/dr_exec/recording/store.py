@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from dr_serialize import (
     Jsonable,
@@ -59,8 +60,10 @@ from dr_exec.recording.models import (
     RecordingFailure,
     RetainedPayloadStream,
     RetainedPayloadStreamRecord,
+    RunDeclaration,
     RunningRecord,
     RunRecord,
+    RunRecordHeader,
     RunRecordReference,
     SignaledOutcome,
     SignaledOutcomeRecord,
@@ -69,6 +72,7 @@ from dr_exec.recording.models import (
     SpawnFailedOutcome,
     SpawnFailedOutcomeRecord,
 )
+from dr_exec.recording.references import record_reference_for_job
 
 RECORD_DIRECTORY_PREFIX = "run"
 MANIFEST_NAME = "record.json"
@@ -86,6 +90,8 @@ class PreparedRun:
 
     execution_id: ExecutionId
     reference: RunRecordReference
+    header: RunRecordHeader
+    declaration: RunDeclaration
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +100,8 @@ class RunningRun:
 
     execution_id: ExecutionId
     reference: RunRecordReference
+    header: RunRecordHeader
+    declaration: RunDeclaration
 
 
 type FinalizableRun = PreparedRun | RunningRun
@@ -234,12 +242,20 @@ class DirectoryRunStore:
         /,
     ) -> PreparedRun:
         with _executor_failure("prepare the run record"):
-            reference = RunRecordReference(record_id=uuid4())
+            reference = record_reference_for_job(
+                record.declaration.execution_id.job_id
+            )
             directory = self._allocate(reference)
-            directory.publish(_manifest_payload(record))
+            try:
+                directory.publish(_manifest_payload(record))
+            except DocumentDirectoryError:
+                self._reclaim_unprepared_allocation(directory.path)
+                raise
         return PreparedRun(
             execution_id=record.declaration.execution_id,
             reference=reference,
+            header=record.header,
+            declaration=record.declaration,
         )
 
     def mark_running(
@@ -249,12 +265,11 @@ class DirectoryRunStore:
         /,
     ) -> RunningRun:
         with _executor_failure("publish the running run record"):
-            prepared = self._load_prepared(prepared_run.reference)
             _directory(self._resolve(prepared_run.reference)).publish(
                 _manifest_payload(
                     RunningRecord(
-                        header=prepared.header,
-                        declaration=prepared.declaration,
+                        header=prepared_run.header,
+                        declaration=prepared_run.declaration,
                         process=process,
                     )
                 )
@@ -262,6 +277,8 @@ class DirectoryRunStore:
         return RunningRun(
             execution_id=prepared_run.execution_id,
             reference=prepared_run.reference,
+            header=prepared_run.header,
+            declaration=prepared_run.declaration,
         )
 
     def finalize(
@@ -289,7 +306,11 @@ class DirectoryRunStore:
         reference: RunRecordReference,
         /,
     ) -> RunRecord:
-        """Validate a lifecycle record and every finalized sidecar."""
+        """Recover a lifecycle record across process boundaries.
+
+        Intended for cross-process recovery only, not for in-frame store
+        transitions that already carry the manifest header forward.
+        """
 
         record_dir = self._resolve(reference)
         record = _load_record(record_dir)
@@ -387,11 +408,25 @@ class DirectoryRunStore:
         record_dir = self._record_dir(reference)
         try:
             record_dir.mkdir(exist_ok=False)
+        except FileExistsError:
+            self._reclaim_unprepared_allocation(record_dir)
+            try:
+                record_dir.mkdir(exist_ok=False)
+            except OSError as error:
+                raise AllocationError(
+                    f"could not allocate run record {reference.record_id}"
+                ) from error
         except OSError as error:
             raise AllocationError(
                 f"could not allocate run record {reference.record_id}"
             ) from error
         return _directory(record_dir)
+
+    def _reclaim_unprepared_allocation(self, record_dir: Path, /) -> None:
+        try:
+            _load_record(record_dir)
+        except RecordLoadError:
+            shutil.rmtree(record_dir)
 
     def _record_dir(self, reference: RunRecordReference, /) -> Path:
         return self.root / f"{RECORD_DIRECTORY_PREFIX}-{reference.record_id}"

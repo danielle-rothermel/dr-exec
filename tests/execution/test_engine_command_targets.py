@@ -1736,25 +1736,29 @@ def test_concurrent_calls_keep_their_attempts_fully_separate(
 
 
 @requires_macos
-def test_every_call_gets_a_fresh_child_and_a_distinct_attempt_id(
+def test_every_call_gets_a_fresh_child_and_distinct_job_ids_get_distinct_attempt_ids(
     harness: Harness,
 ) -> None:
-    job = ExecutionJob(
+    target = TrustedCommandTarget(
+        argv=python_command(
+            "import os, sys; sys.stdout.write(str(os.getpid()))"
+        )
+    )
+    first_job = ExecutionJob(
         job_id=JobId(uuid4()),
-        target=TrustedCommandTarget(
-            argv=python_command(
-                "import os, sys; sys.stdout.write(str(os.getpid()))"
-            )
-        ),
+        target=target,
         env=EnvGrant.none(),
         budgets=Budgets.unbudgeted(),
     )
-    first = harness.execute(job)
-    second = harness.execute(job)
-
-    assert (
-        first.result.execution_id.job_id == second.result.execution_id.job_id
+    second_job = ExecutionJob(
+        job_id=JobId(uuid4()),
+        target=target,
+        env=EnvGrant.none(),
+        budgets=Budgets.unbudgeted(),
     )
+    first = harness.execute(first_job)
+    second = harness.execute(second_job)
+
     assert (
         first.result.execution_id.attempt_id
         != second.result.execution_id.attempt_id

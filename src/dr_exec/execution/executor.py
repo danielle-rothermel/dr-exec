@@ -10,6 +10,7 @@ from dr_exec.execution.engine import run_execution
 from dr_exec.recording.models import CompletedExecution
 from dr_exec.scheduling.offload import offload_run_blocking
 from dr_exec.scheduling.pool import (
+    AutoPoolCapacity,
     ExecutionPool,
     ExecutionPoolConfig,
     resolve_pool_capacity,
@@ -67,7 +68,9 @@ class ProcessExecutor:
             self,
             jobs,
             capacity=resolve_pool_capacity(
-                (config or ExecutionPoolConfig()).capacity
+                (
+                    config or ExecutionPoolConfig(capacity=AutoPoolCapacity())
+                ).capacity
             ).max_active_jobs,
         )
 
@@ -78,7 +81,7 @@ class ProcessExecutor:
     ) -> ExecutionPool:
         return ExecutionPool(
             executor=self,
-            config=config or ExecutionPoolConfig(),
+            config=config or ExecutionPoolConfig(capacity=AutoPoolCapacity()),
         )
 
 

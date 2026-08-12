@@ -13,12 +13,13 @@ from dr_exec import (
     IsolatedHostPythonRuntime,
     JobId,
 )
+from dr_exec.recording.references import attempt_id_for_job
 
 pytest_plugins = ("support.process",)
 
 TEST_REQUEST_SCHEMA = "dr_exec.test_request"
 JOB_UUID = UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70")
-ATTEMPT_UUID = UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f71")
+ATTEMPT_UUID = UUID(str(attempt_id_for_job(JobId(JOB_UUID))))
 
 
 @pytest.fixture(scope="session")

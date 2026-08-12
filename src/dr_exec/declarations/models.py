@@ -150,12 +150,6 @@ class ExecutorSelfBudgets(ContractModel):
     protocol_total_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
     protocol_output_count: CountBudget = Field(default_factory=UnbudgetedLimit)
     json_depth: CountBudget = Field(default_factory=UnbudgetedLimit)
-    manifest_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    narration_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    recording_failure_count: CountBudget = Field(
-        default_factory=UnbudgetedLimit
-    )
-    failure_detail_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
     startup_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
     termination_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
     join_time: DurationBudget = Field(default_factory=UnbudgetedLimit)

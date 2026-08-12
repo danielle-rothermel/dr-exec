@@ -6,14 +6,13 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from threading import Timer
-from uuid import uuid4
 
 from dr_serialize import build_identity_document
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
 from dr_exec.core.kinds import BudgetAxis, ProtocolFailureCode
-from dr_exec.core.names import AttemptId, ExecutionId
+from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
     InProcessImportableJsonTarget,
@@ -45,8 +44,10 @@ from dr_exec.recording.models import (
     InProcessRecordReceipt,
     ProtocolFailedOutcome,
 )
+from dr_exec.recording.references import attempt_id_for_job
 from dr_exec.scheduling.offload import offload_blocking_daemon
 from dr_exec.scheduling.pool import (
+    AutoPoolCapacity,
     ExecutionPool,
     ExecutionPoolConfig,
     resolve_pool_capacity,
@@ -261,7 +262,9 @@ class ImportableJsonExecutor:
             self,
             jobs,
             capacity=resolve_pool_capacity(
-                (config or ExecutionPoolConfig()).capacity
+                (
+                    config or ExecutionPoolConfig(capacity=AutoPoolCapacity())
+                ).capacity
             ).max_active_jobs,
         )
 
@@ -272,7 +275,7 @@ class ImportableJsonExecutor:
     ) -> ExecutionPool:
         return ExecutionPool(
             executor=self,
-            config=config or ExecutionPoolConfig(),
+            config=config or ExecutionPoolConfig(capacity=AutoPoolCapacity()),
         )
 
 
@@ -283,7 +286,7 @@ def _run_preamble(
 ) -> tuple[ExecutionId, datetime, int, int]:
     execution_id = ExecutionId(
         job_id=job.job_id,
-        attempt_id=AttemptId(uuid4()),
+        attempt_id=attempt_id_for_job(job.job_id),
     )
     started_at = datetime.now(UTC)
     started_ns = time.monotonic_ns()
