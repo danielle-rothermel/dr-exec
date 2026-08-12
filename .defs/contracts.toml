@@ -151,12 +151,14 @@ date = "2026-08-05"
 title = "Awaitable run offloads blocking work once"
 statement = """
 `Executor.run()` is awaitable and offloads to `run_blocking()` through one \
-package-owned `asyncio.to_thread` helper. Pooled execution calls \
-`run_blocking()` directly on scheduler worker threads with no second offload. \
+package-owned offload helper. Most executors use `asyncio.to_thread`; \
+`ImportableJsonExecutor.run()` uses `offload_blocking_daemon` for in-process \
+Ctrl+C semantics. Pooled execution calls `run_blocking()` directly on \
+scheduler worker threads with no second offload. \
 `WorkerPoolImportableJsonExecutor.close()` is awaitable and offloads to \
-`close_blocking()` through the same helper; sync `with` and `__exit__` call \
-`close_blocking()` directly with no second offload. No async `Runtime` or \
-`RunStore` Protocol follows."""
+`close_blocking()` through the same `asyncio.to_thread` helper; sync `with` \
+and `__exit__` call `close_blocking()` directly with no second offload. No \
+async `Runtime` or `RunStore` Protocol follows."""
 rationale = """
 Blocking syscalls have no async form, so the blocking primitive stays on the \
 Protocol while async callers get one owned offload path instead of re-deriving \

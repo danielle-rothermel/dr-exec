@@ -193,6 +193,10 @@ async def _raise_keyboard_interrupt(*_args: object, **_kwargs: object) -> None:
     raise KeyboardInterrupt
 
 
+async def _raise_cancelled_error(*_args: object, **_kwargs: object) -> None:
+    raise asyncio.CancelledError
+
+
 def test_async_run_maps_keyboard_interrupt_to_exited_outcome() -> None:
     executor = ImportableJsonExecutor()
     job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
@@ -201,6 +205,27 @@ def test_async_run_maps_keyboard_interrupt_to_exited_outcome() -> None:
         with patch(
             "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
             _raise_keyboard_interrupt,
+        ):
+            return await executor.run(job)
+
+    completed = asyncio.run(collect())
+
+    assert isinstance(completed.result.outcome, ExitedOutcome)
+    assert completed.result.outcome.exit_code == 1
+    assert (
+        completed.result.attribution.detail
+        == "the importable JSON entry point terminated"
+    )
+
+
+def test_async_run_maps_cancelled_error_to_exited_outcome() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
+
+    async def collect() -> CompletedExecution:
+        with patch(
+            "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
+            _raise_cancelled_error,
         ):
             return await executor.run(job)
 
@@ -223,6 +248,23 @@ def test_async_run_cancels_token_on_keyboard_interrupt() -> None:
         with patch(
             "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
             _raise_keyboard_interrupt,
+        ):
+            return await executor.run(job, cancellation=token)
+
+    asyncio.run(collect())
+
+    assert token.cancelled
+
+
+def test_async_run_cancels_token_on_cancelled_error() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
+    token = CancelToken()
+
+    async def collect() -> CompletedExecution:
+        with patch(
+            "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
+            _raise_cancelled_error,
         ):
             return await executor.run(job, cancellation=token)
 

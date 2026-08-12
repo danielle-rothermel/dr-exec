@@ -34,12 +34,26 @@ async def offload_blocking_daemon[T](
 
     def worker() -> None:
         try:
-            future.set_result(call(*args, **kwargs))
+            result = call(*args, **kwargs)
         except BaseException as error:  # noqa: BLE001 - forward to awaiter
-            loop.call_soon_threadsafe(future.set_exception, error)
+            loop.call_soon_threadsafe(_deliver_exception, future, error)
+        else:
+            loop.call_soon_threadsafe(_deliver_result, future, result)
 
     Thread(target=worker, daemon=True).start()
     return await future
+
+
+def _deliver_result[T](future: asyncio.Future[T], result: T, /) -> None:
+    if not future.done():
+        future.set_result(result)
+
+
+def _deliver_exception[T](
+    future: asyncio.Future[T], error: BaseException, /
+) -> None:
+    if not future.done():
+        future.set_exception(error)
 
 
 async def offload_run_blocking(

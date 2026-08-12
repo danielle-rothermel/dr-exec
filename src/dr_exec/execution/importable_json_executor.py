@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -78,7 +79,7 @@ class ImportableJsonExecutor:
             return await offload_blocking_daemon(
                 self.run_blocking, job, cancellation=token
             )
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             token.cancel()
             return _keyboard_interrupt_completion(job)
 
