@@ -36,7 +36,6 @@ EXPECTED_EXECUTOR_FAILURE_CODE_LITERALS = {
     "PROTOCOL_TRANSPORT_TAKEN": "protocol_transport_taken",
     "TRANSPORT_JOIN_TIMEOUT": "transport_join_timeout",
     "BOOTSTRAP_START_FAILED": "bootstrap_start_failed",
-    "NO_DRAIN_STATE": "no_drain_state",
     "RECORDING_OPERATION_FAILED": "recording_operation_failed",
     "POOL_CAPACITY_UNRESOLVED": "pool_capacity_unresolved",
     "POOL_INVALID_STATE": "pool_invalid_state",

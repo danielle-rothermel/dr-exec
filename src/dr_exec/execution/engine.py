@@ -39,8 +39,7 @@ from dr_exec.declarations.models import (
 )
 from dr_exec.declarations.validation import (
     granted_environment,
-    validate_command_resolvability,
-    validate_input_budget,
+    validate_declaration,
 )
 from dr_exec.execution.outcomes import (
     attribute_outcome,
@@ -98,7 +97,7 @@ from dr_exec.recording.references import attempt_id_for_job
 from dr_exec.recording.store import FinalizableRun, PreparedRun
 from dr_exec.runtime.protocol import ProtocolStreamResult, read_protocol_stream
 
-SUPPORTED_PLATFORM: Final = "darwin"
+_SUPPORTED_PLATFORM: Final = "darwin"
 
 SCRATCH_DIRECTORY_PREFIX: Final = "dr-exec-run-"
 
@@ -121,9 +120,9 @@ def _now() -> datetime:
 
 
 def _validate_platform() -> None:
-    if sys.platform != SUPPORTED_PLATFORM:
+    if sys.platform != _SUPPORTED_PLATFORM:
         raise DeclarationError(
-            f"dr-exec v1 executes only on {SUPPORTED_PLATFORM}"
+            f"dr-exec v1 executes only on {_SUPPORTED_PLATFORM}"
         )
 
 
@@ -135,7 +134,6 @@ def _resolve_executable(
     name = argv[0]
     if Path(name).is_absolute():
         return name
-    validate_command_resolvability(argv, environment)
     resolved = shutil.which(name, path=environment["PATH"])
     return resolved if resolved is not None else name
 
@@ -191,10 +189,8 @@ def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
                 wants_protocol=True,
             )
         case InProcessImportableJsonTarget():
-            raise ExecutorFailure(
-                "the process executor cannot run in-process importable JSON "
-                "targets",
-                code=ExecutorFailureCode.TARGET_NOT_SUPPORTED,
+            raise AssertionError(
+                "run() rejects in-process targets before _target_of"
             )
 
 
@@ -423,21 +419,25 @@ class _StopReason:
     cancelled: bool
 
 
-@dataclass(slots=True)
-class _AttemptObservation:
-    prepared: PreparedRun
-    setup_failure: SetupFailure | None = None
+@dataclass(frozen=True, slots=True)
+class _SetupFailed:
+    setup_failure: SetupFailure
+    leads_group: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ReachedPayload:
+    state: _DrainState
+    stop: _StopReason | None
+    running: FinalizableRun | None
+    recording_failures: tuple[RecordingFailure, ...]
+
+    # Reaching the payload means session setup completed, so the child leads
+    # its own group; only a setup failure can decide otherwise.
     leads_group: bool = True
-    state: _DrainState | None = None
-    stop: _StopReason | None = None
-    running: FinalizableRun | None = None
-    recording_failures: tuple[RecordingFailure, ...] = ()
 
-    def reached_payload(self) -> _DrainState | None:
-        return None if self.setup_failure is not None else self.state
 
-    def latest_run(self) -> FinalizableRun:
-        return self.prepared if self.running is None else self.running
+type _AttemptResult = _SetupFailed | _ReachedPayload
 
 
 def _await_child(
@@ -461,21 +461,15 @@ def _await_child(
             return _StopReason(axis=BudgetAxis.PAYLOAD_OUTPUT, cancelled=False)
         if cancellation is not None and cancellation.cancelled:
             return _StopReason(axis=None, cancelled=True)
-        # Every process attempt runs payload transport workers that may fail
-        # asynchronously while the child continues; cancellation and overflow
-        # need the same bounded wakeups when no wall-time budget applies.
-        needs_cooperative_wake = True
-        timeout: float | None = None
+        # Transport failure, cancellation, and overflow are all asynchronous to
+        # the child, so every wait is bounded; blocking until child exit would
+        # hide them when no wall-time budget bounds the wait.
         if deadline_ns is not None:
             remaining_ns = deadline_ns - time.monotonic_ns()
             if remaining_ns <= 0:
                 return _StopReason(axis=BudgetAxis.WALL_TIME, cancelled=False)
-            timeout = remaining_ns / 1e9
-            if needs_cooperative_wake:
-                timeout = min(timeout, _COOPERATIVE_WAKE_SECONDS)
-        elif needs_cooperative_wake:
-            # Machinery stop conditions still need wakeups when no wall-time
-            # budget bounds the wait; blocking until child exit would hide them.
+            timeout = min(remaining_ns / 1e9, _COOPERATIVE_WAKE_SECONDS)
+        else:
             timeout = _COOPERATIVE_WAKE_SECONDS
         with suppress(subprocess.TimeoutExpired):
             process.wait(timeout=timeout)
@@ -538,16 +532,23 @@ def _reaped_within(
 
 
 @dataclass(slots=True)
+class _ProtocolTransport:
+    """Hold the descriptor group a protocol-speaking target needs as one unit."""
+
+    read: int
+    forward_read: int | None
+    forward_write: int | None
+
+
+@dataclass(slots=True)
 class _Transports:
     stdin_write: int | None
     stdout_read: int
     stderr_read: int
-    protocol_read: int | None
+    protocol: _ProtocolTransport | None
     status_read: int
     release_read: int
     release_write: int
-    protocol_forward_read: int | None
-    protocol_forward_write: int | None
     threads: tuple[_TransportWorker, ...] = ()
 
     def take_stdin(self) -> int:
@@ -561,18 +562,23 @@ class _Transports:
         return descriptor
 
     def take_protocol_reader(self) -> int:
-        descriptor = self.protocol_forward_read
-        if descriptor is None:  # pragma: no cover - one call per attempt
+        protocol = self.protocol
+        if (
+            protocol is None or protocol.forward_read is None
+        ):  # pragma: no cover - one call per attempt
             raise ExecutorFailure(
                 "the protocol transport was already taken",
                 code=ExecutorFailureCode.PROTOCOL_TRANSPORT_TAKEN,
             )
-        self.protocol_forward_read = None
+        descriptor = protocol.forward_read
+        protocol.forward_read = None
         return descriptor
 
     def take_protocol_forward_write(self) -> int | None:
-        descriptor = self.protocol_forward_write
-        self.protocol_forward_write = None
+        if self.protocol is None:
+            return None
+        descriptor = self.protocol.forward_write
+        self.protocol.forward_write = None
         return descriptor
 
     def adopt(self, thread: _TransportWorker, /) -> None:
@@ -607,18 +613,25 @@ class _Transports:
         self.release()
         for worker in self.threads:
             worker.thread.join()
+        protocol = self.protocol
         _close_descriptors(
             descriptor
             for descriptor in (
                 self.stdin_write,
                 self.stdout_read,
                 self.stderr_read,
-                self.protocol_read,
                 self.status_read,
                 self.release_read,
                 self.release_write,
-                self.protocol_forward_read,
-                self.protocol_forward_write,
+                *(
+                    ()
+                    if protocol is None
+                    else (
+                        protocol.read,
+                        protocol.forward_read,
+                        protocol.forward_write,
+                    )
+                ),
             )
             if descriptor is not None
         )
@@ -646,41 +659,7 @@ def _exit_outcome(returncode: int, /) -> ExecutionOutcome:
     return ExitedOutcome(exit_code=returncode)
 
 
-def _degraded_from(
-    run: FinalizableRun,
-    store: RunStore,
-    result: ExecutionResult,
-    /,
-    *,
-    prior_failures: tuple[RecordingFailure, ...] = (),
-) -> RealRecordReceipt:
-    try:
-        receipt = store.finalize(run, result)
-    except ExecutorFailure as error:
-        return _degraded_receipt(
-            run,
-            "finalize",
-            prior_failures,
-            failure_code=error.code,
-        )
-    if not prior_failures:
-        return receipt
-    return DegradedRecordReceipt(
-        execution_id=receipt.execution_id,
-        reference=receipt.reference,
-        latest_state=receipt.latest_state,
-        failures=(
-            *prior_failures,
-            *(
-                receipt.failures
-                if isinstance(receipt, DegradedRecordReceipt)
-                else ()
-            ),
-        ),
-    )
-
-
-def _degraded_receipt(
+def _degraded_from_failure(
     run: FinalizableRun,
     operation: str,
     prior_failures: tuple[RecordingFailure, ...] = (),
@@ -723,8 +702,8 @@ class _EngineCall:
                 code=ExecutorFailureCode.TARGET_NOT_SUPPORTED,
             )
         _validate_platform()
+        validate_declaration(job)
         target = _target_of(job, self.runtime)
-        validate_input_budget(job, target.stdin_bytes)
         environment = granted_environment(job.env)
         executable = _resolve_executable(target.argv, environment)
 
@@ -776,6 +755,39 @@ class _EngineCall:
             ),
         )
 
+    def _finalized_receipt(
+        self,
+        run: FinalizableRun,
+        result: ExecutionResult,
+        /,
+        *,
+        prior_failures: tuple[RecordingFailure, ...] = (),
+    ) -> RealRecordReceipt:
+        try:
+            receipt = self.run_store.finalize(run, result)
+        except ExecutorFailure as error:
+            return _degraded_from_failure(
+                run,
+                "finalize",
+                prior_failures,
+                failure_code=error.code,
+            )
+        if not prior_failures:
+            return receipt
+        return DegradedRecordReceipt(
+            execution_id=receipt.execution_id,
+            reference=receipt.reference,
+            latest_state=receipt.latest_state,
+            failures=(
+                *prior_failures,
+                *(
+                    receipt.failures
+                    if isinstance(receipt, DegradedRecordReceipt)
+                    else ()
+                ),
+            ),
+        )
+
     def _finalize_pre_spawn(
         self,
         prepared: PreparedRun,
@@ -800,7 +812,7 @@ class _EngineCall:
         )
         return CompletedExecution(
             result=result,
-            record_receipt=_degraded_from(prepared, self.run_store, result),
+            record_receipt=self._finalized_receipt(prepared, result),
         )
 
     def _run_spawned(
@@ -818,14 +830,18 @@ class _EngineCall:
         stdin_read, stdin_write = os.pipe()
         stdout_read, stdout_write = os.pipe()
         stderr_read, stderr_write = os.pipe()
-        protocol_read, protocol_write = (
-            os.pipe() if target.wants_protocol else (None, None)
-        )
-        forward_read, forward_write = (
-            os.pipe() if target.wants_protocol else (None, None)
-        )
         status_read, status_write = os.pipe()
         release_read, release_write = os.pipe()
+        protocol_write: int | None = None
+        protocol: _ProtocolTransport | None = None
+        if target.wants_protocol:
+            protocol_read, protocol_write = os.pipe()
+            forward_read, forward_write = os.pipe()
+            protocol = _ProtocolTransport(
+                read=protocol_read,
+                forward_read=forward_read,
+                forward_write=forward_write,
+            )
         descriptor_map: list[tuple[int, int]] = [
             (stdin_read, PAYLOAD_STDIN_DESCRIPTOR),
             (stdout_write, PAYLOAD_STDOUT_DESCRIPTOR),
@@ -842,12 +858,10 @@ class _EngineCall:
             stdin_write=stdin_write,
             stdout_read=stdout_read,
             stderr_read=stderr_read,
-            protocol_read=protocol_read,
+            protocol=protocol,
             status_read=status_read,
             release_read=release_read,
             release_write=release_write,
-            protocol_forward_read=forward_read,
-            protocol_forward_write=forward_write,
         )
         started_at = _now()
         started_ns = time.monotonic_ns()
@@ -896,12 +910,12 @@ class _EngineCall:
         started_ns: int,
         cancellation: CancelToken | None,
     ) -> CompletedExecution:
-        observation = _AttemptObservation(prepared=prepared)
+        observed: _AttemptResult | None = None
         try:
-            self._observe_attempt(
+            observed = self._observe_attempt(
                 job,
                 target,
-                observation,
+                prepared,
                 process=process,
                 transports=transports,
                 started_at=started_at,
@@ -909,54 +923,53 @@ class _EngineCall:
                 cancellation=cancellation,
             )
         finally:
+            # An escaping exception observed nothing, so it gets the
+            # completed-session teardown the contract makes the default.
             teardown_ns = _tear_down(
                 process,
                 self.self_budgets,
-                leads_group=observation.leads_group,
+                leads_group=True if observed is None else observed.leads_group,
             )
         transports.join(self.self_budgets)
-        setup_failure = observation.setup_failure
-        if setup_failure is not None:
-            return self._complete(
-                prepared,
-                outcome=_spawn_outcome(setup_failure, target.executable),
-                protocol_outputs=(),
-                payload_outputs=empty_payload_outputs(),
-                started_at=started_at,
-                started_ns=started_ns,
-                teardown_duration_ns=teardown_ns,
-                input_bytes=0,
-                protocol_bytes_received=0,
-            )
-        state = observation.reached_payload()
-        if state is None:  # pragma: no cover - a raise already left the call
-            raise ExecutorFailure(
-                "the attempt produced no drain state",
-                code=ExecutorFailureCode.NO_DRAIN_STATE,
-            )
-        protocol = state.protocol_result
-        return self._complete(
-            observation.latest_run(),
-            outcome=self._outcome_of(
-                process, state, observation.stop, protocol
-            ),
-            protocol_outputs=() if protocol is None else protocol.outputs,
-            payload_outputs=state.retention.snapshot(),
-            started_at=started_at,
-            started_ns=started_ns,
-            teardown_duration_ns=teardown_ns,
-            input_bytes=len(target.stdin_bytes),
-            protocol_bytes_received=(
-                0 if protocol is None else protocol.bytes_received
-            ),
-            recording_failures=observation.recording_failures,
-        )
+        match observed:
+            case _SetupFailed(setup_failure=setup_failure):
+                return self._complete(
+                    prepared,
+                    outcome=_spawn_outcome(setup_failure, target.executable),
+                    protocol_outputs=(),
+                    payload_outputs=empty_payload_outputs(),
+                    started_at=started_at,
+                    started_ns=started_ns,
+                    teardown_duration_ns=teardown_ns,
+                    input_bytes=0,
+                    protocol_bytes_received=0,
+                )
+            case _ReachedPayload(state=state, running=running):
+                protocol = state.protocol_result
+                return self._complete(
+                    prepared if running is None else running,
+                    outcome=self._outcome_of(
+                        process, state, observed.stop, protocol
+                    ),
+                    protocol_outputs=(
+                        () if protocol is None else protocol.outputs
+                    ),
+                    payload_outputs=state.retention.snapshot(),
+                    started_at=started_at,
+                    started_ns=started_ns,
+                    teardown_duration_ns=teardown_ns,
+                    input_bytes=len(target.stdin_bytes),
+                    protocol_bytes_received=(
+                        0 if protocol is None else protocol.bytes_received
+                    ),
+                    recording_failures=observed.recording_failures,
+                )
 
     def _observe_attempt(
         self,
         job: ExecutionJob,
         target: _ResolvedTarget,
-        observation: _AttemptObservation,
+        prepared: PreparedRun,
         /,
         *,
         process: subprocess.Popen[bytes],
@@ -964,7 +977,7 @@ class _EngineCall:
         started_at: datetime,
         started_ns: int,
         cancellation: CancelToken | None,
-    ) -> None:
+    ) -> _AttemptResult:
         setup_failure = parse_setup_status(
             _read_setup_status(
                 transports.status_read,
@@ -972,49 +985,54 @@ class _EngineCall:
             )
         )
         if setup_failure is not None:
-            observation.setup_failure = setup_failure
-            # A failed ``setsid`` leaves no child-owned group to signal.
-            observation.leads_group = (
-                setup_failure.stage != SETUP_STAGE_SESSION
+            return _SetupFailed(
+                setup_failure=setup_failure,
+                # A failed ``setsid`` leaves no child-owned group to signal.
+                leads_group=setup_failure.stage != SETUP_STAGE_SESSION,
             )
-            return
         state = _DrainState(
             retention=PayloadRetention.for_budget(job.budgets.payload_output)
         )
-        observation.state = state
         # Start drains before durable publication can stall a live payload.
         self._start_transports(target, transports, state)
-        self._mark_running(observation, process, started_at)
-        observation.stop = _await_child(
-            process,
-            state,
-            deadline_ns=self._deadline_ns(job, started_ns),
-            fail_on_overflow=_fails_on_overflow(job),
-            cancellation=cancellation,
-            transport_failed=transports.failed,
+        running, recording_failures = self._mark_running(
+            prepared, process, started_at
+        )
+        return _ReachedPayload(
+            state=state,
+            stop=_await_child(
+                process,
+                state,
+                deadline_ns=self._deadline_ns(job, started_ns),
+                fail_on_overflow=_fails_on_overflow(job),
+                cancellation=cancellation,
+                transport_failed=transports.failed,
+            ),
+            running=running,
+            recording_failures=recording_failures,
         )
 
     def _mark_running(
         self,
-        observation: _AttemptObservation,
+        prepared: PreparedRun,
         process: subprocess.Popen[bytes],
         started_at: datetime,
         /,
-    ) -> None:
+    ) -> tuple[FinalizableRun | None, tuple[RecordingFailure, ...]]:
         try:
-            observation.running = self.run_store.mark_running(
-                observation.prepared,
+            running = self.run_store.mark_running(
+                prepared,
                 ProcessRecord(pid=process.pid, started_at=started_at),
             )
         except ExecutorFailure as error:
-            observation.recording_failures = (
-                *observation.recording_failures,
+            return None, (
                 RecordingFailure(
                     operation="mark_running",
                     errno=None,
                     failure_code=error.code,
                 ),
             )
+        return running, ()
 
     def _start_transports(
         self,
@@ -1038,7 +1056,11 @@ class _EngineCall:
                 state=state,
                 stdout_descriptor=transports.stdout_read,
                 stderr_descriptor=transports.stderr_read,
-                protocol_descriptor=transports.protocol_read,
+                protocol_descriptor=(
+                    None
+                    if transports.protocol is None
+                    else transports.protocol.read
+                ),
                 protocol_forward=descriptor,
                 release_descriptor=transports.release_read,
             ).run(),
@@ -1046,7 +1068,9 @@ class _EngineCall:
             take=transports.take_protocol_forward_write,
         )
         digest = target.request_id_sha256
-        if transports.protocol_forward_read is not None and digest is not None:
+        if transports.protocol is not None and digest is not None:
+            # Only a protocol-speaking target has a protocol group, and every
+            # such target resolves a request digest, so the two agree.
             budgets = self.self_budgets
             self._adopt_started(
                 transports,
@@ -1134,11 +1158,8 @@ class _EngineCall:
         )
         return CompletedExecution(
             result=result,
-            record_receipt=_degraded_from(
-                run,
-                self.run_store,
-                result,
-                prior_failures=recording_failures,
+            record_receipt=self._finalized_receipt(
+                run, result, prior_failures=recording_failures
             ),
         )
 
@@ -1167,4 +1188,4 @@ def run_execution(
     ).run(job, cancellation=cancellation)
 
 
-__all__ = ["SUPPORTED_PLATFORM"]
+__all__ = ["SCRATCH_DIRECTORY_PREFIX", "run_execution"]
