@@ -47,6 +47,7 @@ EXPECTED_PUBLIC_API = (
     "ExecutionTargetRecord",
     "Executor",
     "ExecutorFailure",
+    "ExecutorFailureCode",
     "ExecutorSelfBudgets",
     "ExitedOutcome",
     "ExitedOutcomeRecord",

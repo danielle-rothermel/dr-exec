@@ -32,11 +32,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   SIGTERM grace before SIGKILL escalation, and required an explicit
   `ExecutionPoolConfig.capacity` at pool assembly.
 - Deleted `scripts/benchmark_importable_json.py`.
-
-### Deferred
-
-- Migrating local bounded no-follow artifact reads to dr-store once its read
-  primitive ships (E3).
+- Updated `dr-store` to 0.2.2.
+- Mapped `RegularChildFailureReason` from dr-store verified child reads into
+  `RecordLoadError` messages for artifact and sidecar mismatches.
+- Renamed scheduler cross-module types to `AdmissionResult` and
+  `ExecutionScheduler` as module-internal scheduling API.
+- Added persisted `ExecutorFailureCode` on `RecordingFailure.failure_code` for
+  degraded receipts when executor machinery fails.
 
 ## [0.1.9] - 2026-08-11
 

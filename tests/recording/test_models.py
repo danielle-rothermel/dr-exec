@@ -18,6 +18,7 @@ from dr_exec import (
     ExecutionMeasurements,
     ExecutionResult,
     ExecutionResultRecord,
+    ExecutorFailureCode,
     ExitedOutcome,
     FailureOwner,
     JobId,
@@ -288,8 +289,68 @@ def test_degraded_receipt_wire_keys_are_pinned() -> None:
     assert canonical_model_bytes(receipt) == (
         b'{"execution_id":{"attempt_id":"00000000-0000-0000-0000-'
         b'000000000002","job_id":"00000000-0000-0000-0000-000000000001"},'
-        b'"failures":[{"detail":"OSError","errno":5,"operation":"finalize"}],'
+        b'"failures":[{"detail":"OSError","errno":5,"failure_code":null,'
+        b'"operation":"finalize"}],"kind":"degraded","latest_state":"running",'
+        b'"reference":{"backend":"directory","record_id":"00000000-0000-0000-0000-'
+        b'000000000007"}}'
+    )
+
+
+def test_degraded_receipt_executor_failures_pin_failure_code() -> None:
+    receipt = DegradedRecordReceipt(
+        execution_id=_execution_id(1),
+        reference=RunRecordReference(record_id=UUID(int=7)),
+        latest_state=RecordState.RUNNING,
+        failures=(
+            RecordingFailure(
+                operation="finalize",
+                errno=5,
+                failure_code=ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+            ),
+        ),
+    )
+
+    assert canonical_model_bytes(receipt) == (
+        b'{"execution_id":{"attempt_id":"00000000-0000-0000-0000-'
+        b'000000000002","job_id":"00000000-0000-0000-0000-000000000001"},'
+        b'"failures":[{"detail":null,"errno":5,'
+        b'"failure_code":"recording_operation_failed","operation":"finalize"}],'
         b'"kind":"degraded","latest_state":"running","reference":'
         b'{"backend":"directory","record_id":"00000000-0000-0000-0000-'
         b'000000000007"}}'
     )
+
+
+@pytest.mark.parametrize(
+    ("detail", "failure_code"),
+    [
+        pytest.param(None, None, id="neither"),
+        pytest.param(
+            "OSError",
+            ExecutorFailureCode.RECORDING_OPERATION_FAILED,
+            id="both",
+        ),
+    ],
+)
+def test_recording_failure_rejects_ambiguous_discriminators(
+    detail: str | None,
+    failure_code: ExecutorFailureCode | None,
+) -> None:
+    with pytest.raises(ValidationError, match="either detail or failure_code"):
+        RecordingFailure(
+            operation="finalize",
+            errno=5,
+            detail=detail,
+            failure_code=failure_code,
+        )
+
+
+def test_recording_failure_detail_must_be_a_sanitized_class_name() -> None:
+    with pytest.raises(
+        ValidationError, match="sanitized exception class name"
+    ):
+        RecordingFailure(
+            operation="finalize",
+            errno=5,
+            detail="could not finalize",
+        )

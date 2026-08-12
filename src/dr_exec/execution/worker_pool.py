@@ -24,7 +24,11 @@ from dr_serialize import (
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
-from dr_exec.core.kinds import BudgetAxis, ProtocolFailureCode
+from dr_exec.core.kinds import (
+    BudgetAxis,
+    ExecutorFailureCode,
+    ProtocolFailureCode,
+)
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
@@ -436,11 +440,13 @@ class WorkerPoolImportableJsonExecutor:
         if not isinstance(target, InProcessImportableJsonTarget):
             raise ExecutorFailure(
                 "the worker pool executor accepts only in-process importable "
-                "JSON targets"
+                "JSON targets",
+                code=ExecutorFailureCode.WORKER_POOL_TARGET_MISMATCH,
             )
         if target.entry_point != self.entry_point:
             raise ExecutorFailure(
-                "a worker pool serves only the entry point it was opened with"
+                "a worker pool serves only the entry point it was opened with",
+                code=ExecutorFailureCode.WORKER_POOL_ENTRY_POINT_MISMATCH,
             )
         execution = _Execution(
             execution_id=ExecutionId(

@@ -15,7 +15,7 @@ from dr_exec.scheduling.pool import (
     ExecutionPoolConfig,
     resolve_pool_capacity,
 )
-from dr_exec.scheduling.scheduler import _AdmissionResult, _ExecutionScheduler
+from dr_exec.scheduling.scheduler import AdmissionResult, ExecutionScheduler
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +93,7 @@ def _run_batch(
     capacity: int,
 ) -> Generator[CompletedExecution]:
     """Drive a private bounded scheduler and drain it on generator close."""
-    scheduler: _ExecutionScheduler[None] = _ExecutionScheduler(
+    scheduler: ExecutionScheduler[None] = ExecutionScheduler(
         executor=executor, capacity=capacity
     )
     source = iter(jobs)
@@ -108,12 +108,12 @@ def _run_batch(
                     exhausted = True
                     break
                 match scheduler.admit(job, None):
-                    case _AdmissionResult.ADMITTED:
+                    case AdmissionResult.ADMITTED:
                         pass
-                    case _AdmissionResult.INTAKE_CLOSED:
+                    case AdmissionResult.INTAKE_CLOSED:
                         exhausted = True
                         break
-                    case _AdmissionResult.NO_ROOM:
+                    case AdmissionResult.NO_ROOM:
                         carried = job
                         break
             if exhausted and carried is None and not scheduler.has_residents():

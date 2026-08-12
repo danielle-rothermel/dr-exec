@@ -14,14 +14,15 @@ from dr_exec.core.errors import ExecutorFailure
 from dr_exec.core.kinds import (
     CapacitySource,
     ExecutionPoolState,
+    ExecutorFailureCode,
 )
 from dr_exec.core.model import ContractModel
 from dr_exec.declarations.models import ExecutionJob
 from dr_exec.recording.models import CompletedExecution
 from dr_exec.scheduling.scheduler import (
+    AdmissionResult,
+    ExecutionScheduler,
     SchedulerBroken,
-    _AdmissionResult,
-    _ExecutionScheduler,
     usable_cpu_count,
 )
 
@@ -103,7 +104,7 @@ class ExecutionPool:
     _effective_capacity: EffectivePoolCapacity | None
     _state: ExecutionPoolState
     _closed: bool
-    _scheduler: _ExecutionScheduler[object] | None
+    _scheduler: ExecutionScheduler[object] | None
     _owning_loop: asyncio.AbstractEventLoop | None
     _close_task: asyncio.Task[None] | None
     _active_streams: int
@@ -136,19 +137,21 @@ class ExecutionPool:
     def effective_capacity(self) -> EffectivePoolCapacity:
         if self._effective_capacity is None:
             raise ExecutorFailure(
-                "effective capacity is resolved when the pool is entered"
+                "effective capacity is resolved when the pool is entered",
+                code=ExecutorFailureCode.POOL_CAPACITY_UNRESOLVED,
             )
         return self._effective_capacity
 
     async def __aenter__(self) -> ExecutionPool:  # noqa: PYI034
         if self._state is not ExecutionPoolState.CREATED:
             raise ExecutorFailure(
-                f"an execution pool in state {self._state} cannot be opened"
+                f"an execution pool in state {self._state} cannot be opened",
+                code=ExecutorFailureCode.POOL_INVALID_STATE,
             )
         capacity = resolve_pool_capacity(self._config.capacity)
         self._effective_capacity = capacity
         self._owning_loop = asyncio.get_running_loop()
-        self._scheduler = _ExecutionScheduler(
+        self._scheduler = ExecutionScheduler(
             executor=self._executor,
             capacity=capacity.max_active_jobs,
             notify_change=self._notify_scheduler_change,
@@ -248,15 +251,15 @@ class ExecutionPool:
 
                 if carried is not None:
                     match scheduler.admit(carried.job, carried.context):
-                        case _AdmissionResult.ADMITTED:
+                        case AdmissionResult.ADMITTED:
                             carried = None
                             outstanding += 1
                             continue
-                        case _AdmissionResult.INTAKE_CLOSED:
+                        case AdmissionResult.INTAKE_CLOSED:
                             carried = None
                             exhausted = True
                             continue
-                        case _AdmissionResult.NO_ROOM:
+                        case AdmissionResult.NO_ROOM:
                             pass
 
                 if source_pull is not None and source_pull.done():
@@ -395,7 +398,7 @@ class ExecutionPool:
             raise
 
     async def _finish_close(
-        self, scheduler: _ExecutionScheduler[object], /
+        self, scheduler: ExecutionScheduler[object], /
     ) -> None:
         await asyncio.to_thread(scheduler.wait_for_quiescence)
         await asyncio.to_thread(scheduler.shutdown, preserve_completions=True)
@@ -426,19 +429,24 @@ class ExecutionPool:
         if asyncio.get_running_loop() is not self._owning_loop:
             raise ExecutorFailure(
                 "an execution pool is driven only by the event loop that "
-                "opened it"
+                "opened it",
+                code=ExecutorFailureCode.POOL_WRONG_EVENT_LOOP,
             )
 
-    def _running_scheduler(self) -> _ExecutionScheduler[object]:
+    def _running_scheduler(self) -> ExecutionScheduler[object]:
         if self._state is not ExecutionPoolState.RUNNING:
             raise ExecutorFailure(
-                f"an execution pool in state {self._state} cannot stream"
+                f"an execution pool in state {self._state} cannot stream",
+                code=ExecutorFailureCode.POOL_INVALID_STATE,
             )
         if self._scheduler is None:  # pragma: no cover - open sets both
-            raise ExecutorFailure("the execution pool has no scheduler")
+            raise ExecutorFailure(
+                "the execution pool has no scheduler",
+                code=ExecutorFailureCode.POOL_NO_SCHEDULER,
+            )
         return self._scheduler
 
-    def _closing_scheduler(self) -> _ExecutionScheduler[object] | None:
+    def _closing_scheduler(self) -> ExecutionScheduler[object] | None:
         if self._closed:
             return None
         if self._scheduler is None:

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
+from dr_exec.core.kinds import ExecutorFailureCode
 
 if TYPE_CHECKING:
     from dr_exec.capabilities.protocols import Executor
@@ -27,7 +28,7 @@ def usable_cpu_count() -> int:
 
 
 @verify(UNIQUE)
-class _AdmissionResult(Enum):
+class AdmissionResult(Enum):
     ADMITTED = auto()
 
     INTAKE_CLOSED = auto()
@@ -58,8 +59,11 @@ class SchedulerBroken(ExecutorFailure):
     ``Scheduler break drops undelivered work`` contract in ``.defs/contracts.toml``.
     """
 
+    def __init__(self, message: str, /) -> None:
+        super().__init__(message, code=ExecutorFailureCode.SCHEDULER_BROKEN)
 
-class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
+
+class ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
     """Share one resident bound and completion queue across drivers."""
 
     __slots__ = (
@@ -107,12 +111,12 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
     def admit(
         self, job: ExecutionJob, context: ContextT, /
-    ) -> _AdmissionResult:
+    ) -> AdmissionResult:
         with self._condition:
             if self._intake_closed:
-                return _AdmissionResult.INTAKE_CLOSED
+                return AdmissionResult.INTAKE_CLOSED
             if self._residents >= self._capacity:
-                return _AdmissionResult.NO_ROOM
+                return AdmissionResult.NO_ROOM
             ticket = self._next_ticket
             self._next_ticket += 1
             token = CancelToken()
@@ -124,8 +128,8 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
             # A failed worker start drops this queued submission; buffered
             # completions still drain before the break surfaces.
             if self._broken is not None:
-                return _AdmissionResult.INTAKE_CLOSED
-            return _AdmissionResult.ADMITTED
+                return AdmissionResult.INTAKE_CLOSED
+            return AdmissionResult.ADMITTED
 
     def close_intake(self) -> None:
         with self._condition:
@@ -357,6 +361,8 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
 
 __all__ = [
+    "AdmissionResult",
+    "ExecutionScheduler",
     "SchedulerBroken",
     "usable_cpu_count",
 ]
