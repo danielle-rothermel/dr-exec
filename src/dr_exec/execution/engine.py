@@ -42,7 +42,10 @@ from dr_exec.declarations.validation import (
     validate_command_resolvability,
     validate_input_budget,
 )
-from dr_exec.execution.outcomes import attribute_outcome
+from dr_exec.execution.outcomes import (
+    attribute_outcome,
+    empty_payload_outputs,
+)
 from dr_exec.execution.retention import PayloadRetention, StreamRetention
 from dr_exec.execution.spawn import (
     ESCALATION_SIGNAL,
@@ -80,7 +83,6 @@ from dr_exec.recording.models import (
     ProtocolFailedOutcome,
     RealRecordReceipt,
     RecordingFailure,
-    RetainedPayloadStream,
     RunDeclaration,
     RunRecordHeader,
     SignaledOutcome,
@@ -644,16 +646,6 @@ def _exit_outcome(returncode: int, /) -> ExecutionOutcome:
     return ExitedOutcome(exit_code=returncode)
 
 
-def _empty_payload_outputs() -> PayloadOutputs:
-    empty = RetainedPayloadStream(
-        head=b"",
-        tail=b"",
-        produced_bytes=0,
-        dropped_bytes=0,
-    )
-    return PayloadOutputs(stdout=empty, stderr=empty)
-
-
 def _degraded_from(
     run: FinalizableRun,
     store: RunStore,
@@ -796,7 +788,7 @@ class _EngineCall:
             outcome=outcome,
             attribution=attribute_outcome(outcome),
             protocol_outputs=(),
-            payload_outputs=_empty_payload_outputs(),
+            payload_outputs=empty_payload_outputs(),
             measurements=ExecutionMeasurements(
                 started_at=moment,
                 finished_at=moment,
@@ -929,7 +921,7 @@ class _EngineCall:
                 prepared,
                 outcome=_spawn_outcome(setup_failure, target.executable),
                 protocol_outputs=(),
-                payload_outputs=_empty_payload_outputs(),
+                payload_outputs=empty_payload_outputs(),
                 started_at=started_at,
                 started_ns=started_ns,
                 teardown_duration_ns=teardown_ns,

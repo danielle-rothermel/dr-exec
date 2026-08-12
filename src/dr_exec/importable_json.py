@@ -27,8 +27,21 @@ from dr_exec.recording.models import CompletedExecution, ExitedOutcome
 
 # Persisted-format contract: these fixed envelope literals are shared by the
 # request and result positions and are pinned by golden tests.
-_ENVELOPE_SCHEMA: Final = "dr_exec.importable_json"
-_ENVELOPE_SCHEMA_VERSION: Final = 1
+ENVELOPE_SCHEMA: Final = "dr_exec.importable_json"
+ENVELOPE_SCHEMA_VERSION: Final = 1
+
+
+def is_importable_json_envelope(document: IdentityDocument, /) -> bool:
+    """Report whether a document carries the importable JSON envelope pair.
+
+    Each parent-side caller rejects a foreign envelope in its own error
+    vocabulary, so the shared step is the comparison, not the rejection.
+    """
+
+    return (
+        document.schema == ENVELOPE_SCHEMA
+        and document.schema_version == ENVELOPE_SCHEMA_VERSION
+    )
 
 
 class ImportableJsonResultError(ValueError):
@@ -131,10 +144,7 @@ def parse_importable_json_result(completed: CompletedExecution, /) -> Jsonable:
             "the importable JSON execution did not produce exactly one output"
         )
     output = outputs[0]
-    if (
-        output.schema != _ENVELOPE_SCHEMA
-        or output.schema_version != _ENVELOPE_SCHEMA_VERSION
-    ):
+    if not is_importable_json_envelope(output):
         raise ImportableJsonResultError(
             "the importable JSON output does not use the required envelope"
         )
@@ -146,10 +156,7 @@ def _invoke_importable_entry_point(
     request: IdentityDocument,
     /,
 ) -> Jsonable:
-    if (
-        request.schema != _ENVELOPE_SCHEMA
-        or request.schema_version != _ENVELOPE_SCHEMA_VERSION
-    ):
+    if not is_importable_json_envelope(request):
         raise ImportableJsonExecutorDispatchError(
             "request does not use the importable JSON envelope"
         )
@@ -193,8 +200,8 @@ def _invoke_importable_entry_point(
 def _envelope(payload: Jsonable, /) -> IdentityDocument:
     validated = validate_strict_json(payload)
     return build_identity_document(
-        schema=_ENVELOPE_SCHEMA,
-        schema_version=_ENVELOPE_SCHEMA_VERSION,
+        schema=ENVELOPE_SCHEMA,
+        schema_version=ENVELOPE_SCHEMA_VERSION,
         payload=validated,
     )
 
@@ -207,8 +214,8 @@ def _driver_source(entry_point: ImportableEntryPoint, /) -> str:
 
 _DR_EXEC_MODULE_NAME = {entry_point.module_name!r}
 _DR_EXEC_ATTRIBUTE_NAME = {entry_point.attribute_name!r}
-_DR_EXEC_ENVELOPE_SCHEMA = {_ENVELOPE_SCHEMA!r}
-_DR_EXEC_ENVELOPE_SCHEMA_VERSION = {_ENVELOPE_SCHEMA_VERSION}
+_DR_EXEC_ENVELOPE_SCHEMA = {ENVELOPE_SCHEMA!r}
+_DR_EXEC_ENVELOPE_SCHEMA_VERSION = {ENVELOPE_SCHEMA_VERSION}
 
 
 def dr_exec_main(request, emit):
@@ -231,6 +238,8 @@ def dr_exec_main(request, emit):
 
 
 __all__ = [
+    "ENVELOPE_SCHEMA",
+    "ENVELOPE_SCHEMA_VERSION",
     "ImportableEntryPoint",
     "ImportableJsonDispatchError",
     "ImportableJsonExecutorDispatchError",
@@ -240,5 +249,6 @@ __all__ = [
     "build_in_process_importable_json_job",
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",
+    "is_importable_json_envelope",
     "parse_importable_json_result",
 ]

@@ -27,7 +27,6 @@ from dr_exec.core.errors import ExecutorFailure
 from dr_exec.core.kinds import (
     BudgetAxis,
     ExecutorFailureCode,
-    ProtocolFailureCode,
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
@@ -37,33 +36,30 @@ from dr_exec.declarations.models import (
 )
 from dr_exec.declarations.transport import request_transport_bytes
 from dr_exec.declarations.validation import validate_declaration
-from dr_exec.execution.executor import _run_batch
 from dr_exec.execution.outcomes import (
-    attribute_outcome,
-    empty_payload_outputs,
+    completed_execution,
     executor_protocol_failure_attribution,
+    malformed_frame_outcome,
 )
 from dr_exec.execution.worker_pool_worker import (
     DETAIL_KEY,
-    ENVELOPE_SCHEMA,
-    ENVELOPE_SCHEMA_VERSION,
-    FRAME_TERMINATOR,
     READY_FRAME,
     RESULT_KEY,
-    STATUS_EXECUTOR_REJECTED,
     STATUS_KEY,
-    STATUS_OK,
-    STATUS_PAYLOAD_RAISED,
-    STATUS_PAYLOAD_RESULT_INVALID,
+    WORKER_FRAME_TERMINATOR,
+    WorkerFrameStatus,
+)
+from dr_exec.importable_json import (
+    ENVELOPE_SCHEMA,
+    ENVELOPE_SCHEMA_VERSION,
+    is_importable_json_envelope,
 )
 from dr_exec.recording.models import (
     BudgetExceededOutcome,
     CancelledOutcome,
     CompletedExecution,
     ExecutionAttribution,
-    ExecutionMeasurements,
     ExecutionOutcome,
-    ExecutionResult,
     ExitedOutcome,
     ProtocolFailedOutcome,
     SignaledOutcome,
@@ -77,8 +73,10 @@ from dr_exec.scheduling.pool import (
     ExecutionPool,
     ExecutionPoolConfig,
     FixedPoolCapacity,
+    batch_capacity,
     resolve_pool_capacity,
 )
+from dr_exec.scheduling.scheduler import run_batch
 
 _WORKER_MODULE: Final = "dr_exec.execution.worker_pool_worker"
 
@@ -144,25 +142,10 @@ class _Worker:
         request, so a large request and a large result never block each other.
         """
 
-        frame = (
-            self.frames.get()
-            if stop.unwatched
-            else self._receive_watched(stop)
-        )
+        frame = _get_watched(self.frames, stop=stop)
         if frame is None:
             raise _WorkerDied("the worker ended without a result frame")
         return frame
-
-    def _receive_watched(self, stop: _StopWatch, /) -> bytes | None:
-        """Wait for a frame while a caller's stop condition can intervene."""
-
-        while True:
-            try:
-                return self.frames.get(timeout=stop.poll_seconds())
-            except queue.Empty:
-                outcome = stop.outcome()
-                if outcome is not None:
-                    raise _StopRequested(outcome) from None
 
     def terminate(self) -> None:
         if self.process.poll() is None:
@@ -236,15 +219,14 @@ class _WorkerLease:
         traceback: TracebackType | None,
     ) -> None:
         if self._discarded:
-            self._pool.release_empty()
+            self._pool.retire_and_free(self.worker)
             return
         self._pool.release(self.worker)
 
     def discard(self) -> None:
-        """Kill this worker so the pool respawns into its freed slot."""
+        """Mark this worker for the kill this lease's exit carries out."""
 
         self._discarded = True
-        self._pool.discard(self.worker)
 
 
 class _WorkerSet:
@@ -295,8 +277,7 @@ class _WorkerSet:
         slot = self._take_slot(stop=stop)
         if slot is not None:
             if self._closed.is_set():
-                self._retire(slot)
-                self._slots.put(None)
+                self.retire_and_free(slot)
                 raise _WorkerSetClosed
             return _WorkerLease(self, slot)
         try:
@@ -318,30 +299,19 @@ class _WorkerSet:
     def _take_slot(self, /, *, stop: _StopWatch) -> _Worker | None:
         """Wait for a free slot, honoring a declared stop condition."""
 
-        if stop.unwatched:
-            return self._slots.get()
-        while True:
-            try:
-                return self._slots.get(timeout=stop.poll_seconds())
-            except queue.Empty:
-                outcome = stop.outcome()
-                if outcome is not None:
-                    raise _StopRequested(outcome) from None
+        return _get_watched(self._slots, stop=stop)
 
     def release(self, worker: _Worker, /) -> None:
         if self._closed.is_set():
-            self._retire(worker)
-            self._slots.put(None)
+            self.retire_and_free(worker)
             return
         self._slots.put(worker)
 
-    def release_empty(self) -> None:
-        self._slots.put(None)
-
-    def discard(self, worker: _Worker, /) -> None:
-        """Kill one worker and forget it, freeing its slot for a respawn."""
+    def retire_and_free(self, worker: _Worker, /) -> None:
+        """Kill one worker and free an empty slot for a later respawn."""
 
         self._retire(worker)
+        self._slots.put(None)
 
     def close(self) -> None:
         """Terminate every live worker without waiting for any job to end.
@@ -513,7 +483,14 @@ class WorkerPoolImportableJsonExecutor:
     ) -> Iterator[CompletedExecution]:
         """Stream a finite batch in completion order across the workers."""
 
-        return _run_batch(self, jobs, capacity=self._pool_capacity(config))
+        return run_batch(
+            self,
+            jobs,
+            capacity=batch_capacity(
+                config,
+                default=FixedPoolCapacity(max_active_jobs=self.width),
+            ),
+        )
 
     def open_pool(
         self,
@@ -562,11 +539,6 @@ class WorkerPoolImportableJsonExecutor:
     ) -> None:
         await self.close()
 
-    def _pool_capacity(self, config: ExecutionPoolConfig | None, /) -> int:
-        if config is None:
-            return self.width
-        return resolve_pool_capacity(config.capacity).max_active_jobs
-
 
 @dataclass(frozen=True, slots=True)
 class _StopWatch:
@@ -602,6 +574,20 @@ class _StopWatch:
         return max(0.0, min(_STOP_POLL_SECONDS, remaining))
 
 
+def _get_watched[T](source: queue.SimpleQueue[T], /, *, stop: _StopWatch) -> T:
+    """Take the next item, giving up when a declared stop condition fires."""
+
+    if stop.unwatched:
+        return source.get()
+    while True:
+        try:
+            return source.get(timeout=stop.poll_seconds())
+        except queue.Empty:
+            outcome = stop.outcome()
+            if outcome is not None:
+                raise _StopRequested(outcome) from None
+
+
 def _exchange(
     lease: _WorkerLease,
     execution: _Execution,
@@ -612,7 +598,7 @@ def _exchange(
     """Send one request, take one result, and attribute anything else."""
 
     try:
-        lease.worker.send(execution.transport + FRAME_TERMINATOR)
+        lease.worker.send(execution.transport + WORKER_FRAME_TERMINATOR)
         frame = lease.worker.receive(stop=stop)
     except _StopRequested as requested:
         lease.discard()
@@ -641,10 +627,9 @@ class _Execution:
             payload = _worker_frame_payload(frame)
         except ValueError as error:
             return self.protocol_failed(str(error))
-        status = payload.get(STATUS_KEY)
         detail = payload.get(DETAIL_KEY)
-        match status:
-            case _ if status == STATUS_OK:
+        match _frame_status(payload):
+            case WorkerFrameStatus.OK:
                 return self.completed(
                     outcome=ExitedOutcome(exit_code=0),
                     protocol_outputs=(
@@ -655,20 +640,16 @@ class _Execution:
                         ),
                     ),
                 )
-            case _ if status == STATUS_PAYLOAD_RAISED:
+            case WorkerFrameStatus.PAYLOAD_RAISED:
                 return self.completed(
                     outcome=ExitedOutcome(exit_code=1),
                     attribution_detail=str(detail),
                 )
-            case _ if status == STATUS_PAYLOAD_RESULT_INVALID:
+            case WorkerFrameStatus.PAYLOAD_RESULT_INVALID:
                 return self.completed(
-                    outcome=ProtocolFailedOutcome(
-                        failure_code=ProtocolFailureCode.MALFORMED_FRAME,
-                        failure_detail=str(detail),
-                        accepted_output_count=0,
-                    )
+                    outcome=malformed_frame_outcome(str(detail))
                 )
-            case _ if status == STATUS_EXECUTOR_REJECTED:
+            case WorkerFrameStatus.EXECUTOR_REJECTED:
                 return self.protocol_failed(str(detail))
             case _:
                 return self.protocol_failed(
@@ -677,11 +658,7 @@ class _Execution:
 
     def protocol_failed(self, detail: str, /) -> CompletedExecution:
         return self.completed(
-            outcome=ProtocolFailedOutcome(
-                failure_code=ProtocolFailureCode.MALFORMED_FRAME,
-                failure_detail=detail,
-                accepted_output_count=0,
-            ),
+            outcome=malformed_frame_outcome(detail),
             attribution_override=executor_protocol_failure_attribution,
         )
 
@@ -696,37 +673,28 @@ class _Execution:
         ]
         | None = None,
     ) -> CompletedExecution:
-        if attribution_override is not None and isinstance(
-            outcome, ProtocolFailedOutcome
-        ):
-            attribution = attribution_override(outcome)
-        else:
-            attribution = attribute_outcome(outcome)
-        if attribution_detail is not None:
-            attribution = attribution.model_copy(
-                update={"detail": attribution_detail}
-            )
-        result = ExecutionResult(
+        return completed_execution(
             execution_id=self.execution_id,
-            outcome=outcome,
-            attribution=attribution,
-            protocol_outputs=protocol_outputs,
-            payload_outputs=empty_payload_outputs(),
-            measurements=ExecutionMeasurements(
-                started_at=self.started_at,
-                finished_at=datetime.now(UTC),
-                duration_ns=time.monotonic_ns() - self.started_ns,
-                teardown_duration_ns=0,
-                input_bytes=len(self.transport),
-                protocol_bytes_received=0,
-            ),
-        )
-        return CompletedExecution(
-            result=result,
             record_receipt=WorkerPoolRecordReceipt(
                 execution_id=self.execution_id
             ),
+            outcome=outcome,
+            protocol_outputs=protocol_outputs,
+            started_at=self.started_at,
+            started_ns=self.started_ns,
+            input_bytes=len(self.transport),
+            attribution_detail=attribution_detail,
+            attribution_override=attribution_override,
         )
+
+
+def _frame_status(payload: dict[str, Jsonable], /) -> WorkerFrameStatus | None:
+    """Read the frame's status, or ``None`` for one this parent cannot name."""
+
+    try:
+        return WorkerFrameStatus(payload.get(STATUS_KEY))
+    except ValueError:
+        return None
 
 
 def _worker_frame_payload(frame: bytes, /) -> dict[str, Jsonable]:
@@ -736,10 +704,7 @@ def _worker_frame_payload(frame: bytes, /) -> dict[str, Jsonable]:
         )
     except Exception as error:
         raise ValueError("the worker returned a malformed frame") from error
-    if (
-        document.schema != ENVELOPE_SCHEMA
-        or document.schema_version != ENVELOPE_SCHEMA_VERSION
-    ):
+    if not is_importable_json_envelope(document):
         raise ValueError("the worker result does not use the envelope")
     payload = document.payload
     if not isinstance(payload, dict):
@@ -816,7 +781,7 @@ def _drain_frames(
             if not chunk:
                 break
             chunks.append(chunk)
-            if chunk.endswith(FRAME_TERMINATOR):
+            if chunk.endswith(WORKER_FRAME_TERMINATOR):
                 frames.put(b"".join(chunks))
                 chunks = []
     except OSError:

@@ -8,12 +8,16 @@ instead of copied.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
 from dr_exec import (
+    CompletedExecution,
+    ExecutionJob,
+    ExecutionPool,
+    ExecutionPoolConfig,
     ImportableEntryPoint,
     ImportableJsonExecutor,
     InProcessRecordReceipt,
@@ -93,6 +97,29 @@ RAISE_SYSTEM_EXIT = ImportableEntryPoint(
 )
 
 
+class PooledExecutor(Executor, Protocol):
+    """An executor that also offers the concrete batch and pool entries.
+
+    ``run_many`` and ``open_pool`` are conveniences every concrete executor
+    provides over ``ExecutionPool``; they are not members of the substitutable
+    ``Executor`` capability, so the suite names the wider shape here.
+    """
+
+    def run_many(
+        self,
+        jobs: Iterable[ExecutionJob],
+        /,
+        *,
+        config: ExecutionPoolConfig | None = None,
+    ) -> Iterator[CompletedExecution]:
+        raise NotImplementedError
+
+    def open_pool(
+        self, *, config: ExecutionPoolConfig | None = None
+    ) -> ExecutionPool:
+        raise NotImplementedError
+
+
 class ExecutorHarness(Protocol):
     """Open an executor for one entry point and describe its evidence."""
 
@@ -100,7 +127,7 @@ class ExecutorHarness(Protocol):
 
     def open(
         self, entry_point: ImportableEntryPoint, /, *, workers: int
-    ) -> AbstractContextManager[Executor]:
+    ) -> AbstractContextManager[PooledExecutor]:
         raise NotImplementedError
 
     def receipt_is_own(self, receipt: RecordReceipt, /) -> bool:
@@ -118,7 +145,7 @@ class InProcessHarness:
         /,
         *,
         workers: int = 1,
-    ) -> Iterator[Executor]:
+    ) -> Iterator[PooledExecutor]:
         yield ImportableJsonExecutor()
 
     def receipt_is_own(self, receipt: RecordReceipt, /) -> bool:
@@ -136,7 +163,7 @@ class WorkerPoolHarness:
         /,
         *,
         workers: int = 1,
-    ) -> Iterator[Executor]:
+    ) -> Iterator[PooledExecutor]:
         with WorkerPoolImportableJsonExecutor(
             entry_point=entry_point,
             worker_count=workers,

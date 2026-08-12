@@ -66,7 +66,7 @@ from dr_exec import (
 from dr_exec.core.kinds import BudgetAxis
 from dr_exec.execution import worker_pool, worker_pool_worker
 from dr_exec.execution.worker_pool import _spawn_worker, _StopWatch
-from dr_exec.scheduling.scheduler import usable_cpu_count
+from dr_exec.scheduling.pool import usable_cpu_count
 
 pytestmark = [pytest.mark.integration, pytest.mark.subprocess]
 

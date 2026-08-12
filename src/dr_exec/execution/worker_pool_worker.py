@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from enum import UNIQUE, StrEnum, verify
 from typing import IO, Final, cast
 
 from dr_serialize import (
@@ -27,23 +28,31 @@ from dr_serialize import (
 )
 
 # Persisted-format contract: the worker exchanges the same fixed envelope
-# literals as the in-process and process executors.
+# literals as the in-process and process executors. This module is the ``-c``
+# entry module of every spawned worker and imports nothing from ``dr_exec``, so
+# the literals are re-declared here deliberately and a golden test pins them
+# equal to the owning definitions in ``dr_exec.importable_json``.
 ENVELOPE_SCHEMA: Final = "dr_exec.importable_json"
 ENVELOPE_SCHEMA_VERSION: Final = 1
 
-FRAME_TERMINATOR: Final = b"\n"
+WORKER_FRAME_TERMINATOR: Final = b"\n"
 
 # Wire values for the one status field of a worker result frame. Never derived
 # from Python identifiers.
 STATUS_KEY: Final = "status"
-STATUS_OK: Final = "ok"
-STATUS_PAYLOAD_RAISED: Final = "payload_raised"
-STATUS_PAYLOAD_RESULT_INVALID: Final = "payload_result_invalid"
-STATUS_EXECUTOR_REJECTED: Final = "executor_rejected"
 DETAIL_KEY: Final = "detail"
 RESULT_KEY: Final = "result"
 
-READY_FRAME: Final = b"ready" + FRAME_TERMINATOR
+
+@verify(UNIQUE)
+class WorkerFrameStatus(StrEnum):
+    OK = "ok"
+    PAYLOAD_RAISED = "payload_raised"
+    PAYLOAD_RESULT_INVALID = "payload_result_invalid"
+    EXECUTOR_REJECTED = "executor_rejected"
+
+
+READY_FRAME: Final = b"ready" + WORKER_FRAME_TERMINATOR
 
 _STARTUP_IMPORT_FAILED_EXIT_CODE: Final = 3
 
@@ -156,22 +165,24 @@ def _handle(
     try:
         request = _decode_request(frame)
     except Exception as error:  # noqa: BLE001 - reported to the parent
-        return _status_frame(STATUS_EXECUTOR_REJECTED, str(error))
+        return _status_frame(WorkerFrameStatus.EXECUTOR_REJECTED, str(error))
     try:
         payload = validate_strict_json(request.payload)
     except StrictJsonError as error:
-        return _status_frame(STATUS_EXECUTOR_REJECTED, str(error))
+        return _status_frame(WorkerFrameStatus.EXECUTOR_REJECTED, str(error))
     try:
         returned = entry_point(payload)
     except Exception:  # noqa: BLE001 - a payload failure is result data
         return _status_frame(
-            STATUS_PAYLOAD_RAISED,
+            WorkerFrameStatus.PAYLOAD_RAISED,
             "the importable JSON entry point raised",
         )
     try:
         result = validate_strict_json(returned)
     except StrictJsonError as error:
-        return _status_frame(STATUS_PAYLOAD_RESULT_INVALID, str(error))
+        return _status_frame(
+            WorkerFrameStatus.PAYLOAD_RESULT_INVALID, str(error)
+        )
     return _result_frame(result)
 
 
@@ -189,18 +200,18 @@ def _result_frame(result: Jsonable, /) -> bytes:
     envelope = build_identity_document(
         schema=ENVELOPE_SCHEMA,
         schema_version=ENVELOPE_SCHEMA_VERSION,
-        payload={STATUS_KEY: STATUS_OK, RESULT_KEY: result},
+        payload={STATUS_KEY: WorkerFrameStatus.OK, RESULT_KEY: result},
     )
-    return canonical_identity_json_bytes(envelope) + FRAME_TERMINATOR
+    return canonical_identity_json_bytes(envelope) + WORKER_FRAME_TERMINATOR
 
 
-def _status_frame(status: str, detail: str, /) -> bytes:
+def _status_frame(status: WorkerFrameStatus, detail: str, /) -> bytes:
     envelope = build_identity_document(
         schema=ENVELOPE_SCHEMA,
         schema_version=ENVELOPE_SCHEMA_VERSION,
         payload={STATUS_KEY: status, DETAIL_KEY: detail},
     )
-    return canonical_identity_json_bytes(envelope) + FRAME_TERMINATOR
+    return canonical_identity_json_bytes(envelope) + WORKER_FRAME_TERMINATOR
 
 
 def _read_frame(stream: IO[bytes], /) -> bytes | None:
@@ -212,7 +223,7 @@ def _read_frame(stream: IO[bytes], /) -> bytes | None:
         if not chunk:
             return None if not chunks else b"".join(chunks)
         chunks.append(chunk)
-        if chunk.endswith(FRAME_TERMINATOR):
+        if chunk.endswith(WORKER_FRAME_TERMINATOR):
             return b"".join(chunks)
 
 

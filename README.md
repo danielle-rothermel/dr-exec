@@ -502,9 +502,10 @@ class Executor(Protocol):
     ) -> CompletedExecution: ...
 ```
 
-The production executor exposes awaitable one-job, blocking one-job,
-finite-batch, and asynchronous-pool entry points over the same execution and
-scheduling contracts.
+The substitutable `Executor` capability is the two one-job entries, awaitable
+and blocking. Each concrete executor additionally offers a finite-batch and an
+asynchronous-pool entry as conveniences over `ExecutionPool`, driving the same
+execution and scheduling contracts.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -691,13 +692,13 @@ and completions return that same context paired with the completed execution.
 
 ```python
 @dataclass(frozen=True, slots=True)
-class ExecutionSubmission(Generic[ContextT]):
+class ExecutionSubmission[ContextT]:
     job: ExecutionJob
     context: ContextT
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionCompletion(Generic[ContextT]):
+class ExecutionCompletion[ContextT]:
     completed_execution: CompletedExecution
     context: ContextT
 
@@ -705,7 +706,7 @@ class ExecutionCompletion(Generic[ContextT]):
 class ExecutionPool:
     async def __aenter__(self) -> ExecutionPool: ...
 
-    async def run_stream(
+    async def run_stream[ContextT](
         self,
         submissions: AsyncIterable[ExecutionSubmission[ContextT]],
         /,

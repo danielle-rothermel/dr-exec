@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Generic, TypeVar, cast
+from typing import cast
 
 from pydantic import PositiveInt
 
@@ -23,7 +24,6 @@ from dr_exec.scheduling.scheduler import (
     AdmissionResult,
     ExecutionScheduler,
     SchedulerBroken,
-    usable_cpu_count,
 )
 
 
@@ -57,19 +57,21 @@ class EffectivePoolCapacity(ContractModel):
     max_active_jobs: PositiveInt
 
 
-ContextT = TypeVar("ContextT")
-
-
 @dataclass(frozen=True, slots=True)
-class ExecutionSubmission(Generic[ContextT]):  # noqa: UP046
+class ExecutionSubmission[ContextT]:
     job: ExecutionJob
     context: ContextT
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionCompletion(Generic[ContextT]):  # noqa: UP046
+class ExecutionCompletion[ContextT]:
     completed_execution: CompletedExecution
     context: ContextT
+
+
+def usable_cpu_count() -> int:
+    reported = getattr(os, "process_cpu_count", os.cpu_count)()
+    return max(1, reported or 1)
 
 
 def resolve_pool_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity:
@@ -94,6 +96,16 @@ def resolve_pool_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity:
                 cpu_count=cpus,
                 max_active_jobs=capacity.max_active_jobs,
             )
+
+
+def batch_capacity(
+    config: ExecutionPoolConfig | None, /, *, default: PoolCapacity
+) -> int:
+    """Resolve the resident bound one batch runs under."""
+
+    return resolve_pool_capacity(
+        config.capacity if config is not None else default
+    ).max_active_jobs
 
 
 class ExecutionPool:
@@ -177,12 +189,10 @@ class ExecutionPool:
         else:
             await self.abort()
 
-    async def run_stream(
+    async def run_stream[ContextT](
         self,
         submissions: AsyncIterable[ExecutionSubmission[ContextT]],
         /,
-        *,
-        _owned_by: Callable[[object], bool] | None = None,
     ) -> AsyncIterator[ExecutionCompletion[ContextT]]:
         """Yield shared-queue completions under one resident bound.
 
@@ -195,6 +205,26 @@ class ExecutionPool:
         raises; queued admitted work may already have been dropped.
         """
 
+        async for completion in self._drive_stream(
+            submissions, owned_by=_unowned
+        ):
+            yield completion
+
+    async def _drive_stream[ContextT](
+        self,
+        submissions: AsyncIterable[ExecutionSubmission[ContextT]],
+        /,
+        *,
+        owned_by: Callable[[object], bool],
+    ) -> AsyncIterator[ExecutionCompletion[ContextT]]:
+        """Admit from one source and yield the completions this stream claims.
+
+        A stream owned by a ``map_stream`` ends on the work it submitted
+        itself; an unowned stream shares the pool's completion queue and so
+        ends only once no resident work remains anywhere in the pool.
+        """
+
+        ends_on_own_work = owned_by is not _unowned
         self._require_owning_loop()
         scheduler = self._running_scheduler()
         source = aiter(submissions)
@@ -219,7 +249,7 @@ class ExecutionPool:
                     source_pull = None
 
                 completion = scheduler.take_completion_nowait(
-                    owned_by=_owned_by if _owned_by is not None else _unowned
+                    owned_by=owned_by
                 )
                 if completion is not None:
                     outstanding -= 1
@@ -243,7 +273,7 @@ class ExecutionPool:
                     and carried is None
                     and (
                         outstanding == 0
-                        if _owned_by is not None
+                        if ends_on_own_work
                         else not scheduler.has_residents()
                     )
                 ):
@@ -302,7 +332,7 @@ class ExecutionPool:
             if self._active_streams == 0 and self._shutdown_complete:
                 scheduler.discard_completions()
 
-    async def map_stream(
+    async def map_stream[ContextT](
         self,
         submissions: AsyncIterable[ExecutionSubmission[ContextT]]
         | Iterable[ExecutionSubmission[ContextT]],
@@ -339,13 +369,13 @@ class ExecutionPool:
         )
         if width < 1:
             raise ValueError("concurrency must be positive")
-        gate = _AdmissionGate(width)
+        gate = asyncio.Semaphore(width)
         owner = _StreamOwner()
         scheduler = self._running_scheduler()
         try:
-            async for completion in self.run_stream(
+            async for completion in self._drive_stream(
                 _gated(_as_async(submissions), gate, owner),
-                _owned_by=owner.owns,
+                owned_by=owner.owns,
             ):
                 gate.release()
                 yield ExecutionCompletion(
@@ -456,22 +486,6 @@ class ExecutionPool:
         return self._scheduler
 
 
-class _AdmissionGate:
-    """Hold the source at a fixed number of submissions in flight."""
-
-    __slots__ = ("_free", "_width")
-
-    def __init__(self, width: int, /) -> None:
-        self._width = width
-        self._free = asyncio.Semaphore(width)
-
-    async def acquire(self) -> None:
-        await self._free.acquire()
-
-    def release(self) -> None:
-        self._free.release()
-
-
 @dataclass(frozen=True, slots=True)
 class _OwnedContext:
     """A caller context tagged with the ``map_stream`` that submitted it."""
@@ -493,7 +507,7 @@ class _StreamOwner:
 
 async def _gated[T](
     source: AsyncIterator[ExecutionSubmission[T]],
-    gate: _AdmissionGate,
+    gate: asyncio.Semaphore,
     owner: _StreamOwner,
     /,
 ) -> AsyncIterator[ExecutionSubmission[T]]:
@@ -582,5 +596,7 @@ __all__ = [
     "ExecutionSubmission",
     "FixedPoolCapacity",
     "PoolCapacity",
+    "batch_capacity",
     "resolve_pool_capacity",
+    "usable_cpu_count",
 ]

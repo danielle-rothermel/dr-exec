@@ -19,7 +19,7 @@ from dr_exec.core.model import (
 )
 from dr_exec.declarations.models import ExecutorSelfBudgets
 from dr_exec.runtime.wire import (
-    FRAME_TERMINATOR,
+    PROTOCOL_FRAME_TERMINATOR,
     ProtocolComplete,
     ProtocolFrame,
     ProtocolOutput,
@@ -118,7 +118,7 @@ class _FrameAcquisition:
 
     def next_frame(self, *, after_completion: bool) -> bytes | None:
         while True:
-            terminator = self._buffer.find(FRAME_TERMINATOR)
+            terminator = self._buffer.find(PROTOCOL_FRAME_TERMINATOR)
             if terminator >= 0:
                 frame = bytes(self._buffer[:terminator])
                 del self._buffer[: terminator + 1]

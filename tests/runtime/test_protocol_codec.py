@@ -30,7 +30,7 @@ from dr_exec.runtime.protocol import (
     read_protocol_stream,
 )
 from dr_exec.runtime.wire import (
-    FRAME_TERMINATOR,
+    PROTOCOL_FRAME_TERMINATOR,
     ProtocolComplete,
     ProtocolOutput,
     ProtocolPrelude,
@@ -135,8 +135,8 @@ def test_frames_carry_no_raw_line_break_before_the_terminator() -> None:
     encoded = encode_frame(
         ProtocolOutput(version=1, sequence=0, document=document)
     )
-    assert encoded.count(FRAME_TERMINATOR) == 1
-    assert encoded.endswith(FRAME_TERMINATOR)
+    assert encoded.count(PROTOCOL_FRAME_TERMINATOR) == 1
+    assert encoded.endswith(PROTOCOL_FRAME_TERMINATOR)
     assert b"\r" not in encoded
 
 
@@ -177,7 +177,7 @@ def test_a_well_formed_stream_yields_its_outputs_in_order(
 
 def test_invalid_utf8_is_a_malformed_frame() -> None:
     digest = Sha256Digest("e" * 64)
-    stream = b"\xff\xfe" + FRAME_TERMINATOR
+    stream = b"\xff\xfe" + PROTOCOL_FRAME_TERMINATOR
     result = _read(stream, request_id_sha256=digest)
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.MALFORMED_FRAME
@@ -238,7 +238,7 @@ def test_a_frame_that_is_not_a_closed_canonical_model_is_malformed(
 ) -> None:
     digest = Sha256Digest("f" * 64)
     result = _read(
-        frame + FRAME_TERMINATOR,
+        frame + PROTOCOL_FRAME_TERMINATOR,
         request_id_sha256=digest,
     )
     assert result.failure is not None
@@ -266,7 +266,7 @@ def test_a_frame_that_is_not_a_closed_canonical_model_is_malformed(
 )
 def test_every_raw_frame_requires_an_explicit_version(frame: bytes) -> None:
     result = _read(
-        frame + FRAME_TERMINATOR,
+        frame + PROTOCOL_FRAME_TERMINATOR,
         request_id_sha256=Sha256Digest("a" * 64),
     )
 
@@ -313,7 +313,7 @@ def test_a_malformed_embedded_document_is_malformed_not_an_escape(
         + b'{"document":'
         + document
         + b',"kind":"output","sequence":1,"version":1}'
-        + FRAME_TERMINATOR
+        + PROTOCOL_FRAME_TERMINATOR
     )
 
     result = _read(stream, request_id_sha256=digest)
@@ -328,7 +328,7 @@ def test_a_crlf_terminator_leaves_a_non_canonical_frame() -> None:
     stream = (
         encode_frame(
             ProtocolPrelude(version=1, request_id_sha256=digest)
-        ).removesuffix(FRAME_TERMINATOR)
+        ).removesuffix(PROTOCOL_FRAME_TERMINATOR)
         + b"\r\n"
     )
     result = _read(stream, request_id_sha256=digest)
@@ -495,7 +495,7 @@ def test_an_empty_stream_is_an_incomplete_stream() -> None:
 
 def test_a_missing_terminal_lf_is_an_incomplete_stream() -> None:
     digest = Sha256Digest("a" * 64)
-    stream = _stream(digest, 1).removesuffix(FRAME_TERMINATOR)
+    stream = _stream(digest, 1).removesuffix(PROTOCOL_FRAME_TERMINATOR)
     result = _read(stream, request_id_sha256=digest)
     assert result.failure is not None
     assert result.failure.code == ProtocolFailureCode.INCOMPLETE_STREAM
@@ -537,7 +537,9 @@ def test_a_frame_exactly_at_its_byte_budget_is_accepted() -> None:
     digest = Sha256Digest("a" * 64)
     stream = _stream(digest, 1)
     longest = max(
-        len(frame) for frame in stream.split(FRAME_TERMINATOR) if frame
+        len(frame)
+        for frame in stream.split(PROTOCOL_FRAME_TERMINATOR)
+        if frame
     )
     result = _read(
         stream,
@@ -551,7 +553,9 @@ def test_a_frame_one_byte_over_its_budget_is_oversized() -> None:
     digest = Sha256Digest("a" * 64)
     stream = _stream(digest, 1)
     longest = max(
-        len(frame) for frame in stream.split(FRAME_TERMINATOR) if frame
+        len(frame)
+        for frame in stream.split(PROTOCOL_FRAME_TERMINATOR)
+        if frame
     )
     result = _read(
         stream,
@@ -568,7 +572,7 @@ def test_an_oversized_frame_is_refused_without_being_acquired() -> None:
         ProtocolPrelude(version=1, request_id_sha256=digest)
     )
     budget = len(prelude) - 2
-    stream = prelude + b"x" * 10_000_000 + FRAME_TERMINATOR
+    stream = prelude + b"x" * 10_000_000 + PROTOCOL_FRAME_TERMINATOR
     result = _read(
         stream,
         request_id_sha256=digest,
@@ -613,7 +617,7 @@ def test_malformed_frame_accounting_stops_at_the_offending_terminator() -> (
     None
 ):
     digest = Sha256Digest("a" * 64)
-    offending = b"{}" + FRAME_TERMINATOR
+    offending = b"{}" + PROTOCOL_FRAME_TERMINATOR
     result = read_protocol_stream(
         cast("IO[bytes]", _TrickleReader(offending + b"not-acquired")),
         request_id_sha256=digest,
@@ -699,7 +703,9 @@ def test_the_frame_byte_edge_holds_under_byte_at_a_time_reads(
     digest = Sha256Digest("a" * 64)
     stream = _stream(digest, 1)
     longest = max(
-        len(frame) for frame in stream.split(FRAME_TERMINATOR) if frame
+        len(frame)
+        for frame in stream.split(PROTOCOL_FRAME_TERMINATOR)
+        if frame
     )
     result = read_protocol_stream(
         cast("IO[bytes]", _TrickleReader(stream)),
@@ -856,7 +862,8 @@ def _raw_nested_stream(digest: Sha256Digest, payload_depth: int, /) -> bytes:
     output = (
         b'{"document":{"payload":' + payload + b","
         b'"schema":"' + OUTPUT_SCHEMA.encode() + b'","schema_version":1},'
-        b'"kind":"output","sequence":0,"version":1}' + FRAME_TERMINATOR
+        b'"kind":"output","sequence":0,"version":1}'
+        + PROTOCOL_FRAME_TERMINATOR
     )
     return (
         encode_frame(ProtocolPrelude(version=1, request_id_sha256=digest))

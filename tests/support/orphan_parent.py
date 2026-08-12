@@ -28,7 +28,7 @@ from dr_exec.execution.worker_pool import _spawn_worker, _StopWatch
 from dr_exec.execution.worker_pool_worker import (
     ENVELOPE_SCHEMA,
     ENVELOPE_SCHEMA_VERSION,
-    FRAME_TERMINATOR,
+    WORKER_FRAME_TERMINATOR,
 )
 
 IDLE = "idle"
@@ -54,7 +54,9 @@ def main() -> None:
             schema_version=ENVELOPE_SCHEMA_VERSION,
             payload={"seconds": _NEVER_RETURNS_SECONDS},
         )
-        worker.send(canonical_identity_json_bytes(envelope) + FRAME_TERMINATOR)
+        worker.send(
+            canonical_identity_json_bytes(envelope) + WORKER_FRAME_TERMINATOR
+        )
 
     print(worker.process.pid, flush=True)
     # Nothing here may exit on its own: the test's SIGKILL is the only end.
