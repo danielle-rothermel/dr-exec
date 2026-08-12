@@ -54,7 +54,8 @@ class SchedulerBroken(ExecutorFailure):
     """Scheduler machinery failed, ending trustworthy delivery.
 
     Buffered completions drain first; queued admitted work is dropped and
-    in-flight results arriving after delivery ends are not delivered.
+    in-flight results arriving after delivery ends are not delivered. See the
+    ``Scheduler break drops undelivered work`` contract in ``.defs/contracts.toml``.
     """
 
 
@@ -357,8 +358,5 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
 __all__ = [
     "SchedulerBroken",
-    "_Admitted",
-    "_Completion",
-    "_ExecutionScheduler",
     "usable_cpu_count",
 ]

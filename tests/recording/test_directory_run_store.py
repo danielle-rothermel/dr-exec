@@ -463,6 +463,7 @@ _FINALIZED_LEAF_KEY_PATHS = _PREPARED_LEAF_KEY_PATHS | frozenset(
         "outputs.stdout.relative_path",
         "outputs.stdout.sha256",
         "outputs.stdout.size_bytes",
+        "result.attribution.detail",
         "result.attribution.owner",
         "result.execution_id.attempt_id",
         "result.execution_id.job_id",
@@ -1164,24 +1165,21 @@ def test_each_target_producer_is_secret_free_across_the_lifecycle(
 
 
 @pytest.mark.parametrize(
-    ("outcome", "canaries", "expected_outcome_paths"),
+    ("outcome", "expected_outcome_paths"),
     [
         pytest.param(
             ExitedOutcome(exit_code=0),
-            (),
             frozenset({"kind", "exit_code"}),
             id="exited",
         ),
         pytest.param(
             SignaledOutcome(signal_number=9),
-            (),
             frozenset({"kind", "signal_number"}),
             id="signaled",
         ),
         pytest.param(
             SpawnAbsentOutcome(executable=SPAWN_ABSENT_CANARY),
-            (SPAWN_ABSENT_CANARY,),
-            frozenset({"kind"}),
+            frozenset({"kind", "executable"}),
             id="spawn-absent",
         ),
         pytest.param(
@@ -1189,13 +1187,11 @@ def test_each_target_producer_is_secret_free_across_the_lifecycle(
                 errno=errno.EACCES,
                 error_message=SPAWN_FAILURE_CANARY,
             ),
-            (SPAWN_FAILURE_CANARY,),
-            frozenset({"kind", "errno"}),
+            frozenset({"kind", "errno", "error_message"}),
             id="spawn-failed",
         ),
         pytest.param(
             BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME),
-            (),
             frozenset({"kind", "axis"}),
             id="budget-exceeded",
         ),
@@ -1205,24 +1201,28 @@ def test_each_target_producer_is_secret_free_across_the_lifecycle(
                 failure_detail=PROTOCOL_FAILURE_CANARY,
                 accepted_output_count=0,
             ),
-            (PROTOCOL_FAILURE_CANARY,),
-            frozenset({"kind", "failure_code", "accepted_output_count"}),
+            frozenset(
+                {
+                    "kind",
+                    "failure_code",
+                    "accepted_output_count",
+                    "failure_detail",
+                }
+            ),
             id="protocol-failed",
         ),
         pytest.param(
             CancelledOutcome(),
-            (),
             frozenset({"kind"}),
             id="cancelled",
         ),
     ],
 )
-def test_every_outcome_projection_has_exact_paths_and_no_recoverable_secret(
+def test_every_outcome_projection_has_exact_paths_and_persists_diagnostic_fields(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
     host_runtime: IsolatedHostPythonRuntime,
     outcome: ExecutionOutcome,
-    canaries: tuple[str, ...],
     expected_outcome_paths: frozenset[str],
 ) -> None:
     prepared_run = store.prepare(
@@ -1248,19 +1248,25 @@ def test_every_outcome_projection_has_exact_paths_and_no_recoverable_secret(
         ),
     )
     finalized_bytes = _manifest_bytes(_record_dir(store, running_run))
-
-    _assert_no_recoverable_canaries(
-        finalized_bytes,
-        (*canaries, ATTRIBUTION_CANARY),
-    )
     finalized = json.loads(finalized_bytes)
+    assert finalized["result"]["attribution"]["detail"] == ATTRIBUTION_CANARY
+    persisted_outcome = finalized["result"]["outcome"]
+    match outcome:
+        case SpawnAbsentOutcome():
+            assert persisted_outcome["executable"] == outcome.executable
+        case SpawnFailedOutcome():
+            assert persisted_outcome["error_message"] == outcome.error_message
+        case ProtocolFailedOutcome():
+            assert (
+                persisted_outcome["failure_detail"] == outcome.failure_detail
+            )
     assert _leaf_key_paths(finalized) == _with_outcome_leaf_key_paths(
         _FINALIZED_LEAF_KEY_PATHS,
         expected_outcome_paths,
     )
 
 
-def test_result_byte_and_attribution_fields_leave_only_structural_evidence(
+def test_result_attribution_detail_persists_while_stream_bytes_stay_retained_only(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
     host_runtime: IsolatedHostPythonRuntime,
@@ -1296,10 +1302,12 @@ def test_result_byte_and_attribution_fields_leave_only_structural_evidence(
         ),
     )
 
+    manifest_bytes = _manifest_bytes(_record_dir(store, running_run))
+    finalized = json.loads(manifest_bytes)
+    assert finalized["result"]["attribution"]["detail"] == ATTRIBUTION_CANARY
     _assert_no_recoverable_canaries(
-        _manifest_bytes(_record_dir(store, running_run)),
+        manifest_bytes,
         (
-            ATTRIBUTION_CANARY,
             STDOUT_HEAD_CANARY,
             STDOUT_TAIL_CANARY,
             STDERR_HEAD_CANARY,

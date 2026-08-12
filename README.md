@@ -428,7 +428,10 @@ loudly, with attribution distinguishing a payload-caused crash from a pool
 failure, and the pool respawns a replacement worker; no job silently hangs or
 disappears. Budgets remain unbudgeted by default; when a caller declares a
 finite wall-time budget, the pool enforces it by terminating the worker, which
-makes the budget real rather than advisory.
+makes the budget real rather than advisory. If scheduling machinery breaks, the
+pool raises `SchedulerBroken` from `dr_exec`; queued work is dropped with no
+terminal outcome, so callers must reconcile the whole in-flight window rather
+than trust per-job results alone.
 
 Workers do not outlive the pool that owns them, even if the owning process dies
 abnormally and never gets to close anything. An idle worker ends when its
@@ -542,7 +545,10 @@ class ProcessExecutor:
 
 Per-job outcomes are closed typed data rather than raw process status or
 synthetic return codes. Each completed execution also carries a receipt for a
-complete or degraded durable record or a fake result.
+complete or degraded durable record or a fake result. Finalized run records
+carry the same attribution detail and outcome diagnostics as the in-memory
+result — spawn paths, error messages, protocol failure details, and attribution
+text persist on disk, not just structural fields.
 
 ```python
 class OutcomeKind(StrEnum):

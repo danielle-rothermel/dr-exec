@@ -724,6 +724,7 @@ def test_wall_time_overflow_terminates_an_otherwise_immortal_child(
     assert completed.result.outcome == BudgetExceededOutcome(
         axis=BudgetAxis.WALL_TIME
     )
+    assert completed.result.attribution.owner is FailureOwner.EXECUTOR
     assert completed.result.payload_outputs.stdout.head == b"running"
 
 

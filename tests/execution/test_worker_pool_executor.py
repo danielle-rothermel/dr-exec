@@ -397,6 +397,7 @@ def test_a_finite_wall_time_budget_kills_a_worker_that_ignores_cancellation(
     outcome = completed.result.outcome
     assert isinstance(outcome, BudgetExceededOutcome)
     assert outcome.axis is BudgetAxis.WALL_TIME
+    assert completed.result.attribution.owner is FailureOwner.EXECUTOR
     assert not gate.exists()
     assert parse_importable_json_result(after) == {"released": True}
 
@@ -508,6 +509,7 @@ def test_a_declared_stop_condition_reaches_a_job_waiting_for_a_slot(
     if stopper == "budget":
         assert isinstance(outcome, BudgetExceededOutcome)
         assert outcome.axis is BudgetAxis.WALL_TIME
+        assert completed.result.attribution.owner is FailureOwner.EXECUTOR
     else:
         assert isinstance(outcome, CancelledOutcome)
 
@@ -801,6 +803,7 @@ def test_a_wall_time_budget_stops_a_job_waiting_on_a_blocking_import(
     outcome = completed.result.outcome
     assert isinstance(outcome, BudgetExceededOutcome)
     assert outcome.axis is BudgetAxis.WALL_TIME
+    assert completed.result.attribution.owner is FailureOwner.EXECUTOR
 
 
 def test_a_caller_cancel_stops_a_job_waiting_on_a_blocking_import(
