@@ -286,8 +286,15 @@ class _WorkerSet:
         up here rather than wait behind work it never bounded.
         """
 
+        if self._closed.is_set():
+            raise _WorkerSetClosed
+
         slot = self._take_slot(stop=stop)
         if slot is not None:
+            if self._closed.is_set():
+                self._retire(slot)
+                self._slots.put(None)
+                raise _WorkerSetClosed
             return _WorkerLease(self, slot)
         try:
             worker = _spawn_worker(self._entry_point)
@@ -350,6 +357,25 @@ class _WorkerSet:
             self._live.clear()
         for worker in live:
             worker.terminate()
+        self._drain_idle_workers()
+
+    def _drain_idle_workers(self) -> None:
+        """Retire idle workers still waiting in the slot queue.
+
+        A worker returned to the queue before ``close()`` remains dequeueable
+        even after it is terminated; replace those entries with empty slots.
+        """
+
+        pending: list[_Worker | None] = []
+        while True:
+            try:
+                pending.append(self._slots.get(block=False))
+            except queue.Empty:
+                break
+        for slot in pending:
+            if slot is not None:
+                slot.terminate()
+            self._slots.put(None)
 
     def _retire(self, worker: _Worker, /) -> None:
         with self._lock:

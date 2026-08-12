@@ -354,7 +354,9 @@ slot and continues. No job is retried, failed over, quarantined, silently \
 dropped, or left waiting on a dead pipe. Closing a pool terminates its live \
 workers rather than waiting for a slot a running job may never return, so a \
 job in flight at close completes through that same worker-death path instead \
-of blocking the caller. A worker does not outlive the parent that owns it: an \
+of blocking the caller. After close, new jobs fail cleanly as \
+`ProtocolFailedOutcome` rather than reusing terminated workers left in idle \
+slots. A worker does not outlive the parent that owns it: an \
 idle worker ends at request-pipe EOF, and a worker inside a job ends when it \
 observes that it has been reparented. That cleanup bounds only an orphan's \
 survival, never a job's runtime or a payload's size."""

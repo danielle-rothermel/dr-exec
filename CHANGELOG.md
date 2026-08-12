@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   offloads to `close_blocking()`, the renamed blocking teardown primitive. Sync
   `with` calls `close_blocking()` via `__exit__`; async callers use
   `await executor.close()` or `async with WorkerPoolImportableJsonExecutor(...)`.
+- Closed worker pools reject new jobs with `ProtocolFailedOutcome` instead of
+  dequeuing terminated idle workers.
 
 ## [0.1.9] - 2026-08-11
 

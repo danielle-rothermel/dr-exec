@@ -957,7 +957,7 @@ def test_awaitable_close_matches_close_blocking_effect(
 def test_async_context_manager_closes_workers() -> None:
     job = job_for_entry_point(ECHO, {"value": 1})
 
-    async def run() -> None:
+    async def run() -> CompletedExecution:
         async with WorkerPoolImportableJsonExecutor(
             entry_point=ECHO, worker_count=1
         ) as executor:
@@ -965,9 +965,28 @@ def test_async_context_manager_closes_workers() -> None:
             assert parse_importable_json_result(completed) == {
                 "value": {"value": 1}
             }
-        await executor.close()
+        return await executor.run(job)
 
-    asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
+    completed = asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
+
+    assert isinstance(completed.result.outcome, ProtocolFailedOutcome)
+    assert completed.result.attribution.detail == (
+        "the worker pool closed while this job was starting a worker"
+    )
+
+
+def test_a_closed_idle_pool_rejects_new_jobs_cleanly() -> None:
+    job = job_for_entry_point(ECHO, {"value": 1})
+    executor = WorkerPoolImportableJsonExecutor(
+        entry_point=ECHO, worker_count=1
+    )
+    executor.run_blocking(job)
+    executor.close_blocking()
+    completed = executor.run_blocking(job)
+    assert isinstance(completed.result.outcome, ProtocolFailedOutcome)
+    assert completed.result.attribution.detail == (
+        "the worker pool closed while this job was starting a worker"
+    )
 
 
 @pytest.mark.parametrize("mode", [orphan_parent.IDLE, orphan_parent.BUSY])
