@@ -50,8 +50,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   platform check, so one function answers what dr-exec checks before it spawns.
   The engine's own `validate_input_budget` call and the resolvability check
   buried inside `_resolve_executable` are gone; `_resolve_executable` is now a
-  pure `shutil.which` lookup. The input budget is therefore checked against
-  `declared_input_bytes(job)` rather than the bytes the `Runtime` prepared —
+  pure `shutil.which` lookup. The input budget is therefore checked against the
+  job's declared input bytes rather than the bytes the `Runtime` prepared —
   identical for the shipped runtime, but the `Runtime` Protocol does not
   guarantee it. In-process targets are still rejected ahead of the shared gate,
   so they keep reporting `ExecutorFailureCode.TARGET_NOT_SUPPORTED`, and

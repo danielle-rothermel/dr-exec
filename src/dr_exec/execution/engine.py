@@ -567,7 +567,7 @@ class _Transports:
             protocol is None or protocol.forward_read is None
         ):  # pragma: no cover - one call per attempt
             raise ExecutorFailure(
-                "the protocol transport was already taken",
+                "the protocol transport is absent or was already taken",
                 code=ExecutorFailureCode.PROTOCOL_TRANSPORT_TAKEN,
             )
         descriptor = protocol.forward_read
@@ -928,7 +928,7 @@ class _EngineCall:
             teardown_ns = _tear_down(
                 process,
                 self.self_budgets,
-                leads_group=True if observed is None else observed.leads_group,
+                leads_group=observed is None or observed.leads_group,
             )
         transports.join(self.self_budgets)
         match observed:
