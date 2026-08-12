@@ -68,14 +68,13 @@ title = "Self-budgets are enforced only at owned v1 boundaries"
 statement = """
 Executor self-budgets default to explicitly unbudgeted. V1 enforces finite \
 startup, termination, and join time, plus protocol frame bytes, total bytes, \
-output count, and JSON depth. The caller-configurable `manifest_bytes` executor \
-self-budget has no v1 enforcement point; the fixed run-record parser and \
-storage ceilings are structural boundaries, not enforcement of that \
-declaration. Narration bytes, recording-failure count, and failure-detail bytes \
-are also represented but unenforced. V1 exposes no narration surface."""
+output count, and JSON depth. Run-record manifests publish within a fixed \
+256 MiB structural parser ceiling that is not an executor self-budget axis. \
+V1 exposes no narration surface."""
 rationale = """
-Representing an axis preserves the declaration vocabulary, but representation \
-alone does not bound an operation or provide a bounded-return guarantee."""
+A self-budget axis belongs in recorded identity only when v1 enforces it at an \
+owned boundary. Structural parser ceilings are safety bounds, not caller \
+self-budget declarations."""
 date = "2026-08-06"
 
 [[contracts]]
@@ -127,13 +126,17 @@ statement = """
 A production attempt prepares its record before spawn, publishes running state \
 only after a successful spawn, and finalizes every recognized result. Recording \
 degradation is reported through the receipt with the latest valid durable state \
-and does not replace the execution outcome. Run-record manifests publish within \
-fixed structural byte and depth ceilings and load through bounded, \
+and does not replace the execution outcome. Run-record directory identity and \
+`AttemptId` derive deterministically from the caller-supplied `JobId`; dr-exec \
+mints no internal random execution or record identifiers. Run-record manifests \
+publish within fixed structural byte and depth ceilings and load through bounded, \
 descriptor-pinned canonical reads before strict lifecycle validation. Fake \
 calls create no production record."""
 rationale = """
 Lifecycle ordering preserves recoverable experimental evidence while keeping \
-recording health distinct from what the child did."""
+recording health distinct from what the child did. Deterministic record \
+addressing lets replay land attempt-keyed alongside its predecessor instead of \
+forking a fresh random record."""
 date = "2026-08-06"
 
 [[contracts]]
@@ -291,6 +294,19 @@ rationale = """
 Opaque access permits another store layout without changing persisted receipts \
 or teaching callers to join storage paths."""
 date = "2026-08-08"
+
+[[contracts]]
+title = "Run-record load is for cross-process recovery"
+statement = """
+`RunStore.load()` validates a lifecycle record and every finalized sidecar for \
+cross-process recovery. In-frame store transitions carry the manifest header and \
+declaration forward on typed handles and must not reload what the same call \
+frame just wrote."""
+rationale = """
+Recording one execution should cost microseconds of ordering, not a re-parse \
+per transition. The recovery-only reader serves a different consumer than the \
+in-frame writer."""
+date = "2026-08-11"
 
 [[contracts]]
 title = "In-process importable JSON provides throughput, not isolation"

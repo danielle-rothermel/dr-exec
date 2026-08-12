@@ -437,19 +437,6 @@ reading that pipe, so it instead notices that it has been reparented and exits.
 This is best-effort cleanup for an abnormal death, not supervision: it puts no
 ceiling on how long a job may run or how large a payload may be.
 
-### Measuring your own workload
-
-Run the representative resource and throughput investigation with:
-
-```console
-uv run --with ./tests/fixtures/importable-json-fixture python scripts/benchmark_importable_json.py
-```
-
-The command writes a machine-readable JSON report. Its measurements are
-observations for capacity selection, not performance pass/fail thresholds. If
-you are unsure which mode fits, measure one item end to end: if a single job
-takes far less time than your entry point's import, you want the worker pool.
-
 ## Runtime
 
 The runtime boundary turns either Python target into an invocation and a
@@ -606,6 +593,10 @@ type RecordReceipt = Annotated[
 
 The store boundary makes the durable lifecycle explicit: a run is prepared,
 may become running once a process exists, and is finalized with its result.
+`AttemptId` and `RunRecordReference` derive deterministically from the
+caller-supplied `JobId`; dr-exec mints no internal random execution or record
+identifiers. In-frame transitions carry the manifest header and declaration on
+typed handles; `load()` is for cross-process recovery only.
 
 ```python
 type RunRecord = Annotated[
@@ -672,12 +663,15 @@ type PoolCapacity = AutoPoolCapacity | FixedPoolCapacity
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPoolConfig:
-    capacity: PoolCapacity = ...
+    capacity: PoolCapacity
 
 
 def resolve_pool_capacity(capacity: PoolCapacity, /) -> EffectivePoolCapacity: ...
 ```
 
+Opening a pool requires an explicit capacity choice — for example
+`ExecutionPoolConfig(capacity=AutoPoolCapacity())` or
+`ExecutionPoolConfig(capacity=FixedPoolCapacity(max_active_jobs=4))`.
 A pool resolves its own capacity when it opens, and reports it as
 `pool.effective_capacity`. A caller that must size something *alongside* a pool
 — a worker count, a second pool — calls `resolve_pool_capacity` on the declared

@@ -95,6 +95,7 @@ from dr_exec.recording.identity import (
     _canonical_declaration_digest,
 )
 from dr_exec.recording.provenance import ExecutorSourceSnapshot
+from dr_exec.recording.references import record_reference_for_job
 from dr_exec.recording.store import (
     MANIFEST_NAME,
     RECORD_DIRECTORY_PREFIX,
@@ -430,15 +431,11 @@ _PREPARED_LEAF_KEY_PATHS = frozenset(
         "declaration.execution_id.job_id",
         "declaration.target.canonical_declaration_sha256",
         "declaration.target.kind",
-        "header.executor_config_identity.payload.failure_detail_bytes.kind",
         "header.executor_config_identity.payload.join_time.kind",
         "header.executor_config_identity.payload.json_depth.kind",
-        "header.executor_config_identity.payload.manifest_bytes.kind",
-        "header.executor_config_identity.payload.narration_bytes.kind",
         "header.executor_config_identity.payload.protocol_frame_bytes.kind",
         "header.executor_config_identity.payload.protocol_output_count.kind",
         "header.executor_config_identity.payload.protocol_total_bytes.kind",
-        "header.executor_config_identity.payload.recording_failure_count.kind",
         "header.executor_config_identity.payload.startup_time.kind",
         "header.executor_config_identity.payload.termination_time.kind",
         "header.executor_config_identity.schema",
@@ -553,6 +550,21 @@ def test_prepare_publishes_a_complete_prepared_record(
     assert store.load(run.reference) == prepared_record
 
 
+def test_prepare_for_the_same_job_id_targets_the_same_record_directory(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    first = store.prepare(_prepared_record(execution_id))
+
+    with pytest.raises(ExecutorFailure, match="prepare the run record"):
+        store.prepare(_prepared_record(execution_id))
+
+    assert (
+        first.reference.record_id
+        == record_reference_for_job(execution_id.job_id).record_id
+    )
+
+
 def test_a_relative_root_is_normalized_for_the_store_and_allocated_run(
     tmp_path: Path,
     execution_id: ExecutionId,
@@ -663,37 +675,23 @@ def test_a_recognized_pre_child_outcome_finalizes_from_prepared(
     assert finalized.result.outcome.kind == CancelledOutcome().kind
 
 
-def test_mark_running_rejects_a_handle_whose_record_is_finalized(
-    store: DirectoryRunStore,
-    execution_id: ExecutionId,
-) -> None:
-    prepared_run = store.prepare(_prepared_record(execution_id))
-    store.finalize(prepared_run, _result(execution_id))
-
-    with pytest.raises(ExecutorFailure) as raised:
-        store.mark_running(
-            prepared_run,
-            ProcessRecord(pid=4242, started_at=STARTED_AT),
-        )
-
-    assert isinstance(raised.value.__cause__, RecordLoadError)
-    assert "not in the prepared state" in str(raised.value.__cause__)
-
-
-def test_mark_running_reports_an_unreadable_manifest_as_executor_failure(
+def test_mark_running_publishes_from_the_handle_without_reloading(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
     prepared_run = store.prepare(_prepared_record(execution_id))
     (_record_dir(store, prepared_run) / MANIFEST_NAME).write_bytes(b"{")
 
-    with pytest.raises(ExecutorFailure) as raised:
-        store.mark_running(
-            prepared_run,
-            ProcessRecord(pid=4242, started_at=STARTED_AT),
-        )
+    running_run = store.mark_running(
+        prepared_run,
+        ProcessRecord(pid=4242, started_at=STARTED_AT),
+    )
 
-    assert isinstance(raised.value.__cause__, RecordLoadError)
+    assert running_run.header == prepared_run.header
+    assert running_run.declaration == prepared_run.declaration
+    loaded = store.load(running_run.reference)
+    assert isinstance(loaded, RunningRecord)
+    assert loaded.process.pid == 4242
 
 
 def test_finalizing_twice_degrades_rather_than_replacing_the_record(
@@ -1452,9 +1450,12 @@ def test_a_missing_run_directory_degrades_rather_than_raising(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
 ) -> None:
+    prepared_record = _prepared_record(execution_id)
     missing = PreparedRun(
         execution_id=execution_id,
         reference=RunRecordReference(record_id=uuid4()),
+        header=prepared_record.header,
+        declaration=prepared_record.declaration,
     )
 
     receipt = store.finalize(missing, _result(execution_id))

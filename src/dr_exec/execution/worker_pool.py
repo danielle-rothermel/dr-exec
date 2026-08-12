@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import IO, Final
-from uuid import uuid4
 
 from dr_serialize import (
     IdentityDocument,
@@ -26,7 +25,7 @@ from dr_serialize import (
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
 from dr_exec.core.kinds import BudgetAxis, ProtocolFailureCode
-from dr_exec.core.names import AttemptId, ExecutionId
+from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
     InProcessImportableJsonTarget,
@@ -68,6 +67,7 @@ from dr_exec.recording.models import (
     SpawnFailedOutcome,
     WorkerPoolRecordReceipt,
 )
+from dr_exec.recording.references import attempt_id_for_job
 from dr_exec.scheduling.offload import offload_blocking, offload_run_blocking
 from dr_exec.scheduling.pool import (
     AutoPoolCapacity,
@@ -445,7 +445,7 @@ class WorkerPoolImportableJsonExecutor:
         execution = _Execution(
             execution_id=ExecutionId(
                 job_id=job.job_id,
-                attempt_id=AttemptId(uuid4()),
+                attempt_id=attempt_id_for_job(job.job_id),
             ),
             started_at=datetime.now(UTC),
             started_ns=time.monotonic_ns(),

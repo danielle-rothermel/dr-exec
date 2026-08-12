@@ -11,7 +11,6 @@ from dr_serialize import IdentityDocument, Sha256Digest
 from pydantic import ValidationError
 
 from dr_exec import (
-    AttemptId,
     Budgets,
     ContainmentProfile,
     EnvGrantKind,
@@ -25,13 +24,20 @@ from dr_exec import (
     OutputArtifactRecord,
     OutputOverflowPolicy,
     PayloadRetentionBudget,
-    RunRecordReference,
     StreamRetentionBudget,
     TrustedCommandTarget,
     TrustedPythonTarget,
     UntrustedPythonTarget,
 )
 from dr_exec.core.model import ContractModel, canonical_model_bytes
+from dr_exec.recording.references import (
+    attempt_id_for_job,
+    record_reference_for_job,
+)
+
+_PINNED_JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
+_PINNED_ATTEMPT_ID = attempt_id_for_job(_PINNED_JOB_ID)
+_PINNED_RECORD_REFERENCE = record_reference_for_job(_PINNED_JOB_ID)
 
 ALL_ZERO_DIGEST_WITH_TRAILING_F = Sha256Digest("0" * 63 + "f")
 ALL_A_DIGEST = Sha256Digest("a" * 64)
@@ -39,8 +45,8 @@ ALL_A_DIGEST = Sha256Digest("a" * 64)
 
 def _uuid_scalar_model() -> ContractModel:
     return ExecutionId(
-        job_id=JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70")),
-        attempt_id=AttemptId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f71")),
+        job_id=_PINNED_JOB_ID,
+        attempt_id=_PINNED_ATTEMPT_ID,
     )
 
 
@@ -71,9 +77,7 @@ def _path_and_digest_scalar_model() -> ContractModel:
 
 
 def _run_record_reference_model() -> ContractModel:
-    return RunRecordReference(
-        record_id=UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72")
-    )
+    return _PINNED_RECORD_REFERENCE
 
 
 def _enum_and_integer_scalar_model() -> ContractModel:
@@ -112,7 +116,7 @@ def _non_ascii_env_grant_record_model() -> ContractModel:
 SCALAR_VECTORS = (
     pytest.param(
         _uuid_scalar_model,
-        b'{"attempt_id":"0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f71",'
+        b'{"attempt_id":"f272b803-b243-5892-b3d4-36169469e673",'
         b'"job_id":"0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"}',
         id="uuid",
     ),
@@ -140,7 +144,7 @@ SCALAR_VECTORS = (
     pytest.param(
         _run_record_reference_model,
         b'{"backend":"directory","record_id":'
-        b'"0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f72"}',
+        b'"11164f77-01c7-537b-a52f-b0324c762060"}',
         id="run-record-reference",
     ),
     pytest.param(

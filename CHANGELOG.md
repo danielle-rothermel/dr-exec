@@ -20,6 +20,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - In-process async `run()` preserves Ctrl+C → `ExitedOutcome(1)` via
   daemon-thread offload and an interrupt bridge; the entry point may continue
   until it returns in the background.
+- Derived `AttemptId` and `RunRecordReference` deterministically from the
+  caller-supplied `JobId`, deleting internal `uuid4` mints so replay lands
+  attempt-keyed instead of forking a fresh random record.
+- Carried the run-record manifest header and declaration forward on
+  `PreparedRun` and `RunningRun`, removing the `mark_running` reload; scoped
+  `RunStore.load()` to cross-process recovery in docs and contracts.
+- Removed four unenforced `ExecutorSelfBudgets` axes from declarations and
+  recorded executor-config identity.
+- Removed the 50 ms child-reap poll, gave unbudgeted `termination_time` infinite
+  SIGTERM grace before SIGKILL escalation, and required an explicit
+  `ExecutionPoolConfig.capacity` at pool assembly.
+- Deleted `scripts/benchmark_importable_json.py`.
+
+### Deferred
+
+- Migrating local bounded no-follow artifact reads to dr-store once its read
+  primitive ships (E3).
 
 ## [0.1.9] - 2026-08-11
 

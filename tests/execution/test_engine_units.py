@@ -422,6 +422,30 @@ def test_session_stage_teardown_signals_only_the_direct_child(
     assert process.wait_calls == 1
 
 
+def test_unbudgeted_termination_grace_waits_for_sigterm_before_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _ProcessProbe()
+    group_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "dr_exec.execution.engine.signal_process_group",
+        lambda pid, number: group_signals.append((pid, number)),
+    )
+    monkeypatch.setattr(
+        "dr_exec.execution.engine._group_survives",
+        lambda *_: False,
+    )
+
+    _tear_down(
+        cast("subprocess.Popen[bytes]", process),
+        ExecutorSelfBudgets.unbudgeted(),
+    )
+
+    assert [number for _, number in group_signals] == [signal.SIGTERM]
+    assert process.signals == [signal.SIGTERM]
+    assert process.wait_calls == 2
+
+
 @pytest.mark.parametrize(
     ("reaped_after_term", "expected_signals"),
     [
