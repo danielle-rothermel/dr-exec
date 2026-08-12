@@ -46,7 +46,6 @@ EXPECTED_EXECUTOR_FAILURE_CODE_LITERALS = {
     "WORKER_POOL_TARGET_MISMATCH": "worker_pool_target_mismatch",
     "WORKER_POOL_ENTRY_POINT_MISMATCH": "worker_pool_entry_point_mismatch",
     "IMPORTABLE_JSON_TARGET_MISMATCH": "importable_json_target_mismatch",
-    "IMPORTABLE_JSON_RECEIPT_MISMATCH": "importable_json_receipt_mismatch",
     "FAKE_NO_RESPONSE": "fake_no_response",
     "FAKE_RECEIPT_MISMATCH": "fake_receipt_mismatch",
 }

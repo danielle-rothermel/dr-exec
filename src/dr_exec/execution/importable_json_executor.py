@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Timer
 
-from dr_serialize import build_identity_document
+from dr_serialize import IdentityDocument, build_identity_document
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
@@ -23,13 +23,13 @@ from dr_exec.declarations.models import (
 )
 from dr_exec.declarations.transport import request_transport_bytes
 from dr_exec.declarations.validation import validate_declaration
-from dr_exec.execution.executor import _run_batch
 from dr_exec.execution.outcomes import (
-    attribute_outcome,
-    empty_payload_outputs,
+    completed_execution,
     executor_protocol_failure_attribution,
 )
 from dr_exec.importable_json import (
+    ENVELOPE_SCHEMA,
+    ENVELOPE_SCHEMA_VERSION,
     ImportableJsonExecutorDispatchError,
     ImportableJsonPayloadDispatchError,
     ImportableJsonPayloadResultError,
@@ -40,9 +40,7 @@ from dr_exec.recording.models import (
     CancelledOutcome,
     CompletedExecution,
     ExecutionAttribution,
-    ExecutionMeasurements,
     ExecutionOutcome,
-    ExecutionResult,
     ExitedOutcome,
     InProcessRecordReceipt,
     ProtocolFailedOutcome,
@@ -53,18 +51,66 @@ from dr_exec.scheduling.pool import (
     AutoPoolCapacity,
     ExecutionPool,
     ExecutionPoolConfig,
-    resolve_pool_capacity,
+    batch_capacity,
 )
-
-_ENVELOPE_SCHEMA = "dr_exec.importable_json"
-_ENVELOPE_SCHEMA_VERSION = 1
+from dr_exec.scheduling.scheduler import run_batch
 
 
 @dataclass(slots=True)
 class _StopState:
-    caller_cancelled: bool = False
+    """Whether the armed wall-time deadline has fired for this job."""
+
     deadline_expired: bool = False
-    local_token: CancelToken = field(default_factory=CancelToken)
+
+    def outcome(
+        self, cancellation: CancelToken | None, /
+    ) -> ExecutionOutcome | None:
+        """Report why this job must stop, or ``None`` while it may run.
+
+        A caller's cancel outranks an expired deadline: a job the caller
+        already gave up on is cancelled, not over budget.
+        """
+
+        if cancellation is not None and cancellation.cancelled:
+            return CancelledOutcome()
+        if self.deadline_expired:
+            return BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME)
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class _Execution:
+    """One job's identity, timing, and completion construction."""
+
+    execution_id: ExecutionId
+    started_at: datetime
+    started_ns: int
+    input_bytes: int
+
+    def completed(
+        self,
+        *,
+        outcome: ExecutionOutcome,
+        protocol_outputs: tuple[IdentityDocument, ...] = (),
+        attribution_detail: str | None = None,
+        attribution_override: Callable[
+            [ProtocolFailedOutcome], ExecutionAttribution
+        ]
+        | None = None,
+    ) -> CompletedExecution:
+        return completed_execution(
+            execution_id=self.execution_id,
+            record_receipt=InProcessRecordReceipt(
+                execution_id=self.execution_id
+            ),
+            outcome=outcome,
+            protocol_outputs=protocol_outputs,
+            started_at=self.started_at,
+            started_ns=self.started_ns,
+            input_bytes=self.input_bytes,
+            attribution_detail=attribution_detail,
+            attribution_override=attribution_override,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,13 +125,19 @@ class ImportableJsonExecutor:
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         token = cancellation if cancellation is not None else CancelToken()
+        # Stamped before the offload so an interrupt reports the elapsed run
+        # rather than the moment the interrupt arrived.
+        execution = _attempt(job, _in_process_target(job))
         try:
             return await offload_blocking_daemon(
                 self.run_blocking, job, cancellation=token
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
             token.cancel()
-            return _keyboard_interrupt_completion(job)
+            return execution.completed(
+                outcome=ExitedOutcome(exit_code=1),
+                attribution_detail="the importable JSON entry point terminated",
+            )
 
     def run_blocking(
         self,
@@ -94,67 +146,34 @@ class ImportableJsonExecutor:
         *,
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
-        validate_declaration(job)
-        target = job.target
-        if not isinstance(target, InProcessImportableJsonTarget):
-            raise ExecutorFailure(
-                "the importable JSON executor accepts only in-process "
-                "importable JSON targets",
-                code=ExecutorFailureCode.IMPORTABLE_JSON_TARGET_MISMATCH,
-            )
-        execution_id, started_at, started_ns, input_bytes = _run_preamble(
-            job, target
-        )
+        target = _in_process_target(job)
+        execution = _attempt(job, target)
         stop = _StopState()
-        if cancellation is not None and cancellation.cancelled:
-            stop.caller_cancelled = True
         deadline_timer: Timer | None = None
         deadline_ns = job.budgets.wall_time.limit
         if deadline_ns is not None:
+            deadline_at_ns = execution.started_ns + deadline_ns
             delay_seconds = max(
-                0.0,
-                (started_ns + deadline_ns - time.monotonic_ns()) / 1e9,
+                0.0, (deadline_at_ns - time.monotonic_ns()) / 1e9
             )
 
             def on_deadline() -> None:
-                if cancellation is not None and cancellation.cancelled:
-                    stop.caller_cancelled = True
-                if not stop.caller_cancelled:
-                    stop.deadline_expired = True
-                stop.local_token.cancel()
+                stop.deadline_expired = True
 
             deadline_timer = Timer(delay_seconds, on_deadline)
             deadline_timer.daemon = True
             deadline_timer.start()
         try:
-            return self._run_body(
-                target=target,
-                execution_id=execution_id,
-                started_at=started_at,
-                started_ns=started_ns,
-                input_bytes=input_bytes,
-                cancellation=cancellation,
-                stop=stop,
-            )
+            return self._run_body(execution, target, cancellation, stop)
         except BaseException as error:  # noqa: BLE001 - pool must not break
             if isinstance(error, SystemExit):
                 code = error.code
                 exit_code = code if isinstance(code, int) else 1
-                return _completed(
-                    execution_id=execution_id,
-                    outcome=ExitedOutcome(exit_code=exit_code),
-                    protocol_outputs=(),
-                    started_at=started_at,
-                    started_ns=started_ns,
-                    input_bytes=input_bytes,
+                return execution.completed(
+                    outcome=ExitedOutcome(exit_code=exit_code)
                 )
-            return _completed(
-                execution_id=execution_id,
+            return execution.completed(
                 outcome=ExitedOutcome(exit_code=1),
-                protocol_outputs=(),
-                started_at=started_at,
-                started_ns=started_ns,
-                input_bytes=input_bytes,
                 attribution_detail="the importable JSON entry point terminated",
             )
         finally:
@@ -163,96 +182,47 @@ class ImportableJsonExecutor:
 
     def _run_body(
         self,
-        *,
+        execution: _Execution,
         target: InProcessImportableJsonTarget,
-        execution_id: ExecutionId,
-        started_at: datetime,
-        started_ns: int,
-        input_bytes: int,
         cancellation: CancelToken | None,
         stop: _StopState,
+        /,
     ) -> CompletedExecution:
-        if _should_stop(cancellation, stop):
-            return _completed(
-                execution_id=execution_id,
-                outcome=_outcome_for_stop(stop),
-                protocol_outputs=(),
-                started_at=started_at,
-                started_ns=started_ns,
-                input_bytes=input_bytes,
-            )
+        stopped = _stopped(execution, cancellation, stop)
+        if stopped is not None:
+            return stopped
         try:
             result = _invoke_importable_entry_point(
                 target.entry_point,
                 target.request,
             )
         except ImportableJsonExecutorDispatchError as error:
-            return _completed(
-                execution_id=execution_id,
-                outcome=ProtocolFailedOutcome(
-                    failure_code=ProtocolFailureCode.MALFORMED_FRAME,
-                    failure_detail=str(error),
-                    accepted_output_count=0,
-                ),
-                protocol_outputs=(),
-                started_at=started_at,
-                started_ns=started_ns,
-                input_bytes=input_bytes,
+            return execution.completed(
+                outcome=_malformed_frame(str(error)),
                 attribution_override=executor_protocol_failure_attribution,
             )
         except ImportableJsonPayloadResultError as error:
-            return _completed(
-                execution_id=execution_id,
-                outcome=ProtocolFailedOutcome(
-                    failure_code=ProtocolFailureCode.MALFORMED_FRAME,
-                    failure_detail=str(error),
-                    accepted_output_count=0,
-                ),
-                protocol_outputs=(),
-                started_at=started_at,
-                started_ns=started_ns,
-                input_bytes=input_bytes,
-            )
+            return execution.completed(outcome=_malformed_frame(str(error)))
         except ImportableJsonPayloadDispatchError as error:
-            if _should_stop(cancellation, stop):
-                return _completed(
-                    execution_id=execution_id,
-                    outcome=_outcome_for_stop(stop),
-                    protocol_outputs=(),
-                    started_at=started_at,
-                    started_ns=started_ns,
-                    input_bytes=input_bytes,
-                )
-            return _completed(
-                execution_id=execution_id,
+            stopped = _stopped(execution, cancellation, stop)
+            if stopped is not None:
+                return stopped
+            return execution.completed(
                 outcome=ExitedOutcome(exit_code=1),
-                protocol_outputs=(),
-                started_at=started_at,
-                started_ns=started_ns,
-                input_bytes=input_bytes,
                 attribution_detail=str(error),
             )
-        if _should_stop(cancellation, stop):
-            return _completed(
-                execution_id=execution_id,
-                outcome=_outcome_for_stop(stop),
-                protocol_outputs=(),
-                started_at=started_at,
-                started_ns=started_ns,
-                input_bytes=input_bytes,
-            )
-        envelope = build_identity_document(
-            schema=_ENVELOPE_SCHEMA,
-            schema_version=_ENVELOPE_SCHEMA_VERSION,
-            payload=result,
-        )
-        return _completed(
-            execution_id=execution_id,
+        stopped = _stopped(execution, cancellation, stop)
+        if stopped is not None:
+            return stopped
+        return execution.completed(
             outcome=ExitedOutcome(exit_code=0),
-            protocol_outputs=(envelope,),
-            started_at=started_at,
-            started_ns=started_ns,
-            input_bytes=input_bytes,
+            protocol_outputs=(
+                build_identity_document(
+                    schema=ENVELOPE_SCHEMA,
+                    schema_version=ENVELOPE_SCHEMA_VERSION,
+                    payload=result,
+                ),
+            ),
         )
 
     def run_many(
@@ -262,14 +232,10 @@ class ImportableJsonExecutor:
         *,
         config: ExecutionPoolConfig | None = None,
     ) -> Iterator[CompletedExecution]:
-        return _run_batch(
+        return run_batch(
             self,
             jobs,
-            capacity=resolve_pool_capacity(
-                (
-                    config or ExecutionPoolConfig(capacity=AutoPoolCapacity())
-                ).capacity
-            ).max_active_jobs,
+            capacity=batch_capacity(config, default=AutoPoolCapacity()),
         )
 
     def open_pool(
@@ -283,22 +249,7 @@ class ImportableJsonExecutor:
         )
 
 
-def _run_preamble(
-    job: ExecutionJob,
-    target: InProcessImportableJsonTarget,
-    /,
-) -> tuple[ExecutionId, datetime, int, int]:
-    execution_id = ExecutionId(
-        job_id=job.job_id,
-        attempt_id=attempt_id_for_job(job.job_id),
-    )
-    started_at = datetime.now(UTC)
-    started_ns = time.monotonic_ns()
-    input_bytes = len(request_transport_bytes(target.request))
-    return execution_id, started_at, started_ns, input_bytes
-
-
-def _keyboard_interrupt_completion(job: ExecutionJob, /) -> CompletedExecution:
+def _in_process_target(job: ExecutionJob, /) -> InProcessImportableJsonTarget:
     validate_declaration(job)
     target = job.target
     if not isinstance(target, InProcessImportableJsonTarget):
@@ -307,97 +258,43 @@ def _keyboard_interrupt_completion(job: ExecutionJob, /) -> CompletedExecution:
             "importable JSON targets",
             code=ExecutorFailureCode.IMPORTABLE_JSON_TARGET_MISMATCH,
         )
-    execution_id, started_at, started_ns, input_bytes = _run_preamble(
-        job, target
-    )
-    return _completed(
-        execution_id=execution_id,
-        outcome=ExitedOutcome(exit_code=1),
-        protocol_outputs=(),
-        started_at=started_at,
-        started_ns=started_ns,
-        input_bytes=input_bytes,
-        attribution_detail="the importable JSON entry point terminated",
-    )
+    return target
 
 
-def _should_stop(
-    cancellation: CancelToken | None, stop: _StopState, /
-) -> bool:
-    if cancellation is not None and cancellation.cancelled:
-        stop.caller_cancelled = True
-    return (
-        stop.caller_cancelled
-        or stop.deadline_expired
-        or stop.local_token.cancelled
-    )
-
-
-def _outcome_for_stop(stop: _StopState, /) -> ExecutionOutcome:
-    if stop.caller_cancelled:
-        return CancelledOutcome()
-    if stop.deadline_expired:
-        return BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME)
-    return CancelledOutcome()
-
-
-def _completed(
-    *,
-    execution_id: ExecutionId,
-    outcome: ExecutionOutcome,
-    protocol_outputs: tuple[object, ...],
-    started_at: datetime,
-    started_ns: int,
-    input_bytes: int,
-    attribution_detail: str | None = None,
-    attribution_override: Callable[
-        [ProtocolFailedOutcome], ExecutionAttribution
-    ]
-    | None = None,
-) -> CompletedExecution:
-    if attribution_override is not None and isinstance(
-        outcome, ProtocolFailedOutcome
-    ):
-        attribution = attribution_override(outcome)
-    else:
-        attribution = attribute_outcome(outcome)
-    if attribution_detail is not None:
-        attribution = attribution.model_copy(
-            update={"detail": attribution_detail}
-        )
-    finished_at = datetime.now(UTC)
-    result = ExecutionResult(
-        execution_id=execution_id,
-        outcome=outcome,
-        attribution=attribution,
-        protocol_outputs=protocol_outputs,  # ty: ignore[invalid-argument-type]
-        payload_outputs=empty_payload_outputs(),
-        measurements=ExecutionMeasurements(
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ns=time.monotonic_ns() - started_ns,
-            teardown_duration_ns=0,
-            input_bytes=input_bytes,
-            protocol_bytes_received=0,
+def _attempt(
+    job: ExecutionJob,
+    target: InProcessImportableJsonTarget,
+    /,
+) -> _Execution:
+    return _Execution(
+        execution_id=ExecutionId(
+            job_id=job.job_id,
+            attempt_id=attempt_id_for_job(job.job_id),
         ),
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        input_bytes=len(request_transport_bytes(target.request)),
     )
-    completed = CompletedExecution(
-        result=result,
-        record_receipt=InProcessRecordReceipt(execution_id=execution_id),
-    )
-    return _in_process_receipted(completed)
 
 
-def _in_process_receipted(
-    completed: CompletedExecution, /
-) -> CompletedExecution:
-    if not isinstance(completed.record_receipt, InProcessRecordReceipt):
-        raise ExecutorFailure(
-            "in-process completions must carry an in-process record receipt, "
-            f"not {completed.record_receipt.kind}",
-            code=ExecutorFailureCode.IMPORTABLE_JSON_RECEIPT_MISMATCH,
-        )
-    return completed
+def _stopped(
+    execution: _Execution,
+    cancellation: CancelToken | None,
+    stop: _StopState,
+    /,
+) -> CompletedExecution | None:
+    outcome = stop.outcome(cancellation)
+    if outcome is None:
+        return None
+    return execution.completed(outcome=outcome)
+
+
+def _malformed_frame(detail: str, /) -> ProtocolFailedOutcome:
+    return ProtocolFailedOutcome(
+        failure_code=ProtocolFailureCode.MALFORMED_FRAME,
+        failure_detail=detail,
+        accepted_output_count=0,
+    )
 
 
 __all__ = ["ImportableJsonExecutor"]

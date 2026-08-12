@@ -28,6 +28,7 @@ from support.importable_json import (
     RETURN_NON_JSON,
     RETURN_NULL,
     ExecutorHarness,
+    PooledExecutor,
 )
 
 from dr_exec import (
@@ -47,15 +48,18 @@ from dr_exec import (
     FiniteOutput,
     FixedPoolCapacity,
     ImportableEntryPoint,
+    ImportableJsonExecutor,
+    InProcessRecordReceipt,
     JobId,
     OutputOverflowPolicy,
     PayloadRetentionBudget,
     ProtocolFailedOutcome,
     StreamRetentionBudget,
+    WorkerPoolImportableJsonExecutor,
+    WorkerPoolRecordReceipt,
     build_in_process_importable_json_job,
     parse_importable_json_result,
 )
-from dr_exec.capabilities.protocols import Executor
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
 
@@ -116,6 +120,19 @@ def test_each_executor_stamps_its_own_receipt_kind(
     assert (
         completed.record_receipt.execution_id == completed.result.execution_id
     )
+
+
+def test_the_two_executors_stamp_the_two_record_less_receipts() -> None:
+    # The shared completion builder takes the receipt already constructed, so
+    # which executor built a completion stays readable from its receipt.
+    in_process = ImportableJsonExecutor().run_blocking(build_job(ECHO, {}))
+    with WorkerPoolImportableJsonExecutor(
+        entry_point=ECHO, worker_count=1
+    ) as pool:
+        pooled = pool.run_blocking(build_job(ECHO, {}))
+
+    assert isinstance(in_process.record_receipt, InProcessRecordReceipt)
+    assert isinstance(pooled.record_receipt, WorkerPoolRecordReceipt)
 
 
 def test_json_null_result_is_accepted(harness: ExecutorHarness) -> None:
@@ -302,7 +319,7 @@ def test_a_failing_job_leaves_the_pool_healthy(
             yield ExecutionSubmission(job=fail_job, context="fail")
             yield ExecutionSubmission(job=echo_job, context="echo")
 
-        async with executor.open_pool(  # ty: ignore[unresolved-attribute]
+        async with executor.open_pool(
             config=ExecutionPoolConfig(
                 capacity=FixedPoolCapacity(max_active_jobs=1)
             )
@@ -324,7 +341,7 @@ def test_a_failing_job_leaves_the_pool_healthy(
 
 
 def _run_pool(
-    executor: Executor,
+    executor: PooledExecutor,
     jobs: tuple[ExecutionJob, ...],
     /,
     *,
@@ -335,7 +352,7 @@ def _run_pool(
             for index, job in enumerate(jobs):
                 yield ExecutionSubmission(job=job, context=index)
 
-        async with executor.open_pool(  # ty: ignore[unresolved-attribute]
+        async with executor.open_pool(
             config=ExecutionPoolConfig(
                 capacity=FixedPoolCapacity(max_active_jobs=capacity)
             )

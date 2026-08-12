@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
-from dr_exec.capabilities.protocols import Executor, RunStore, Runtime
+from dr_exec.capabilities.protocols import RunStore, Runtime
 from dr_exec.core.cancel import CancelToken
 from dr_exec.declarations.models import ExecutionJob, ExecutorSelfBudgets
 from dr_exec.execution.engine import run_execution
@@ -13,9 +13,9 @@ from dr_exec.scheduling.pool import (
     AutoPoolCapacity,
     ExecutionPool,
     ExecutionPoolConfig,
-    resolve_pool_capacity,
+    batch_capacity,
 )
-from dr_exec.scheduling.scheduler import AdmissionResult, ExecutionScheduler
+from dr_exec.scheduling.scheduler import run_batch
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,19 +59,10 @@ class ProcessExecutor:
         *,
         config: ExecutionPoolConfig | None = None,
     ) -> Iterator[CompletedExecution]:
-        """Stream a finite batch in completion order.
-
-        Input is consumed lazily. Exhaustion or explicit close drains admitted
-        work; dropping an unclosed iterator does not guarantee prompt cleanup.
-        """
-        return _run_batch(
+        return run_batch(
             self,
             jobs,
-            capacity=resolve_pool_capacity(
-                (
-                    config or ExecutionPoolConfig(capacity=AutoPoolCapacity())
-                ).capacity
-            ).max_active_jobs,
+            capacity=batch_capacity(config, default=AutoPoolCapacity()),
         )
 
     def open_pool(
@@ -83,49 +74,6 @@ class ProcessExecutor:
             executor=self,
             config=config or ExecutionPoolConfig(capacity=AutoPoolCapacity()),
         )
-
-
-def _run_batch(
-    executor: Executor,
-    jobs: Iterable[ExecutionJob],
-    /,
-    *,
-    capacity: int,
-) -> Generator[CompletedExecution]:
-    """Drive a private bounded scheduler and drain it on generator close."""
-    scheduler: ExecutionScheduler[None] = ExecutionScheduler(
-        executor=executor, capacity=capacity
-    )
-    source = iter(jobs)
-    exhausted = False
-    carried: ExecutionJob | None = None
-    try:
-        while True:
-            while not exhausted and scheduler.can_admit():
-                job = carried if carried is not None else next(source, None)
-                carried = None
-                if job is None:
-                    exhausted = True
-                    break
-                match scheduler.admit(job, None):
-                    case AdmissionResult.ADMITTED:
-                        pass
-                    case AdmissionResult.INTAKE_CLOSED:
-                        exhausted = True
-                        break
-                    case AdmissionResult.NO_ROOM:
-                        carried = job
-                        break
-            if exhausted and carried is None and not scheduler.has_residents():
-                return
-            completion = scheduler.take_completion()
-            if completion is None:
-                return
-            yield completion.completed_execution
-    finally:
-        scheduler.close_intake()
-        scheduler.wait_for_quiescence()
-        scheduler.shutdown()
 
 
 __all__ = ["ProcessExecutor"]

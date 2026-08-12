@@ -8,7 +8,7 @@ from pydantic import Field, NonNegativeInt
 from dr_exec.core.kinds import ProtocolFrameKind
 from dr_exec.core.model import ContractModel, IdentityDocumentField
 
-FRAME_TERMINATOR = b"\n"
+PROTOCOL_FRAME_TERMINATOR = b"\n"
 
 
 class ProtocolPrelude(ContractModel):
@@ -37,7 +37,7 @@ type ProtocolFrame = Annotated[
 
 
 __all__ = [
-    "FRAME_TERMINATOR",
+    "PROTOCOL_FRAME_TERMINATOR",
     "ProtocolComplete",
     "ProtocolFrame",
     "ProtocolOutput",

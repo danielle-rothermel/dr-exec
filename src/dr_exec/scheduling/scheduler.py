@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from enum import UNIQUE, Enum, auto, verify
 from threading import Condition, Thread
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
@@ -17,14 +16,7 @@ if TYPE_CHECKING:
     from dr_exec.declarations.models import ExecutionJob
     from dr_exec.recording.models import CompletedExecution
 
-ContextT = TypeVar("ContextT")
-
 _WORKER_THREAD_PREFIX = "dr-exec-pool-worker"
-
-
-def usable_cpu_count() -> int:
-    reported = getattr(os, "process_cpu_count", os.cpu_count)()
-    return max(1, reported or 1)
 
 
 @verify(UNIQUE)
@@ -37,7 +29,7 @@ class AdmissionResult(Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class _Admitted(Generic[ContextT]):  # noqa: UP046
+class _Admitted[ContextT]:
     ticket: int
     job: ExecutionJob
     context: ContextT
@@ -45,7 +37,7 @@ class _Admitted(Generic[ContextT]):  # noqa: UP046
 
 
 @dataclass(frozen=True, slots=True)
-class _Completion(Generic[ContextT]):  # noqa: UP046
+class _Completion[ContextT]:
     ticket: int
     completed_execution: CompletedExecution
     context: ContextT
@@ -63,7 +55,7 @@ class SchedulerBroken(ExecutorFailure):
         super().__init__(message, code=ExecutorFailureCode.SCHEDULER_BROKEN)
 
 
-class ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
+class ExecutionScheduler[ContextT]:
     """Share one resident bound and completion queue across drivers."""
 
     __slots__ = (
@@ -360,9 +352,57 @@ class ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
         ) from self._broken
 
 
+def run_batch(
+    executor: Executor,
+    jobs: Iterable[ExecutionJob],
+    /,
+    *,
+    capacity: int,
+) -> Generator[CompletedExecution]:
+    """Stream a finite batch in completion order under a private scheduler.
+
+    Input is consumed lazily. Exhaustion or explicit close drains admitted
+    work; dropping an unclosed iterator does not guarantee prompt cleanup.
+    """
+
+    scheduler: ExecutionScheduler[None] = ExecutionScheduler(
+        executor=executor, capacity=capacity
+    )
+    source = iter(jobs)
+    exhausted = False
+    carried: ExecutionJob | None = None
+    try:
+        while True:
+            while not exhausted and scheduler.can_admit():
+                job = carried if carried is not None else next(source, None)
+                carried = None
+                if job is None:
+                    exhausted = True
+                    break
+                match scheduler.admit(job, None):
+                    case AdmissionResult.ADMITTED:
+                        pass
+                    case AdmissionResult.INTAKE_CLOSED:
+                        exhausted = True
+                        break
+                    case AdmissionResult.NO_ROOM:
+                        carried = job
+                        break
+            if exhausted and carried is None and not scheduler.has_residents():
+                return
+            completion = scheduler.take_completion()
+            if completion is None:
+                return
+            yield completion.completed_execution
+    finally:
+        scheduler.close_intake()
+        scheduler.wait_for_quiescence()
+        scheduler.shutdown()
+
+
 __all__ = [
     "AdmissionResult",
     "ExecutionScheduler",
     "SchedulerBroken",
-    "usable_cpu_count",
+    "run_batch",
 ]

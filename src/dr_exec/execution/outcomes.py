@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
+from datetime import UTC, datetime
+
+from dr_serialize import IdentityDocument
+
 from dr_exec.core.kinds import BudgetAxis, FailureOwner, ProtocolFailureCode
+from dr_exec.core.names import ExecutionId
 from dr_exec.recording.models import (
     BudgetExceededOutcome,
     CancelledOutcome,
+    CompletedExecution,
     ExecutionAttribution,
+    ExecutionMeasurements,
     ExecutionOutcome,
+    ExecutionResult,
     ExitedOutcome,
     PayloadOutputs,
     ProtocolFailedOutcome,
+    RecordReceipt,
     RetainedPayloadStream,
     SignaledOutcome,
     SpawnAbsentOutcome,
@@ -76,6 +87,58 @@ def executor_protocol_failure_attribution(
     )
 
 
+def completed_execution(
+    *,
+    execution_id: ExecutionId,
+    record_receipt: RecordReceipt,
+    outcome: ExecutionOutcome,
+    protocol_outputs: tuple[IdentityDocument, ...],
+    started_at: datetime,
+    started_ns: int,
+    input_bytes: int,
+    attribution_detail: str | None,
+    attribution_override: Callable[
+        [ProtocolFailedOutcome], ExecutionAttribution
+    ]
+    | None,
+) -> CompletedExecution:
+    """Build one record-less completion from an attempt's facts.
+
+    Record-less executors produce no payload streams and no teardown of their
+    own, so the measurements those axes describe are reported as zero rather
+    than left unmeasured.
+    """
+
+    if attribution_override is not None and isinstance(
+        outcome, ProtocolFailedOutcome
+    ):
+        attribution = attribution_override(outcome)
+    else:
+        attribution = attribute_outcome(outcome)
+    if attribution_detail is not None:
+        attribution = attribution.model_copy(
+            update={"detail": attribution_detail}
+        )
+    return CompletedExecution(
+        result=ExecutionResult(
+            execution_id=execution_id,
+            outcome=outcome,
+            attribution=attribution,
+            protocol_outputs=protocol_outputs,
+            payload_outputs=empty_payload_outputs(),
+            measurements=ExecutionMeasurements(
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                duration_ns=time.monotonic_ns() - started_ns,
+                teardown_duration_ns=0,
+                input_bytes=input_bytes,
+                protocol_bytes_received=0,
+            ),
+        ),
+        record_receipt=record_receipt,
+    )
+
+
 def empty_payload_outputs() -> PayloadOutputs:
     empty = RetainedPayloadStream(
         head=b"",
@@ -88,6 +151,7 @@ def empty_payload_outputs() -> PayloadOutputs:
 
 __all__ = [
     "attribute_outcome",
+    "completed_execution",
     "empty_payload_outputs",
     "executor_protocol_failure_attribution",
 ]

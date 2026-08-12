@@ -24,9 +24,52 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exports; `runtime/protocol.py` is now a pure reader.
 - Removed dead `DirectoryRunStore._load_prepared` and
   `runtime.identity._validate_isolated_host_runtime_identity`.
+- **Breaking:** Removed `ExecutorFailureCode.IMPORTABLE_JSON_RECEIPT_MISMATCH`
+  along with the in-process receipt self-check that raised it, which guarded a
+  receipt the same function had just constructed; the golden receipt-kind
+  vectors re-pin without it. `FakeExecutor`'s equivalent guard stays, because
+  its receipt arrives from a caller-supplied responder.
+- Removed `_StopState.local_token`, a per-job `threading.Event` that could
+  never decide a stop on its own, and `_AdmissionGate`, a pass-through wrapper
+  on `asyncio.Semaphore` with an unread width field.
+- Removed the `_owned_by` private keyword parameter from the public
+  `ExecutionPool.run_stream`.
 
 ### Changed
 
+- One shared `execution.outcomes.completed_execution` now builds every
+  record-less completion from an already-constructed receipt, so the in-process
+  and worker-pool executors keep only their own receipt and their own attempt
+  value object; the in-process executor's four attempt facts became a frozen
+  `_Execution` instead of a four-tuple threaded through eleven call sites.
+- The in-process `_run_body` observes its stop condition through one
+  `_StopState.outcome(cancellation)` reader that latches nothing, mirroring the
+  worker pool's `_StopWatch.outcome()`.
+- An interrupted async `run()` reports the elapsed run: the attempt's identity
+  and timing are stamped once before the offload rather than restamped when the
+  interrupt arrives, and the target check exists once.
+- `run_batch` is public scheduling machinery in `scheduling/scheduler.py` next
+  to the `ExecutionScheduler.take_completion` it drives, and every executor's
+  `run_many` is a one-line delegation over the new
+  `scheduling.pool.batch_capacity`. `usable_cpu_count` moved to
+  `scheduling/pool.py` beside `resolve_pool_capacity`.
+- `ExecutionPool.run_stream` and `map_stream` delegate to one private
+  `_drive_stream` driver that names its termination model once.
+- `dr_exec.importable_json` owns the public `ENVELOPE_SCHEMA` /
+  `ENVELOPE_SCHEMA_VERSION` pair and the `is_importable_json_envelope` check
+  every parent-side reader uses. The spawned worker module keeps its own copy
+  deliberately — it is a `-c` entry module that imports nothing from `dr_exec`
+  — and a golden test pins the two definitions equal.
+- Worker result-frame statuses are a `WorkerFrameStatus` `StrEnum` with their
+  wire literals pinned, so the parent dispatches on members and has a
+  meaningful unknown-status arm.
+- `_WorkerLease.__exit__` is the single worker teardown point, and one
+  `_get_watched` helper carries the stop-condition polling both worker-pool
+  queues used to spell separately.
+- Renamed the two independently contracted frame terminators to
+  `PROTOCOL_FRAME_TERMINATOR` (execution protocol) and
+  `WORKER_FRAME_TERMINATOR` (worker-pool pipes); they remain separate.
+- The five pre-PEP-695 generics in `scheduling/` use PEP 695 syntax.
 - Budget models own their limit: `UnbudgetedLimit.limit` is `None` and each
   finite limit returns its maximum, replacing five private per-axis unwrapping
   helpers and two `object`-typed signatures across the protocol reader, engine,

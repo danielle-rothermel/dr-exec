@@ -34,7 +34,6 @@ from dr_exec import (
     JobId,
 )
 from dr_exec.core.kinds import CapacitySource, ExecutorFailureCode
-from dr_exec.execution.executor import _run_batch
 from dr_exec.scheduling.pool import _OwnedContext, _StreamOwner, _unowned
 from dr_exec.scheduling.scheduler import (
     AdmissionResult,
@@ -42,6 +41,7 @@ from dr_exec.scheduling.scheduler import (
     SchedulerBroken,
     _Admitted,
     _Completion,
+    run_batch,
 )
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ def fixed_pool(executor: Executor, slots: int, /) -> ExecutionPool:
 def batch_of(
     executor: Executor, batch: Iterable[ExecutionJob], /, *, slots: int
 ) -> Generator[CompletedExecution]:
-    return _run_batch(executor, batch, capacity=slots)
+    return run_batch(executor, batch, capacity=slots)
 
 
 class RecordingSource:
@@ -1168,7 +1168,7 @@ def test_a_batch_break_delivers_the_buffered_tail_before_it_raises(
             captured.append(self)
 
     monkeypatch.setattr(
-        "dr_exec.execution.executor.ExecutionScheduler", _CapturingScheduler
+        "dr_exec.scheduling.scheduler.ExecutionScheduler", _CapturingScheduler
     )
     parked = threading.Event()
     may_proceed = threading.Event()
@@ -1445,7 +1445,7 @@ def test_an_abandoned_batch_still_drains_its_admitted_work(
             captured.append(self)
 
     monkeypatch.setattr(
-        "dr_exec.execution.executor.ExecutionScheduler", _CapturingScheduler
+        "dr_exec.scheduling.scheduler.ExecutionScheduler", _CapturingScheduler
     )
     stream = batch_of(executor, batch, slots=2)
 

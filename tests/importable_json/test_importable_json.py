@@ -47,8 +47,10 @@ from dr_exec import (
     UntrustedPythonTarget,
     build_trusted_importable_json_job,
     build_untrusted_importable_json_job,
+    importable_json,
     parse_importable_json_result,
 )
+from dr_exec.execution import worker_pool_worker
 from dr_exec.importable_json import build_in_process_importable_json_job
 from dr_exec.recording.identity import canonical_declaration_digest
 
@@ -190,6 +192,36 @@ def test_finite_input_budget_is_enforced_before_fake_execution() -> None:
         executor.run_blocking(job)
 
     assert executor.calls == ()
+
+
+def test_the_envelope_literals_have_one_owner() -> None:
+    assert importable_json.ENVELOPE_SCHEMA == ENVELOPE_SCHEMA
+    assert importable_json.ENVELOPE_SCHEMA_VERSION == ENVELOPE_VERSION
+
+
+def test_the_worker_repeats_the_owning_envelope_literals_exactly() -> None:
+    # The worker module is spawned with ``-c`` and imports nothing from
+    # dr_exec, so its deliberate second copy is pinned equal here instead.
+    assert worker_pool_worker.ENVELOPE_SCHEMA == (
+        importable_json.ENVELOPE_SCHEMA
+    )
+    assert worker_pool_worker.ENVELOPE_SCHEMA_VERSION == (
+        importable_json.ENVELOPE_SCHEMA_VERSION
+    )
+
+
+def test_every_worker_frame_status_literal_is_pinned() -> None:
+    # Persisted-format contract: these are the exact status values a worker
+    # writes on the wire. Never derive them from member names.
+    assert {
+        member.name: member.value
+        for member in worker_pool_worker.WorkerFrameStatus
+    } == {
+        "OK": "ok",
+        "PAYLOAD_RAISED": "payload_raised",
+        "PAYLOAD_RESULT_INVALID": "payload_result_invalid",
+        "EXECUTOR_REJECTED": "executor_rejected",
+    }
 
 
 def test_in_process_target_identity_is_deterministic_and_pinned() -> None:
