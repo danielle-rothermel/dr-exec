@@ -565,6 +565,49 @@ def test_prepare_for_the_same_job_id_targets_the_same_record_directory(
     )
 
 
+def test_a_failed_prepare_reclaims_its_orphan_and_allows_retry(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = record_reference_for_job(execution_id.job_id)
+    record_dir = (
+        store.root / f"{RECORD_DIRECTORY_PREFIX}-{reference.record_id}"
+    )
+    _install_finalization_fault(
+        monkeypatch,
+        stage="manifest_publish",
+        error_number=errno.ENOSPC,
+    )
+
+    with pytest.raises(ExecutorFailure, match="prepare the run record"):
+        store.prepare(_prepared_record(execution_id))
+
+    assert not record_dir.exists()
+
+    monkeypatch.undo()
+
+    run = store.prepare(_prepared_record(execution_id))
+    assert run.reference == reference
+    assert store.load(run.reference).state == RecordState.PREPARED
+
+
+def test_an_empty_orphan_at_a_deterministic_path_is_reclaimed_on_prepare(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    reference = record_reference_for_job(execution_id.job_id)
+    record_dir = (
+        store.root / f"{RECORD_DIRECTORY_PREFIX}-{reference.record_id}"
+    )
+    record_dir.mkdir()
+
+    run = store.prepare(_prepared_record(execution_id))
+
+    assert run.reference == reference
+    assert store.load(run.reference).state == RecordState.PREPARED
+
+
 def test_a_relative_root_is_normalized_for_the_store_and_allocated_run(
     tmp_path: Path,
     execution_id: ExecutionId,

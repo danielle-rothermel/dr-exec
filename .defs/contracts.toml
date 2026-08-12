@@ -128,7 +128,9 @@ only after a successful spawn, and finalizes every recognized result. Recording 
 degradation is reported through the receipt with the latest valid durable state \
 and does not replace the execution outcome. Run-record directory identity and \
 `AttemptId` derive deterministically from the caller-supplied `JobId`; dr-exec \
-mints no internal random execution or record identifiers. Run-record manifests \
+mints no internal random execution or record identifiers. A deterministic \
+directory with no loadable lifecycle record is reclaimed before retry. \
+Run-record manifests \
 publish within fixed structural byte and depth ceilings and load through bounded, \
 descriptor-pinned canonical reads before strict lifecycle validation. Fake \
 calls create no production record."""

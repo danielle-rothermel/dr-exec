@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -245,7 +246,11 @@ class DirectoryRunStore:
                 record.declaration.execution_id.job_id
             )
             directory = self._allocate(reference)
-            directory.publish(_manifest_payload(record))
+            try:
+                directory.publish(_manifest_payload(record))
+            except DocumentDirectoryError:
+                self._reclaim_unprepared_allocation(directory.path)
+                raise
         return PreparedRun(
             execution_id=record.declaration.execution_id,
             reference=reference,
@@ -403,11 +408,25 @@ class DirectoryRunStore:
         record_dir = self._record_dir(reference)
         try:
             record_dir.mkdir(exist_ok=False)
+        except FileExistsError:
+            self._reclaim_unprepared_allocation(record_dir)
+            try:
+                record_dir.mkdir(exist_ok=False)
+            except OSError as error:
+                raise AllocationError(
+                    f"could not allocate run record {reference.record_id}"
+                ) from error
         except OSError as error:
             raise AllocationError(
                 f"could not allocate run record {reference.record_id}"
             ) from error
         return _directory(record_dir)
+
+    def _reclaim_unprepared_allocation(self, record_dir: Path, /) -> None:
+        try:
+            _load_record(record_dir)
+        except RecordLoadError:
+            shutil.rmtree(record_dir)
 
     def _record_dir(self, reference: RunRecordReference, /) -> Path:
         return self.root / f"{RECORD_DIRECTORY_PREFIX}-{reference.record_id}"
