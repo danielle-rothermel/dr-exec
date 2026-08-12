@@ -47,9 +47,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The in-process `_run_body` observes its stop condition through one
   `_StopState.outcome(cancellation)` reader that latches nothing, mirroring the
   worker pool's `_StopWatch.outcome()`.
-- An interrupted async `run()` reports the elapsed run: the attempt's identity
-  and timing are stamped once before the offload rather than restamped when the
-  interrupt arrives, and the target check exists once.
+- `ImportableJsonExecutor.run()` does no per-job work on the event loop:
+  declaration validation, request serialization, and attempt stamping all
+  happen inside the one daemon-thread offload, so an unbudgeted request can no
+  longer block the caller's loop and the wall-time clock starts when the
+  attempt does rather than before the thread is scheduled. The offloaded
+  attempt publishes its facts through a handoff slot, so an interrupted
+  `run()` still reports the elapsed run; an interrupt that lands before the
+  attempt starts completes at interrupt time without running the declaration
+  gate. The target check exists once.
 - `run_batch` is public scheduling machinery in `scheduling/scheduler.py` next
   to the `ExecutionScheduler.take_completion` it drives, and every executor's
   `run_many` is a one-line delegation over the new

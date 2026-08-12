@@ -9,7 +9,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
-from dr_serialize import Jsonable
+from dr_serialize import IdentityDocument, Jsonable
 from support.importable_json import (
     ECHO,
     RAISE_SYSTEM_EXIT,
@@ -31,6 +31,7 @@ from dr_exec import (
     FixedPoolCapacity,
     ImportableEntryPoint,
     ImportableJsonExecutor,
+    InProcessRecordReceipt,
     IsolatedHostPythonRuntime,
     JobId,
     ProcessExecutor,
@@ -38,6 +39,8 @@ from dr_exec import (
     parse_importable_json_result,
 )
 from dr_exec.core.kinds import BudgetAxis, FailureOwner
+from dr_exec.execution import importable_json_executor
+from dr_exec.execution.importable_json_executor import _in_process_target
 from dr_exec.recording.models import BudgetExceededOutcome
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
@@ -244,16 +247,28 @@ def test_an_interrupted_run_reports_the_elapsed_run_duration() -> None:
     executor = ImportableJsonExecutor()
     job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
     # A controlled clock, not elapsed real time: the one clock is read twice,
-    # once when ``run`` stamps the attempt and once when the interrupt
-    # completion is built.
+    # once when the offloaded attempt stamps its facts into the handoff slot
+    # and once when the interrupt completion is built.
     readings = iter((1_000, 5_000_000_000))
+
+    async def offload_then_interrupt(
+        call: object, *args: object, **kwargs: object
+    ) -> CompletedExecution:
+        # Fill the handoff slot the way a started attempt does, then interrupt:
+        # the completion must report that attempt's elapsed run.
+        handoff = kwargs["handoff"]
+        assert isinstance(handoff, importable_json_executor._Handoff)
+        handoff.execution = importable_json_executor._attempt(
+            job, _in_process_target(job)
+        )
+        raise KeyboardInterrupt
 
     async def collect() -> CompletedExecution:
         with (
             patch("time.monotonic_ns", lambda: next(readings)),
             patch(
                 "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
-                _raise_keyboard_interrupt,
+                offload_then_interrupt,
             ),
         ):
             return await executor.run(job)
@@ -261,6 +276,52 @@ def test_an_interrupted_run_reports_the_elapsed_run_duration() -> None:
     completed = asyncio.run(collect())
 
     assert completed.result.measurements.duration_ns == 4_999_999_000
+
+
+def test_an_interrupt_before_the_attempt_starts_still_completes() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
+
+    async def collect() -> CompletedExecution:
+        # The offload never invokes the callable, so the handoff slot stays
+        # empty: the attempt never started and the facts are stamped here.
+        with patch(
+            "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
+            _raise_keyboard_interrupt,
+        ):
+            return await executor.run(job)
+
+    completed = asyncio.run(collect())
+
+    assert isinstance(completed.result.outcome, ExitedOutcome)
+    assert completed.result.outcome.exit_code == 1
+    assert isinstance(completed.record_receipt, InProcessRecordReceipt)
+
+
+def test_run_serializes_the_request_off_the_event_loop() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job()
+    real_transport_bytes = importable_json_executor.request_transport_bytes
+    serializing_threads: list[int] = []
+
+    def recording_transport_bytes(request: IdentityDocument, /) -> bytes:
+        serializing_threads.append(threading.get_ident())
+        return real_transport_bytes(request)
+
+    async def collect() -> tuple[CompletedExecution, int]:
+        with patch.object(
+            importable_json_executor,
+            "request_transport_bytes",
+            recording_transport_bytes,
+        ):
+            completed = await executor.run(job)
+        return completed, threading.get_ident()
+
+    completed, loop_thread = asyncio.run(collect())
+
+    assert isinstance(completed.result.outcome, ExitedOutcome)
+    assert serializing_threads
+    assert all(ident != loop_thread for ident in serializing_threads)
 
 
 def test_async_run_cancels_token_on_keyboard_interrupt() -> None:

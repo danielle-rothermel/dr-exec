@@ -113,6 +113,19 @@ class _Execution:
         )
 
 
+class _Handoff:
+    """Where the offloaded attempt publishes its facts for the awaiter.
+
+    Attribute assignment is atomic under the GIL, so the interrupt path reads
+    this slot without a lock.
+    """
+
+    __slots__ = ("execution",)
+
+    def __init__(self) -> None:
+        self.execution: _Execution | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ImportableJsonExecutor:
     """Run trusted importable-JSON entry points in-process."""
@@ -125,16 +138,19 @@ class ImportableJsonExecutor:
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         token = cancellation if cancellation is not None else CancelToken()
-        # The attempt facts are built once, before the offload, so an interrupt
-        # reports the elapsed run rather than the moment the interrupt arrived.
-        target = _in_process_target(job)
-        execution = _attempt(job, target)
+        # Validation, serialization, and fact-stamping stay inside the offload
+        # so no job-sized work runs on the event loop. The handoff slot is how
+        # an interrupt recovers the real timing of an attempt already started.
+        handoff = _Handoff()
         try:
             return await offload_blocking_daemon(
-                self._run_attempt, execution, target, job, cancellation=token
+                self._attempt_job, job, cancellation=token, handoff=handoff
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
             token.cancel()
+            execution = handoff.execution
+            if execution is None:
+                execution = _interrupted_attempt(job)
             return execution.completed(
                 outcome=ExitedOutcome(exit_code=1),
                 attribution_detail="the importable JSON entry point terminated",
@@ -147,9 +163,22 @@ class ImportableJsonExecutor:
         *,
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
+        return self._attempt_job(job, cancellation=cancellation)
+
+    def _attempt_job(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None,
+        handoff: _Handoff | None = None,
+    ) -> CompletedExecution:
         target = _in_process_target(job)
+        execution = _attempt(job, target)
+        if handoff is not None:
+            handoff.execution = execution
         return self._run_attempt(
-            _attempt(job, target), target, job, cancellation=cancellation
+            execution, target, job, cancellation=cancellation
         )
 
     def _run_attempt(
@@ -289,6 +318,27 @@ def _attempt(
         started_at=datetime.now(UTC),
         started_ns=time.monotonic_ns(),
         input_bytes=len(request_transport_bytes(target.request)),
+    )
+
+
+def _interrupted_attempt(job: ExecutionJob, /) -> _Execution:
+    """Stamp facts for an interrupt that landed before the attempt started.
+
+    This is a courtesy completion at the await boundary, not execution
+    evidence, so it declines the declaration gate the attempt never reached.
+    """
+
+    target = job.target
+    return _Execution(
+        execution_id=ExecutionId(
+            job_id=job.job_id,
+            attempt_id=attempt_id_for_job(job.job_id),
+        ),
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        input_bytes=len(request_transport_bytes(target.request))
+        if isinstance(target, InProcessImportableJsonTarget)
+        else 0,
     )
 
 
