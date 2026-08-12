@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import os
 import shutil
 import stat
 from collections.abc import Iterator
@@ -23,6 +21,8 @@ from dr_store import (
     DocumentDirectory,
     DocumentDirectoryError,
     SidecarSummary,
+    VerifiedRegularChildReadError,
+    read_verified_regular_child,
 )
 from pydantic import TypeAdapter, ValidationError
 
@@ -346,7 +346,19 @@ class DirectoryRunStore:
             raise RecordLoadError(
                 f"artifact exceeds the {max_bytes}-byte read limit"
             )
-        return _read_artifact(record_dir, artifact)
+        try:
+            return read_verified_regular_child(
+                record_dir,
+                artifact.relative_path.as_posix(),
+                max_bytes=max_bytes,
+                expected_byte_length=artifact.size_bytes,
+                expected_sha256=artifact.sha256,
+            )
+        except VerifiedRegularChildReadError as error:
+            raise RecordLoadError(
+                f"artifact {artifact.relative_path.as_posix()!r} at "
+                f"{record_dir} does not match its record"
+            ) from error
 
     def _publish_finalized(
         self,
@@ -549,98 +561,6 @@ def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:
                 f"sidecar {artifact.relative_path} at {record_dir} does not "
                 "match its record"
             ) from error
-
-
-_READ_CHUNK_BYTES: Final = 1 << 16
-_OPEN_SUPPORTS_DIR_FD: Final = os.open in getattr(os, "supports_dir_fd", ())
-_REQUIRED_ARTIFACT_OPEN_FLAGS: Final = (
-    "O_CLOEXEC",
-    "O_DIRECTORY",
-    "O_NOFOLLOW",
-    "O_NONBLOCK",
-)
-
-
-def _read_artifact(
-    record_dir: Path,
-    artifact: OutputArtifactRecord,
-    /,
-) -> bytes:
-    """Boundedly read and verify one regular child from pinned descriptors."""
-
-    missing_flags = [
-        flag
-        for flag in _REQUIRED_ARTIFACT_OPEN_FLAGS
-        if not isinstance(getattr(os, flag, None), int)
-    ]
-    if not _OPEN_SUPPORTS_DIR_FD or missing_flags:
-        detail = ", ".join(missing_flags) or "os.open(dir_fd=...)"
-        raise RecordLoadError(
-            "descriptor-pinned no-follow artifact reads are unsupported: "
-            f"missing {detail}"
-        )
-
-    name = artifact.relative_path.as_posix()
-    directory_descriptor: int | None = None
-    artifact_descriptor: int | None = None
-    try:
-        directory_descriptor = os.open(
-            record_dir,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
-        artifact_descriptor = os.open(
-            name,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-            dir_fd=directory_descriptor,
-        )
-        metadata = os.fstat(artifact_descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise RecordLoadError(f"artifact {name!r} is not a regular file")
-        if metadata.st_size != artifact.size_bytes:
-            raise RecordLoadError(
-                f"artifact {name!r} size does not match its record"
-            )
-        chunks: list[bytes] = []
-        digest = hashlib.sha256()
-        actual_size = 0
-        while actual_size < artifact.size_bytes:
-            chunk = os.read(
-                artifact_descriptor,
-                min(_READ_CHUNK_BYTES, artifact.size_bytes - actual_size),
-            )
-            if not chunk:
-                break
-            actual_size += len(chunk)
-            chunks.append(chunk)
-            digest.update(chunk)
-        if os.fstat(artifact_descriptor).st_size != artifact.size_bytes:
-            raise RecordLoadError(
-                f"artifact {name!r} size does not match its record"
-            )
-    except RecordLoadError:
-        raise
-    except (NotImplementedError, OSError) as error:
-        raise RecordLoadError(f"could not read artifact {name!r}") from error
-    finally:
-        if artifact_descriptor is not None:
-            try:
-                os.close(artifact_descriptor)
-            except OSError:
-                pass
-        if directory_descriptor is not None:
-            try:
-                os.close(directory_descriptor)
-            except OSError:
-                pass
-    if actual_size != artifact.size_bytes:
-        raise RecordLoadError(
-            f"artifact {name!r} size does not match its record"
-        )
-    if digest.hexdigest() != artifact.sha256:
-        raise RecordLoadError(
-            f"artifact {name!r} digest does not match its record"
-        )
-    return b"".join(chunks)
 
 
 __all__ = [

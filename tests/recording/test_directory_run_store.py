@@ -359,7 +359,9 @@ def _install_finalization_fault(
                     ) from error
                 except DocumentPublishError as document_error:
                     raise ManifestPublishError(
-                        "injected manifest publication fault"
+                        _directory.path / MANIFEST_NAME,
+                        PublicationStage.WRITE_TEMP,
+                        replacement_state=ReplacementState.NOT_REPLACED,
                     ) from document_error
 
         monkeypatch.setattr(DocumentDirectory, "publish", publish)
