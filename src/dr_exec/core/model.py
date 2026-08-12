@@ -124,6 +124,11 @@ CanonicalUuid = Annotated[
     BeforeValidator(_require_pinned_uuid_spelling),
 ]
 
+CanonicalUuidSpelling = Annotated[
+    str,
+    BeforeValidator(_require_pinned_uuid_spelling),
+]
+
 
 _BASE64_MESSAGE = "bytes must be canonical padded URL-safe base64"
 _URL_SAFE_ALTCHARS = b"-_"

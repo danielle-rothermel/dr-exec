@@ -86,17 +86,8 @@ def empty_payload_outputs() -> PayloadOutputs:
     return PayloadOutputs(stdout=empty, stderr=empty)
 
 
-def finite_duration_ns(budget: object, /) -> int | None:
-    from dr_exec.declarations.models import FiniteDurationLimit
-
-    if isinstance(budget, FiniteDurationLimit):
-        return budget.max_ns
-    return None
-
-
 __all__ = [
     "attribute_outcome",
     "empty_payload_outputs",
     "executor_protocol_failure_attribution",
-    "finite_duration_ns",
 ]

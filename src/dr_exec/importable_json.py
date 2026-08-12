@@ -18,11 +18,11 @@ from dr_exec.declarations.models import (
     Budgets,
     EnvGrant,
     ExecutionJob,
+    ImportableEntryPoint,
     InProcessImportableJsonTarget,
     TrustedPythonTarget,
     UntrustedPythonTarget,
 )
-from dr_exec.importable_json_entry_point import ImportableEntryPoint
 from dr_exec.recording.models import CompletedExecution, ExitedOutcome
 
 # Persisted-format contract: these fixed envelope literals are shared by the

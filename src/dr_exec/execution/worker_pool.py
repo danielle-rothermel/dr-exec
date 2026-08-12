@@ -32,6 +32,7 @@ from dr_exec.core.kinds import (
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
+    ImportableEntryPoint,
     InProcessImportableJsonTarget,
 )
 from dr_exec.declarations.transport import request_transport_bytes
@@ -41,7 +42,6 @@ from dr_exec.execution.outcomes import (
     attribute_outcome,
     empty_payload_outputs,
     executor_protocol_failure_attribution,
-    finite_duration_ns,
 )
 from dr_exec.execution.worker_pool_worker import (
     DETAIL_KEY,
@@ -56,7 +56,6 @@ from dr_exec.execution.worker_pool_worker import (
     STATUS_PAYLOAD_RAISED,
     STATUS_PAYLOAD_RESULT_INVALID,
 )
-from dr_exec.importable_json_entry_point import ImportableEntryPoint
 from dr_exec.recording.models import (
     BudgetExceededOutcome,
     CancelledOutcome,
@@ -461,7 +460,7 @@ class WorkerPoolImportableJsonExecutor:
             return execution.completed(outcome=CancelledOutcome())
         return self._dispatch(
             execution,
-            deadline_ns=finite_duration_ns(job.budgets.wall_time),
+            deadline_ns=job.budgets.wall_time.limit,
             cancellation=cancellation,
         )
 

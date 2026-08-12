@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import keyword
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -29,26 +30,41 @@ from dr_exec.core.model import (
     IdentityDocumentField,
 )
 from dr_exec.core.names import JobId
-from dr_exec.importable_json_entry_point import ImportableEntryPoint
 
 
 class UnbudgetedLimit(ContractModel):
     kind: Literal[LimitKind.UNBUDGETED] = LimitKind.UNBUDGETED
+
+    @property
+    def limit(self) -> None:
+        return None
 
 
 class FiniteByteLimit(ContractModel):
     kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
     max_bytes: PositiveInt
 
+    @property
+    def limit(self) -> int:
+        return self.max_bytes
+
 
 class FiniteDurationLimit(ContractModel):
     kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
     max_ns: PositiveInt
 
+    @property
+    def limit(self) -> int:
+        return self.max_ns
+
 
 class FiniteCountLimit(ContractModel):
     kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
     max_count: PositiveInt
+
+    @property
+    def limit(self) -> int:
+        return self.max_count
 
 
 type ByteBudget = Annotated[
@@ -63,10 +79,6 @@ type CountBudget = Annotated[
     UnbudgetedLimit | FiniteCountLimit,
     Field(discriminator="kind"),
 ]
-
-
-class UnbudgetedOutput(ContractModel):
-    kind: Literal[LimitKind.UNBUDGETED] = LimitKind.UNBUDGETED
 
 
 class StreamRetentionBudget(ContractModel):
@@ -97,9 +109,13 @@ class FiniteOutput(ContractModel):
             raise ValueError("retention bytes must sum to max_bytes")
         return self
 
+    @property
+    def limit(self) -> int:
+        return self.max_bytes
+
 
 type OutputBudget = Annotated[
-    UnbudgetedOutput | FiniteOutput,
+    UnbudgetedLimit | FiniteOutput,
     Field(discriminator="kind"),
 ]
 
@@ -117,7 +133,7 @@ _UNSUPPORTED_FINITE_WORKLOAD_AXES: Final = (
 class Budgets(ContractModel):
     wall_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
     input_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
-    payload_output: OutputBudget = Field(default_factory=UnbudgetedOutput)
+    payload_output: OutputBudget = Field(default_factory=UnbudgetedLimit)
     memory_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
     cpu_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
     process_count: CountBudget = Field(default_factory=UnbudgetedLimit)
@@ -350,6 +366,33 @@ class UntrustedPythonTarget(ContractModel):
     )
 
 
+class ImportableEntryPoint(ContractModel):
+    """One absolute module and one exact module-level attribute."""
+
+    module_name: str
+    attribute_name: str
+
+    @field_validator("module_name")
+    @classmethod
+    def module_name_must_be_absolute(cls, value: str) -> str:
+        parts = value.split(".")
+        if not parts or any(
+            not part.isidentifier() or keyword.iskeyword(part)
+            for part in parts
+        ):
+            raise ValueError(
+                "module_name must be an absolute dotted Python module name"
+            )
+        return value
+
+    @field_validator("attribute_name")
+    @classmethod
+    def attribute_name_must_be_exact(cls, value: str) -> str:
+        if not value.isidentifier() or keyword.iskeyword(value):
+            raise ValueError("attribute_name must be one Python identifier")
+        return value
+
+
 class InProcessImportableJsonTarget(ContractModel):
     kind: Literal[ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON] = (
         ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON
@@ -391,6 +434,7 @@ __all__ = [
     "FiniteCountLimit",
     "FiniteDurationLimit",
     "FiniteOutput",
+    "ImportableEntryPoint",
     "InProcessImportableJsonTarget",
     "OutputBudget",
     "PayloadRetentionBudget",
@@ -398,7 +442,6 @@ __all__ = [
     "TrustedCommandTarget",
     "TrustedPythonTarget",
     "UnbudgetedLimit",
-    "UnbudgetedOutput",
     "UntrustedCommandTarget",
     "UntrustedPythonTarget",
 ]

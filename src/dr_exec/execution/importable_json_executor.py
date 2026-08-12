@@ -28,7 +28,6 @@ from dr_exec.execution.outcomes import (
     attribute_outcome,
     empty_payload_outputs,
     executor_protocol_failure_attribution,
-    finite_duration_ns,
 )
 from dr_exec.importable_json import (
     ImportableJsonExecutorDispatchError,
@@ -110,7 +109,7 @@ class ImportableJsonExecutor:
         if cancellation is not None and cancellation.cancelled:
             stop.caller_cancelled = True
         deadline_timer: Timer | None = None
-        deadline_ns = finite_duration_ns(job.budgets.wall_time)
+        deadline_ns = job.budgets.wall_time.limit
         if deadline_ns is not None:
             delay_seconds = max(
                 0.0,

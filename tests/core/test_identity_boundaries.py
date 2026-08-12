@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from dr_serialize import build_identity_document
 
-from dr_exec.core.identity import _require_identity_role
+from dr_exec.core.identity import require_identity_role
 
 EXPECTED_SCHEMA = "dr_exec.test_identity"
 
@@ -47,4 +47,4 @@ def test_identity_roles_reject_wrong_envelopes(
     )
 
     with pytest.raises(ValueError, match=message):
-        _require_identity_role(document, schema=EXPECTED_SCHEMA)
+        require_identity_role(document, schema=EXPECTED_SCHEMA)

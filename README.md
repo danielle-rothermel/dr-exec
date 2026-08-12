@@ -40,6 +40,9 @@ does not verify interpreter, standard-library, or package bytes.
 - **[Core](https://github.com/danielle-rothermel/dr-exec/tree/main/src/dr_exec/core)**
   supplies shared names, enums, cancellation, errors, identity helpers, and
   contract-model foundations.
+- **[Importable JSON](https://github.com/danielle-rothermel/dr-exec/blob/main/src/dr_exec/importable_json.py)**
+  is the caller-facing adapter that builds importable-JSON jobs over one fixed
+  private envelope and parses their results back out of a completion.
 
 The abbreviated signatures below show the durable public contract shapes;
 `...` marks validation and implementation detail intentionally left out.

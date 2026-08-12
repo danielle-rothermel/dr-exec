@@ -13,7 +13,6 @@ from dr_exec import (
     CompleteRecordReceipt,
     DegradedRecordReceipt,
     ExecutionAttribution,
-    ExecutionAttributionRecord,
     ExecutionId,
     ExecutionMeasurements,
     ExecutionResult,
@@ -26,7 +25,6 @@ from dr_exec import (
     PayloadOutputRecords,
     PayloadOutputs,
     ProtocolFailedOutcome,
-    ProtocolFailedOutcomeRecord,
     ProtocolFailureCode,
     RecordingFailure,
     RecordState,
@@ -235,12 +233,12 @@ def test_recorded_protocol_failure_count_must_match_accepted_outputs() -> None:
     with pytest.raises(ValidationError, match="count does not match"):
         ExecutionResultRecord(
             execution_id=execution_id,
-            outcome=ProtocolFailedOutcomeRecord(
+            outcome=ProtocolFailedOutcome(
                 failure_code=ProtocolFailureCode.INCOMPLETE_STREAM,
                 failure_detail="diagnostic",
                 accepted_output_count=1,
             ),
-            attribution=ExecutionAttributionRecord(owner=FailureOwner.PAYLOAD),
+            attribution=ExecutionAttribution(owner=FailureOwner.PAYLOAD),
             protocol_outputs=(),
             payload_outputs=PayloadOutputRecords(
                 stdout=_empty_stream_record(),

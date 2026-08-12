@@ -9,8 +9,8 @@ from pydantic import field_validator
 from dr_exec.core.identity import (
     IDENTITY_SCHEMA_VERSION,
     NonemptyString,
-    _identity_payload,
-    _require_identity_role,
+    identity_payload,
+    require_identity_role,
 )
 from dr_exec.core.model import ContractModel
 
@@ -30,7 +30,7 @@ def _validate_normalized_absolute_posix_path(value: str) -> str:
     return value
 
 
-class _IsolatedHostRuntimeIdentityPayload(ContractModel):
+class IsolatedHostRuntimeIdentityPayload(ContractModel):
     kind: Literal["isolated_host_python"]
     resolved_executable: str
     implementation: NonemptyString
@@ -43,29 +43,30 @@ class _IsolatedHostRuntimeIdentityPayload(ContractModel):
     )
 
 
-def _isolated_host_runtime_identity_payload(
+def isolated_host_runtime_identity_payload(
     document: IdentityDocument,
-) -> _IsolatedHostRuntimeIdentityPayload:
-    payload = _require_identity_role(
+) -> IsolatedHostRuntimeIdentityPayload:
+    payload = require_identity_role(
         document,
         schema=ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA,
     )
-    return _IsolatedHostRuntimeIdentityPayload.model_validate(payload)
+    return IsolatedHostRuntimeIdentityPayload.model_validate(payload)
 
 
-def _validate_isolated_host_runtime_identity(
-    document: IdentityDocument,
-) -> IdentityDocument:
-    _isolated_host_runtime_identity_payload(document)
-    return document
-
-
-def _build_isolated_host_runtime_identity(
-    payload: _IsolatedHostRuntimeIdentityPayload,
+def build_isolated_host_runtime_identity(
+    payload: IsolatedHostRuntimeIdentityPayload,
     /,
 ) -> IdentityDocument:
     return build_identity_document(
         schema=ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA,
         schema_version=IDENTITY_SCHEMA_VERSION,
-        payload=_identity_payload(payload),
+        payload=identity_payload(payload),
     )
+
+
+__all__ = [
+    "ISOLATED_HOST_RUNTIME_IDENTITY_SCHEMA",
+    "IsolatedHostRuntimeIdentityPayload",
+    "build_isolated_host_runtime_identity",
+    "isolated_host_runtime_identity_payload",
+]

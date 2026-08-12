@@ -12,7 +12,10 @@ import pytest
 from dr_serialize import IdentityDocument, Jsonable, build_identity_document
 
 from dr_exec import ExecutorSelfBudgets, ProtocolFailureCode
-from dr_exec.declarations.transport import request_transport_bytes
+from dr_exec.declarations.transport import (
+    request_transport_bytes,
+    request_transport_digest,
+)
 from dr_exec.runtime.bootstrap import (
     DRIVER_ENTRYPOINT_NAME,
     DRIVER_SOURCE_BINDING,
@@ -23,7 +26,6 @@ from dr_exec.runtime.bootstrap import (
 from dr_exec.runtime.protocol import (
     ProtocolStreamResult,
     read_protocol_stream,
-    request_identity_digest,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.subprocess]
@@ -150,7 +152,9 @@ def _run_driver(
         with os.fdopen(protocol_read, "rb") as protocol:
             stream = read_protocol_stream(
                 protocol,
-                request_id_sha256=request_identity_digest(request),
+                request_id_sha256=request_transport_digest(
+                    request_transport_bytes(request)
+                ),
                 self_budgets=(
                     self_budgets or ExecutorSelfBudgets.unbudgeted()
                 ),
