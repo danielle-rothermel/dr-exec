@@ -104,6 +104,7 @@ SUPPORTED_PLATFORM: Final = "darwin"
 SCRATCH_DIRECTORY_PREFIX: Final = "dr-exec-run-"
 
 _DRAIN_CHUNK_BYTES: Final = 65536
+_COOPERATIVE_WAKE_SECONDS: Final = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,7 +463,10 @@ def _await_child(
             return _StopReason(axis=BudgetAxis.PAYLOAD_OUTPUT, cancelled=False)
         if cancellation is not None and cancellation.cancelled:
             return _StopReason(axis=None, cancelled=True)
-        needs_cooperative_wake = cancellation is not None or fail_on_overflow
+        # Every process attempt runs payload transport workers that may fail
+        # asynchronously while the child continues; cancellation and overflow
+        # need the same bounded wakeups when no wall-time budget applies.
+        needs_cooperative_wake = True
         timeout: float | None = None
         if deadline_ns is not None:
             remaining_ns = deadline_ns - time.monotonic_ns()
@@ -470,11 +474,11 @@ def _await_child(
                 return _StopReason(axis=BudgetAxis.WALL_TIME, cancelled=False)
             timeout = remaining_ns / 1e9
             if needs_cooperative_wake:
-                timeout = min(timeout, 0.05)
+                timeout = min(timeout, _COOPERATIVE_WAKE_SECONDS)
         elif needs_cooperative_wake:
-            # Cooperative stop conditions still need wakeups when no wall-time
+            # Machinery stop conditions still need wakeups when no wall-time
             # budget bounds the wait; blocking until child exit would hide them.
-            timeout = 0.05
+            timeout = _COOPERATIVE_WAKE_SECONDS
         with suppress(subprocess.TimeoutExpired):
             process.wait(timeout=timeout)
 
