@@ -391,8 +391,9 @@ with WorkerPoolImportableJsonExecutor(entry_point=entry_point) as executor:
 ```
 
 The executor owns worker processes, so it is a context manager: leaving the
-`with` block stops every worker. A caller that cannot use `with` calls
-`close()` instead. Workers start lazily — the first job that needs a given
+`with` block stops every worker through `close_blocking()`. Async callers use
+`await executor.close()` or `async with WorkerPoolImportableJsonExecutor(...)`.
+Workers start lazily — the first job that needs a given
 slot spawns its worker — and then live until the executor closes. Worker count
 defaults to the usable CPU count and is overridable with `worker_count`; it is
 a parallelism width, not a resource cap.

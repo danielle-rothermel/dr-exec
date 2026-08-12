@@ -498,7 +498,7 @@ def test_a_declared_stop_condition_reaches_a_job_waiting_for_a_slot(
         if token is not None:
             token.cancel()
         completed = await waiting
-        await asyncio.to_thread(executor.close)
+        await executor.close()
         await held
         return completed
 
@@ -551,7 +551,7 @@ def test_a_worker_spawned_as_the_pool_closes_does_not_outlive_it(
         call = asyncio.create_task(executor.run(job))
         # close() runs while the spawn is parked inside held_spawn.
         await asyncio.to_thread(spawning.wait, WATCHDOG_SECONDS)
-        await asyncio.to_thread(executor.close)
+        await executor.close()
         proceed.set()
         return await call
 
@@ -855,7 +855,7 @@ def test_close_ends_an_unbudgeted_job_in_flight_rather_than_waiting(
         )
         call = asyncio.create_task(executor.run(job))
         await asyncio.to_thread(_await_marker, ready)
-        await asyncio.to_thread(executor.close)
+        await executor.close()
         return await call
 
     completed = asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
@@ -863,6 +863,111 @@ def test_close_ends_an_unbudgeted_job_in_flight_rather_than_waiting(
     assert isinstance(completed.result.outcome, SignaledOutcome)
     assert completed.result.attribution.detail is not None
     assert "worker" in completed.result.attribution.detail
+
+
+def test_awaitable_close_does_not_block_the_event_loop() -> None:
+    job = job_for_entry_point(ECHO, {"value": 1})
+
+    async def run() -> None:
+        executor = WorkerPoolImportableJsonExecutor(
+            entry_point=ECHO, worker_count=1
+        )
+        await executor.run(job)
+        _closed, tick = await asyncio.gather(
+            executor.close(),
+            asyncio.sleep(0),
+        )
+        assert tick is None
+
+    asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
+
+
+def test_awaitable_close_is_idempotent_like_close_blocking() -> None:
+    job = job_for_entry_point(ECHO, {"value": 1})
+
+    async def run_async_close() -> None:
+        executor = WorkerPoolImportableJsonExecutor(
+            entry_point=ECHO, worker_count=1
+        )
+        await executor.run(job)
+        await executor.close()
+        await executor.close()
+
+    asyncio.run(asyncio.wait_for(run_async_close(), WATCHDOG_SECONDS))
+
+    executor = WorkerPoolImportableJsonExecutor(
+        entry_point=ECHO, worker_count=1
+    )
+    executor.run_blocking(job)
+    executor.close_blocking()
+    executor.close_blocking()
+
+
+def test_awaitable_close_matches_close_blocking_effect(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "gates"
+    directory.mkdir()
+
+    async def closed_via_async() -> CompletedExecution:
+        ready = tmp_path / "ready-async"
+        gate = Gate.create(directory, "gate-async")
+        job = job_for_entry_point(
+            BLOCK_ON_GATE,
+            {"ready_path": str(ready), "gate_path": str(gate.path)},
+        )
+        executor = WorkerPoolImportableJsonExecutor(
+            entry_point=BLOCK_ON_GATE, worker_count=2
+        )
+        call = asyncio.create_task(executor.run(job))
+        await asyncio.to_thread(_await_marker, ready)
+        await executor.close()
+        return await call
+
+    async def closed_via_blocking() -> CompletedExecution:
+        ready = tmp_path / "ready-blocking"
+        gate = Gate.create(directory, "gate-blocking")
+        job = job_for_entry_point(
+            BLOCK_ON_GATE,
+            {"ready_path": str(ready), "gate_path": str(gate.path)},
+        )
+        executor = WorkerPoolImportableJsonExecutor(
+            entry_point=BLOCK_ON_GATE, worker_count=2
+        )
+        call = asyncio.create_task(executor.run(job))
+        await asyncio.to_thread(_await_marker, ready)
+        executor.close_blocking()
+        return await call
+
+    async def collect() -> tuple[CompletedExecution, CompletedExecution]:
+        async_closed = await closed_via_async()
+        blocking_closed = await closed_via_blocking()
+        return async_closed, blocking_closed
+
+    async_closed, blocking_closed = asyncio.run(
+        asyncio.wait_for(collect(), WATCHDOG_SECONDS)
+    )
+
+    for completed in (async_closed, blocking_closed):
+        assert isinstance(completed.result.outcome, SignaledOutcome)
+        assert completed.result.attribution.detail is not None
+        assert "worker" in completed.result.attribution.detail
+
+
+def test_async_context_manager_closes_workers() -> None:
+    job = job_for_entry_point(ECHO, {"value": 1})
+
+    async def run() -> None:
+        async with WorkerPoolImportableJsonExecutor(
+            entry_point=ECHO, worker_count=1
+        ) as executor:
+            completed = await executor.run(job)
+            assert parse_importable_json_result(completed) == {
+                "value": {"value": 1}
+            }
+        await executor.close()
+
+    asyncio.run(asyncio.wait_for(run(), WATCHDOG_SECONDS))
 
 
 @pytest.mark.parametrize("mode", [orphan_parent.IDLE, orphan_parent.BUSY])

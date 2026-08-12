@@ -68,7 +68,7 @@ from dr_exec.recording.models import (
     SpawnFailedOutcome,
     WorkerPoolRecordReceipt,
 )
-from dr_exec.scheduling.offload import offload_run_blocking
+from dr_exec.scheduling.offload import offload_blocking, offload_run_blocking
 from dr_exec.scheduling.pool import (
     AutoPoolCapacity,
     ExecutionPool,
@@ -499,10 +499,15 @@ class WorkerPoolImportableJsonExecutor:
             ),
         )
 
-    def close(self) -> None:
+    def close_blocking(self) -> None:
         """Stop every worker process this executor owns."""
 
         self._workers.close()
+
+    async def close(self) -> None:
+        """Stop every worker process without blocking the event loop."""
+
+        await offload_blocking(self.close_blocking)
 
     def __enter__(self) -> WorkerPoolImportableJsonExecutor:  # noqa: PYI034
         return self
@@ -513,7 +518,18 @@ class WorkerPoolImportableJsonExecutor:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        self.close_blocking()
+
+    async def __aenter__(self) -> WorkerPoolImportableJsonExecutor:  # noqa: PYI034
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
 
     def _pool_capacity(self, config: ExecutionPoolConfig | None, /) -> int:
         if config is None:

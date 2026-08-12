@@ -11,6 +11,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Executor.run_blocking()`, the renamed blocking primitive. Standalone async
   callers use `await executor.run(job)`; sync callers and scheduler worker
   threads use `executor.run_blocking(job)`.
+- **Breaking:** `WorkerPoolImportableJsonExecutor.close()` is now awaitable and
+  offloads to `close_blocking()`, the renamed blocking teardown primitive. Sync
+  `with` calls `close_blocking()` via `__exit__`; async callers use
+  `await executor.close()` or `async with WorkerPoolImportableJsonExecutor(...)`.
 
 ## [0.1.9] - 2026-08-11
 
