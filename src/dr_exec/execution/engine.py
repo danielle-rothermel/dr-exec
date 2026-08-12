@@ -134,7 +134,14 @@ def _resolve_executable(
     name = argv[0]
     if Path(name).is_absolute():
         return name
-    resolved = shutil.which(name, path=environment["PATH"])
+    # An absolute argv[0] is a Runtime conformance obligation, so a prepared
+    # relative name reaches here only from a nonconforming runtime. It stays
+    # unresolved and fails at spawn as a classified outcome; the child's cwd
+    # is the fresh scratch directory, where a relative name cannot resolve.
+    granted_path = environment.get("PATH")
+    if granted_path is None:
+        return name
+    resolved = shutil.which(name, path=granted_path)
     return resolved if resolved is not None else name
 
 

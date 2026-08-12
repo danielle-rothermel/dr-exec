@@ -56,7 +56,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   guarantee it. In-process targets are still rejected ahead of the shared gate,
   so they keep reporting `ExecutorFailureCode.TARGET_NOT_SUPPORTED`, and
   `_target_of`'s unreachable in-process arm is an `AssertionError` naming that
-  ordering.
+  ordering. The `Runtime` Protocol now documents the two conformance
+  obligations that make that pre-spawn enforcement truthful for prepared
+  artifacts — an absolute `argv[0]` and request bytes that are exactly the
+  declared request's canonical transport bytes — and `_resolve_executable`
+  reads a granted `PATH` optionally, so a nonconforming relative `argv[0]`
+  under an empty environment grant reaches the spawn and completes as a
+  classified `SpawnAbsentOutcome` instead of raising `KeyError`.
 - The engine's protocol descriptors are one `_ProtocolTransport` group on
   `_Transports.protocol`, so the all-set-or-all-unset correlation with a
   protocol-speaking target is expressed once at construction and the pump guard

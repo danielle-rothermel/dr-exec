@@ -43,6 +43,16 @@ class Executor(Protocol):
 
 
 class Runtime(Protocol):
+    """Prepare a Python target for one child invocation.
+
+    A conforming ``prepare()`` returns an absolute ``argv[0]``, the resolved
+    interpreter path, and ``request_bytes`` that are exactly the canonical
+    transport bytes of the declared request. The declaration gate enforces
+    workload budgets against the declaration, so these two properties are what
+    make pre-spawn enforcement truthful for the prepared artifacts; a runtime
+    that breaks either one voids it.
+    """
+
     def prepare(
         self,
         target: TrustedPythonTarget | UntrustedPythonTarget,
