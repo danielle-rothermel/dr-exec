@@ -17,6 +17,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `await executor.close()` or `async with WorkerPoolImportableJsonExecutor(...)`.
 - Closed worker pools reject new jobs with `ProtocolFailedOutcome` instead of
   dequeuing terminated idle workers.
+- In-process async `run()` preserves Ctrl+C → `ExitedOutcome(1)` via
+  daemon-thread offload and an interrupt bridge; the entry point may continue
+  until it returns in the background.
 
 ## [0.1.9] - 2026-08-11
 

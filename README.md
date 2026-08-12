@@ -372,7 +372,10 @@ returns typed outcomes instead so pools stay healthy. That includes
 `KeyboardInterrupt`: Ctrl+C during an in-process job is mapped to
 `ExitedOutcome(1)` rather than propagating through `run()`, so CLI callers
 should cancel through `CancelToken` when they need explicit cancellation
-semantics.
+semantics. `await ImportableJsonExecutor.run()` preserves the same Ctrl+C
+mapping at the await boundary via daemon-thread offload; the entry point may
+keep running in the background until it returns because sync Python in another
+thread cannot be hard-stopped.
 
 ### Worker pool importable JSON
 

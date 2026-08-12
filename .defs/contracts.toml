@@ -311,10 +311,13 @@ statement = """
 For in-process importable JSON jobs, finite wall time arms a one-shot cancel \
 signal when the budget expires. The worker thread cannot hard-stop arbitrary \
 Python user code; cancellation is observed before dispatch and after the entry \
-point returns. `ImportableJsonExecutor.run_blocking()` also maps \
+point returns. `ImportableJsonExecutor.run_blocking()` maps \
 `KeyboardInterrupt` to \
 `ExitedOutcome(1)` so pools stay healthy; Ctrl+C does not propagate through \
-`run()`."""
+`run()`. `await ImportableJsonExecutor.run()` offloads on a daemon thread and \
+maps Ctrl+C at the await boundary to the same `ExitedOutcome(1)` without \
+propagating through `run()`; the entry point may continue until it returns \
+because sync Python in another thread cannot be hard-stopped."""
 rationale = """
 Honest cancellation semantics avoid presenting in-process execution as \
 forcibly bounded when only cooperative observation is available."""
