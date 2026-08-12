@@ -11,6 +11,7 @@ from dr_serialize import (
     build_identity_document,
 )
 from pydantic import ValidationError
+from support.protocol import encode_frame
 
 from dr_exec import (
     ExecutorSelfBudgets,
@@ -20,12 +21,13 @@ from dr_exec import (
     UnbudgetedLimit,
 )
 from dr_exec.core.model import STRUCTURAL_DEPTH_CEILING
-from dr_exec.declarations.transport import request_transport_bytes
+from dr_exec.declarations.transport import (
+    request_transport_bytes,
+    request_transport_digest,
+)
 from dr_exec.runtime.protocol import (
     ProtocolStreamResult,
-    encode_frame,
     read_protocol_stream,
-    request_identity_digest,
 )
 from dr_exec.runtime.wire import (
     FRAME_TERMINATOR,
@@ -958,7 +960,7 @@ def test_the_request_digest_covers_exactly_the_transported_bytes(
     request_document: IdentityDocument,
 ) -> None:
     assert (
-        request_identity_digest(request_document)
+        request_transport_digest(request_transport_bytes(request_document))
         == hashlib.sha256(
             request_transport_bytes(request_document)
         ).hexdigest()
@@ -968,6 +970,8 @@ def test_the_request_digest_covers_exactly_the_transported_bytes(
 def test_a_prelude_bound_to_the_request_digest_opens_its_stream(
     request_document: IdentityDocument,
 ) -> None:
-    digest = request_identity_digest(request_document)
+    digest = request_transport_digest(
+        request_transport_bytes(request_document)
+    )
     result = _read(_stream(digest, 1), request_id_sha256=digest)
     assert result.completed

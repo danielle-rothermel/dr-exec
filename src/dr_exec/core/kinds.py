@@ -157,6 +157,7 @@ __all__ = [
     "OutcomeKind",
     "OutputOverflowPolicy",
     "ProtocolFailureCode",
+    "ProtocolFrameKind",
     "RecordReceiptKind",
     "RecordState",
     "RuntimeKind",

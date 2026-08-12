@@ -7,14 +7,14 @@ import pytest
 
 from dr_exec.recording import provenance
 from dr_exec.recording.identity import (
-    _build_executor_identity,
-    _validate_executor_identity,
+    build_executor_identity,
+    validate_executor_identity,
 )
 from dr_exec.recording.provenance import (
     ExecutorSourceSnapshot,
     _embedded_source_commit,
-    _executor_source_snapshot,
     _snapshot_source,
+    executor_source_snapshot,
 )
 
 
@@ -153,7 +153,7 @@ def test_provenance_spawns_no_subprocess(
 
 
 def test_the_process_snapshot_is_resolved_once() -> None:
-    assert _executor_source_snapshot() is _executor_source_snapshot()
+    assert executor_source_snapshot() is executor_source_snapshot()
 
 
 @pytest.mark.parametrize(
@@ -191,8 +191,8 @@ def test_the_process_snapshot_is_resolved_once() -> None:
 def test_every_provenance_form_builds_a_valid_identity(
     snapshot: ExecutorSourceSnapshot,
 ) -> None:
-    document = _build_executor_identity(snapshot)
-    assert _validate_executor_identity(document) is document
+    document = build_executor_identity(snapshot)
+    assert validate_executor_identity(document) is document
 
 
 @pytest.mark.parametrize(
@@ -255,7 +255,7 @@ def test_every_provenance_form_builds_a_valid_identity(
                 source_state="unknown",
                 session_id="not-a-uuid",
             ),
-            "canonical UUID",
+            "lowercase hyphenated 8-4-4-4-12 hexadecimal",
             id="non-uuid-session",
         ),
         pytest.param(
@@ -275,4 +275,4 @@ def test_incoherent_provenance_is_rejected(
     expected_message: str,
 ) -> None:
     with pytest.raises(ValueError, match=expected_message):
-        _build_executor_identity(snapshot)
+        build_executor_identity(snapshot)

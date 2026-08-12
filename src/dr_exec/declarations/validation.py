@@ -8,7 +8,6 @@ from dr_exec.core.kinds import EnvGrantKind
 from dr_exec.declarations.models import (
     EnvGrant,
     ExecutionJob,
-    FiniteByteLimit,
     FiniteOutput,
     InProcessImportableJsonTarget,
     TrustedCommandTarget,
@@ -23,7 +22,7 @@ def granted_environment(grant: EnvGrant, /) -> dict[str, str]:
     return {variable.name: variable.value for variable in grant.variables}
 
 
-def declared_input_bytes(job: ExecutionJob, /) -> bytes:
+def _declared_input_bytes(job: ExecutionJob, /) -> bytes:
     match job.target:
         case TrustedCommandTarget() | UntrustedCommandTarget():
             return job.target.stdin
@@ -36,8 +35,7 @@ def declared_input_bytes(job: ExecutionJob, /) -> bytes:
 
 
 def validate_input_budget(job: ExecutionJob, stdin_bytes: bytes, /) -> None:
-    budget = job.budgets.input_bytes
-    limit = budget.max_bytes if isinstance(budget, FiniteByteLimit) else None
+    limit = job.budgets.input_bytes.limit
     if limit is not None and len(stdin_bytes) > limit:
         raise DeclarationError(
             f"declared input of {len(stdin_bytes)} bytes exceeds the "
@@ -72,7 +70,7 @@ def validate_command_resolvability(
 
 
 def validate_declaration(job: ExecutionJob, /) -> None:
-    validate_input_budget(job, declared_input_bytes(job))
+    validate_input_budget(job, _declared_input_bytes(job))
     match job.target:
         case InProcessImportableJsonTarget():
             if job.env.kind is not EnvGrantKind.NONE:
@@ -95,7 +93,6 @@ def validate_declaration(job: ExecutionJob, /) -> None:
 
 
 __all__ = [
-    "declared_input_bytes",
     "granted_environment",
     "validate_command_resolvability",
     "validate_declaration",

@@ -29,7 +29,7 @@ from dr_exec import (
     SpawnAbsentOutcome,
     SpawnFailedOutcome,
     StreamRetentionBudget,
-    UnbudgetedOutput,
+    UnbudgetedLimit,
 )
 from dr_exec.execution.engine import (
     _COOPERATIVE_WAKE_SECONDS,
@@ -118,7 +118,7 @@ class _BlockingChild:
 
 
 def test_an_unbudgeted_stream_retains_every_byte_in_one_segment() -> None:
-    retention = PayloadRetention.for_budget(UnbudgetedOutput())
+    retention = PayloadRetention.for_budget(UnbudgetedLimit())
     retention.stdout.offer(b"abc")
     retention.stdout.offer(b"def")
 
@@ -412,7 +412,7 @@ def test_await_child_wakes_for_transport_failure_without_a_wall_budget() -> (
 
     result = _await_child(
         cast("subprocess.Popen[bytes]", child),
-        _DrainState(retention=PayloadRetention.for_budget(UnbudgetedOutput())),
+        _DrainState(retention=PayloadRetention.for_budget(UnbudgetedLimit())),
         deadline_ns=None,
         fail_on_overflow=False,
         cancellation=None,
@@ -549,7 +549,7 @@ def test_a_pump_that_cannot_register_still_closes_what_it_owns() -> None:
 
     pump = _OutputPump(
         state=_DrainState(
-            retention=PayloadRetention.for_budget(UnbudgetedOutput())
+            retention=PayloadRetention.for_budget(UnbudgetedLimit())
         ),
         stdout_descriptor=stdout_read,
         stderr_descriptor=stderr_read,

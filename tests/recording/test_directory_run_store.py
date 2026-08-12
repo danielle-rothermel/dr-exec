@@ -89,10 +89,10 @@ from dr_exec.declarations.models import (
 )
 from dr_exec.execution.engine import _target_of
 from dr_exec.recording.identity import (
-    _build_env_grant_record,
-    _build_executor_config_identity,
-    _build_executor_identity,
-    _canonical_declaration_digest,
+    build_env_grant_record,
+    build_executor_config_identity,
+    build_executor_identity,
+    canonical_declaration_digest,
 )
 from dr_exec.recording.provenance import ExecutorSourceSnapshot
 from dr_exec.recording.references import record_reference_for_job
@@ -153,7 +153,7 @@ def _record_dir(
 
 def _header() -> RunRecordHeader:
     return RunRecordHeader(
-        executor_identity=_build_executor_identity(
+        executor_identity=build_executor_identity(
             ExecutorSourceSnapshot(
                 package_version="0.1.0",
                 source_commit=None,
@@ -161,7 +161,7 @@ def _header() -> RunRecordHeader:
                 session_id=str(UUID(int=7)),
             )
         ),
-        executor_config_identity=_build_executor_config_identity(
+        executor_config_identity=build_executor_config_identity(
             ExecutorSelfBudgets.unbudgeted()
         ),
         prepared_at=PREPARED_AT,
@@ -182,9 +182,9 @@ def _declaration(
         execution_id=execution_id,
         target=target_record
         or TrustedCommandTargetRecord(
-            canonical_declaration_sha256=_canonical_declaration_digest(target)
+            canonical_declaration_sha256=canonical_declaration_digest(target)
         ),
-        env=_build_env_grant_record(
+        env=build_env_grant_record(
             EnvGrant.fixed({"TOKEN": SECRET_ENV_VALUE}) if env is None else env
         ),
         budgets=Budgets.unbudgeted(),

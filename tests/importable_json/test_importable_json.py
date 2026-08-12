@@ -50,7 +50,7 @@ from dr_exec import (
     parse_importable_json_result,
 )
 from dr_exec.importable_json import build_in_process_importable_json_job
-from dr_exec.recording.identity import _canonical_declaration_digest
+from dr_exec.recording.identity import canonical_declaration_digest
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
 ATTEMPT_ID = AttemptId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f71"))
@@ -201,7 +201,7 @@ def test_in_process_target_identity_is_deterministic_and_pinned() -> None:
     )
 
     assert first.target == second.target
-    assert str(_canonical_declaration_digest(first.target)) == (
+    assert str(canonical_declaration_digest(first.target)) == (
         "65eea7d0ae302ec439d4f6d36d88fa2a0754ea545bba5b245bdfd26a2c4a8cb4"
     )
 
@@ -230,7 +230,7 @@ def test_target_identity_is_deterministic_and_pinned() -> None:
     )
 
     assert first.target == second.target
-    assert str(_canonical_declaration_digest(first.target)) == (
+    assert str(canonical_declaration_digest(first.target)) == (
         "3c4edb9f76476bde39a3a110b218e9ecf04a35330f36e968f208189200bc6941"
     )
 

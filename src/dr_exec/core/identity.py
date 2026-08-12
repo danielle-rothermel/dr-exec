@@ -13,7 +13,7 @@ IDENTITY_SCHEMA_VERSION = 1
 type NonemptyString = Annotated[str, StringConstraints(min_length=1)]
 
 
-def _require_identity_role(
+def require_identity_role(
     document: IdentityDocument,
     *,
     schema: str,
@@ -31,5 +31,13 @@ def _require_identity_role(
     return cast("Mapping[str, object]", document.payload)
 
 
-def _identity_payload(model: ContractModel, /) -> Jsonable:
+def identity_payload(model: ContractModel, /) -> Jsonable:
     return cast("Jsonable", model.model_dump(mode="json"))
+
+
+__all__ = [
+    "IDENTITY_SCHEMA_VERSION",
+    "NonemptyString",
+    "identity_payload",
+    "require_identity_role",
+]

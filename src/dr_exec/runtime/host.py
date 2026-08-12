@@ -23,9 +23,9 @@ from dr_exec.runtime.bootstrap import (
     driver_wrapper_source,
 )
 from dr_exec.runtime.identity import (
-    _build_isolated_host_runtime_identity,
-    _isolated_host_runtime_identity_payload,
-    _IsolatedHostRuntimeIdentityPayload,
+    IsolatedHostRuntimeIdentityPayload,
+    build_isolated_host_runtime_identity,
+    isolated_host_runtime_identity_payload,
 )
 from dr_exec.runtime.probe import probe_interpreter
 
@@ -37,7 +37,7 @@ class RuntimeRecord(ContractModel):
 
     @model_validator(mode="after")
     def fields_must_match_identity(self) -> RuntimeRecord:
-        payload = _isolated_host_runtime_identity_payload(self.id_doc)
+        payload = isolated_host_runtime_identity_payload(self.id_doc)
         if self.kind.value != payload.kind:
             raise ValueError("runtime kind does not match identity")
         if self.resolved_executable.as_posix() != payload.resolved_executable:
@@ -112,7 +112,7 @@ class IsolatedHostPythonRuntime:
 
 def _describe_resolved_executable(executable: Path, /) -> RuntimeRecord:
     facts = probe_interpreter(executable)
-    payload = _IsolatedHostRuntimeIdentityPayload(
+    payload = IsolatedHostRuntimeIdentityPayload(
         kind=RuntimeKind.ISOLATED_HOST_PYTHON.value,
         resolved_executable=executable.as_posix(),
         implementation=facts["implementation"],
@@ -123,7 +123,7 @@ def _describe_resolved_executable(executable: Path, /) -> RuntimeRecord:
     return RuntimeRecord(
         kind=RuntimeKind(payload.kind),
         resolved_executable=executable,
-        id_doc=_build_isolated_host_runtime_identity(payload),
+        id_doc=build_isolated_host_runtime_identity(payload),
     )
 
 

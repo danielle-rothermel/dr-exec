@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast
+from typing import ClassVar, Final, cast
 from uuid import UUID
 
 from dr_serialize import (
@@ -36,28 +36,16 @@ from dr_exec.core.model import (
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.recording.models import (
-    BudgetExceededOutcome,
-    BudgetExceededOutcomeRecord,
-    CancelledOutcome,
-    CancelledOutcomeRecord,
     CompleteRecordReceipt,
     DegradedRecordReceipt,
-    ExecutionAttribution,
-    ExecutionAttributionRecord,
-    ExecutionOutcome,
-    ExecutionOutcomeRecord,
     ExecutionResult,
     ExecutionResultRecord,
-    ExitedOutcome,
-    ExitedOutcomeRecord,
     FinalizedRecord,
     OutputArtifactRecord,
     OutputArtifactRecords,
     PayloadOutputRecords,
     PreparedRecord,
     ProcessRecord,
-    ProtocolFailedOutcome,
-    ProtocolFailedOutcomeRecord,
     RealRecordReceipt,
     RecordingFailure,
     RetainedPayloadStream,
@@ -67,12 +55,6 @@ from dr_exec.recording.models import (
     RunRecord,
     RunRecordHeader,
     RunRecordReference,
-    SignaledOutcome,
-    SignaledOutcomeRecord,
-    SpawnAbsentOutcome,
-    SpawnAbsentOutcomeRecord,
-    SpawnFailedOutcome,
-    SpawnFailedOutcomeRecord,
 )
 from dr_exec.recording.references import record_reference_for_job
 
@@ -90,6 +72,8 @@ STRUCTURAL_MANIFEST_BYTE_CEILING: Final = 256 * 1024 * 1024
 class PreparedRun:
     """Run whose complete declaration is durably recorded pre-spawn."""
 
+    durable_state: ClassVar[RecordState] = RecordState.PREPARED
+
     execution_id: ExecutionId
     reference: RunRecordReference
     header: RunRecordHeader
@@ -99,6 +83,8 @@ class PreparedRun:
 @dataclass(frozen=True, slots=True)
 class RunningRun:
     """Run whose spawned child is durably recorded."""
+
+    durable_state: ClassVar[RecordState] = RecordState.RUNNING
 
     execution_id: ExecutionId
     reference: RunRecordReference
@@ -111,41 +97,6 @@ type FinalizableRun = PreparedRun | RunningRun
 
 def _manifest_payload(record: ContractModel, /) -> Jsonable:
     return cast("Jsonable", record.model_dump(mode="json"))
-
-
-def _outcome_record(outcome: ExecutionOutcome, /) -> ExecutionOutcomeRecord:
-    match outcome:
-        case ExitedOutcome():
-            return ExitedOutcomeRecord(exit_code=outcome.exit_code)
-        case SignaledOutcome():
-            return SignaledOutcomeRecord(signal_number=outcome.signal_number)
-        case SpawnAbsentOutcome():
-            return SpawnAbsentOutcomeRecord(executable=outcome.executable)
-        case SpawnFailedOutcome():
-            return SpawnFailedOutcomeRecord(
-                errno=outcome.errno,
-                error_message=outcome.error_message,
-            )
-        case BudgetExceededOutcome():
-            return BudgetExceededOutcomeRecord(axis=outcome.axis)
-        case ProtocolFailedOutcome():
-            return ProtocolFailedOutcomeRecord(
-                failure_code=outcome.failure_code,
-                failure_detail=outcome.failure_detail,
-                accepted_output_count=outcome.accepted_output_count,
-            )
-        case CancelledOutcome():
-            return CancelledOutcomeRecord()
-
-
-def _attribution_record(
-    attribution: ExecutionAttribution,
-    /,
-) -> ExecutionAttributionRecord:
-    return ExecutionAttributionRecord(
-        owner=attribution.owner,
-        detail=attribution.detail,
-    )
 
 
 def _retained_stream_record(
@@ -169,8 +120,8 @@ def _execution_result_record(
 ) -> ExecutionResultRecord:
     return ExecutionResultRecord(
         execution_id=result.execution_id,
-        outcome=_outcome_record(result.outcome),
-        attribution=_attribution_record(result.attribution),
+        outcome=result.outcome,
+        attribution=result.attribution,
         protocol_outputs=result.protocol_outputs,
         payload_outputs=PayloadOutputRecords(
             stdout=_retained_stream_record(
@@ -230,16 +181,35 @@ def _recording_failure(
     )
 
 
-def _explicit_cause_chain_errno(error: BaseException, /) -> int | None:
+def _cause_chain(error: BaseException, /) -> Iterator[BaseException]:
+    """Walk an exception's explicit causes, stopping on a cycle."""
+
     seen: set[int] = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        error_number = getattr(current, "errno", None)
-        if isinstance(error_number, int):
-            return error_number
+        yield current
         current = current.__cause__
-    return None
+
+
+def _explicit_cause_chain_errno(error: BaseException, /) -> int | None:
+    numbers = (getattr(cause, "errno", None) for cause in _cause_chain(error))
+    return next(
+        (number for number in numbers if isinstance(number, int)),
+        None,
+    )
+
+
+def _manifest_read_message(error: BaseException, record_dir: Path, /) -> str:
+    for cause in _cause_chain(error):
+        if isinstance(cause, JsonByteLimitError):
+            return (
+                f"run record manifest at {record_dir} exceeds "
+                f"{STRUCTURAL_MANIFEST_BYTE_CEILING} bytes"
+            )
+        if isinstance(cause, (SerializationError, ValueError)):
+            return f"run record at {record_dir} is not canonical JSON bytes"
+    return f"could not read the run record at {record_dir}"
 
 
 def _write_sidecar(
@@ -417,38 +387,20 @@ class DirectoryRunStore:
             STDERR_SIDECAR_NAME,
             result.payload_outputs.stderr,
         )
-        directory.publish(
-            _manifest_payload(
-                FinalizedRecord(
-                    header=record.header,
-                    declaration=record.declaration,
-                    result=_execution_result_record(
-                        result,
-                        stdout_summary,
-                        stderr_summary,
-                    ),
-                    outputs=OutputArtifactRecords(
-                        stdout=_artifact_record(
-                            STDOUT_SIDECAR_NAME, stdout_summary
-                        ),
-                        stderr=_artifact_record(
-                            STDERR_SIDECAR_NAME, stderr_summary
-                        ),
-                    ),
-                )
-            )
+        finalized = FinalizedRecord(
+            header=record.header,
+            declaration=record.declaration,
+            result=_execution_result_record(
+                result,
+                stdout_summary,
+                stderr_summary,
+            ),
+            outputs=OutputArtifactRecords(
+                stdout=_artifact_record(STDOUT_SIDECAR_NAME, stdout_summary),
+                stderr=_artifact_record(STDERR_SIDECAR_NAME, stderr_summary),
+            ),
         )
-
-    def _load_prepared(
-        self, reference: RunRecordReference, /
-    ) -> PreparedRecord:
-        record_dir = self._resolve(reference)
-        record = _load_record(record_dir)
-        if not isinstance(record, PreparedRecord):
-            raise RecordLoadError(
-                f"run record at {record_dir} is not in the prepared state"
-            )
-        return record
+        directory.publish(_manifest_payload(finalized))
 
     def _allocate(self, reference: RunRecordReference, /) -> DocumentDirectory:
         record_dir = self._record_dir(reference)
@@ -503,11 +455,7 @@ class DirectoryRunStore:
         try:
             return _load_record(self._resolve(run.reference)).state
         except RecordLoadError:
-            return (
-                RecordState.PREPARED
-                if isinstance(run, PreparedRun)
-                else RecordState.RUNNING
-            )
+            return run.durable_state
 
 
 @contextmanager
@@ -534,25 +482,9 @@ def _load_record(record_dir: Path, /) -> RunRecord:
     try:
         manifest = _directory(record_dir).read_manifest()
     except DocumentDirectoryError as error:
-        seen: set[int] = set()
-        current: BaseException | None = error
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-            if isinstance(current, JsonByteLimitError):
-                message = (
-                    f"run record manifest at {record_dir} exceeds "
-                    f"{STRUCTURAL_MANIFEST_BYTE_CEILING} bytes"
-                )
-                break
-            if isinstance(current, (SerializationError, ValueError)):
-                message = (
-                    f"run record at {record_dir} is not canonical JSON bytes"
-                )
-                break
-            current = current.__cause__
-        else:
-            message = f"could not read the run record at {record_dir}"
-        raise RecordLoadError(message) from error
+        raise RecordLoadError(
+            _manifest_read_message(error, record_dir)
+        ) from error
     manifest_bytes = canonical_json_bytes(manifest)
     try:
         return _RUN_RECORD_ADAPTER.validate_json(manifest_bytes, strict=True)

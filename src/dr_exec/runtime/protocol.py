@@ -5,11 +5,9 @@ from typing import IO, Final
 
 from dr_serialize import (
     IdentityDocument,
-    Jsonable,
     JsonDepthLimitError,
     Sha256Digest,
     StrictJsonDecodeError,
-    canonical_json_bytes,
 )
 from pydantic import TypeAdapter, ValidationError
 
@@ -19,17 +17,7 @@ from dr_exec.core.model import (
     NonCanonicalBytesError,
     require_canonical_json_bytes,
 )
-from dr_exec.declarations.models import (
-    ByteBudget,
-    CountBudget,
-    ExecutorSelfBudgets,
-    FiniteByteLimit,
-    FiniteCountLimit,
-)
-from dr_exec.declarations.transport import (
-    request_transport_bytes,
-    request_transport_digest,
-)
+from dr_exec.declarations.models import ExecutorSelfBudgets
 from dr_exec.runtime.wire import (
     FRAME_TERMINATOR,
     ProtocolComplete,
@@ -73,15 +61,6 @@ class ProtocolStreamResult:
         return self.failure is None
 
 
-def request_identity_digest(request: IdentityDocument, /) -> Sha256Digest:
-    return request_transport_digest(request_transport_bytes(request))
-
-
-def encode_frame(frame: ProtocolFrame, /) -> bytes:
-    projection: Jsonable = frame.model_dump(mode="json")
-    return canonical_json_bytes(projection) + FRAME_TERMINATOR
-
-
 def decode_frame(frame_bytes: bytes, /, *, max_depth: int) -> ProtocolFrame:
     """Validate canonical frame bytes into the closed wire model."""
 
@@ -120,14 +99,6 @@ def decode_frame(frame_bytes: bytes, /, *, max_depth: int) -> ProtocolFrame:
             "frame does not contain an explicit protocol version",
         )
     return frame
-
-
-def _finite_bytes(budget: ByteBudget, /) -> int | None:
-    return budget.max_bytes if isinstance(budget, FiniteByteLimit) else None
-
-
-def _finite_count(budget: CountBudget, /) -> int | None:
-    return budget.max_count if isinstance(budget, FiniteCountLimit) else None
 
 
 def _effective_depth(max_depth: int | None, /) -> int:
@@ -297,14 +268,14 @@ def read_protocol_stream(
 
     acquisition = _FrameAcquisition(
         reader=reader,
-        max_frame_bytes=_finite_bytes(self_budgets.protocol_frame_bytes),
-        max_total_bytes=_finite_bytes(self_budgets.protocol_total_bytes),
+        max_frame_bytes=self_budgets.protocol_frame_bytes.limit,
+        max_total_bytes=self_budgets.protocol_total_bytes.limit,
     )
     state = _StreamState(
         request_id_sha256=request_id_sha256,
-        max_output_count=_finite_count(self_budgets.protocol_output_count),
+        max_output_count=self_budgets.protocol_output_count.limit,
     )
-    max_depth = _finite_count(self_budgets.json_depth)
+    max_depth = self_budgets.json_depth.limit
     failure: ProtocolFailure | None = None
     try:
         while True:
@@ -339,7 +310,5 @@ __all__ = [
     "ProtocolStreamResult",
     "ProtocolViolation",
     "decode_frame",
-    "encode_frame",
     "read_protocol_stream",
-    "request_identity_digest",
 ]

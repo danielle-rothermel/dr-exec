@@ -23,18 +23,18 @@ from dr_exec import (
     UntrustedPythonTarget,
 )
 from dr_exec.recording.identity import (
-    _build_env_grant_record,
-    _build_executor_config_identity,
-    _build_executor_identity,
-    _canonical_declaration_digest,
     _canonical_env_values_digest,
-    _validate_executor_config_identity,
-    _validate_executor_identity,
+    build_env_grant_record,
+    build_executor_config_identity,
+    build_executor_identity,
+    canonical_declaration_digest,
+    validate_executor_config_identity,
+    validate_executor_identity,
 )
 from dr_exec.recording.provenance import ExecutorSourceSnapshot
 from dr_exec.runtime.identity import (
-    _build_isolated_host_runtime_identity,
-    _IsolatedHostRuntimeIdentityPayload,
+    IsolatedHostRuntimeIdentityPayload,
+    build_isolated_host_runtime_identity,
 )
 
 CLEAN_SNAPSHOT = ExecutorSourceSnapshot(
@@ -49,7 +49,7 @@ UNKNOWN_SNAPSHOT = ExecutorSourceSnapshot(
     source_state="unknown",
     session_id="0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f73",
 )
-RUNTIME_PAYLOAD = _IsolatedHostRuntimeIdentityPayload(
+RUNTIME_PAYLOAD = IsolatedHostRuntimeIdentityPayload(
     kind="isolated_host_python",
     resolved_executable="/opt/py/bin/python3.13",
     implementation="cpython",
@@ -60,7 +60,7 @@ RUNTIME_PAYLOAD = _IsolatedHostRuntimeIdentityPayload(
 
 
 def test_clean_executor_identity_is_pinned() -> None:
-    document = _build_executor_identity(CLEAN_SNAPSHOT)
+    document = build_executor_identity(CLEAN_SNAPSHOT)
     assert canonical_identity_json_bytes(document) == (
         b'{"payload":{"kind":"process_executor","package_version":"0.1.0",'
         b'"session_id":null,"source_commit":"00000000000000000000000000'
@@ -73,7 +73,7 @@ def test_clean_executor_identity_is_pinned() -> None:
 
 
 def test_unknown_executor_identity_is_pinned() -> None:
-    document = _build_executor_identity(UNKNOWN_SNAPSHOT)
+    document = build_executor_identity(UNKNOWN_SNAPSHOT)
     assert canonical_identity_json_bytes(document) == (
         b'{"payload":{"kind":"process_executor","package_version":"0.1.0",'
         b'"session_id":"0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f73",'
@@ -86,9 +86,7 @@ def test_unknown_executor_identity_is_pinned() -> None:
 
 
 def test_unbudgeted_executor_config_identity_is_pinned() -> None:
-    document = _build_executor_config_identity(
-        ExecutorSelfBudgets.unbudgeted()
-    )
+    document = build_executor_config_identity(ExecutorSelfBudgets.unbudgeted())
     assert canonical_identity_json_bytes(document) == (
         b'{"payload":{"join_time":{"kind":"unbudgeted"},"json_depth":{"kind":'
         b'"unbudgeted"},"protocol_frame_bytes":{"kind":"unbudgeted"},'
@@ -103,7 +101,7 @@ def test_unbudgeted_executor_config_identity_is_pinned() -> None:
 
 
 def test_representative_finite_executor_config_identity_is_pinned() -> None:
-    document = _build_executor_config_identity(
+    document = build_executor_config_identity(
         ExecutorSelfBudgets(
             protocol_frame_bytes=FiniteByteLimit(max_bytes=1024),
             protocol_output_count=FiniteCountLimit(max_count=3),
@@ -124,7 +122,7 @@ def test_representative_finite_executor_config_identity_is_pinned() -> None:
 
 
 def test_isolated_host_runtime_identity_is_pinned() -> None:
-    document = _build_isolated_host_runtime_identity(RUNTIME_PAYLOAD)
+    document = build_isolated_host_runtime_identity(RUNTIME_PAYLOAD)
     assert canonical_identity_json_bytes(document) == (
         b'{"payload":{"cache_tag":"cpython-313","implementation":"cpython",'
         b'"kind":"isolated_host_python","platform":"darwin",'
@@ -155,7 +153,7 @@ def test_empty_environment_value_digest_is_pinned() -> None:
 
 def test_trusted_command_declaration_digest_is_pinned() -> None:
     target = TrustedCommandTarget(argv=("/bin/echo", "hi"))
-    assert _canonical_declaration_digest(target) == (
+    assert canonical_declaration_digest(target) == (
         "f84544a13ed0a6209f3dfcc7a95e2afaa38d876fe50dec59943711a9c97985e5"
     )
 
@@ -166,7 +164,7 @@ def test_untrusted_command_declaration_digest_is_pinned() -> None:
         stdin=b"input",
         containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
     )
-    assert _canonical_declaration_digest(target) == (
+    assert canonical_declaration_digest(target) == (
         "cf06ac433f9a8bd85e6894738540bec9573ed0991139fb09767dc82b32ee3265"
     )
 
@@ -184,7 +182,7 @@ def test_untrusted_python_declaration_digest_is_pinned() -> None:
         request=request,
         containment_profile=ContainmentProfile.PROCESS_BOUNDARY_ONLY,
     )
-    assert _canonical_declaration_digest(target) == (
+    assert canonical_declaration_digest(target) == (
         "efd92cff97fbb61af1c3923f8e2eff55ea02ee98eb4e728cf586d570f4659cc0"
     )
 
@@ -201,7 +199,7 @@ def test_trusted_python_declaration_digest_is_pinned() -> None:
         ),
         request=request,
     )
-    assert _canonical_declaration_digest(target) == (
+    assert canonical_declaration_digest(target) == (
         "af2ac384a6371c9d1250abe823ff9caf8c308c0715bac6e70647777a41594ce1"
     )
 
@@ -242,7 +240,7 @@ def test_executor_identity_rejects_incomplete_or_open_payloads(
     )
 
     with pytest.raises(ValidationError):
-        _validate_executor_identity(document)
+        validate_executor_identity(document)
 
 
 def test_executor_config_identity_rejects_a_foreign_schema_version() -> None:
@@ -253,7 +251,7 @@ def test_executor_config_identity_rejects_a_foreign_schema_version() -> None:
     )
 
     with pytest.raises(ValueError, match="schema version 1"):
-        _validate_executor_config_identity(document)
+        validate_executor_config_identity(document)
 
 
 def test_environment_value_digest_ignores_declaration_order() -> None:
@@ -280,7 +278,7 @@ def test_env_grant_record_is_secret_free() -> None:
             EnvVar("LANG", "C.UTF-8"),
         ),
     )
-    record = _build_env_grant_record(grant)
+    record = build_env_grant_record(grant)
     assert record.var_names == ("LANG", "TOKEN")
     projected = record.model_dump_json()
     assert "super-secret-value" not in projected
@@ -295,7 +293,7 @@ def test_env_grant_names_use_canonical_not_local_ordering() -> None:
         excluded_var_names=("Q", "ü"),
     )
 
-    record = _build_env_grant_record(grant)
+    record = build_env_grant_record(grant)
 
     assert record.var_names == ("Z", "é", "a")
     assert record.var_names != tuple(sorted(names))

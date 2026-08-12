@@ -25,13 +25,11 @@ from dr_exec.core.kinds import (
     BudgetAxis,
     ExecutorFailureCode,
     OutputOverflowPolicy,
-    RecordState,
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
     ExecutorSelfBudgets,
-    FiniteDurationLimit,
     FiniteOutput,
     InProcessImportableJsonTarget,
     TrustedCommandTarget,
@@ -61,10 +59,10 @@ from dr_exec.execution.spawn import (
     signal_process_group,
 )
 from dr_exec.recording.identity import (
-    _build_env_grant_record,
-    _build_executor_config_identity,
-    _build_executor_identity,
-    _canonical_declaration_digest,
+    build_env_grant_record,
+    build_executor_config_identity,
+    build_executor_identity,
+    canonical_declaration_digest,
 )
 from dr_exec.recording.models import (
     BudgetExceededOutcome,
@@ -93,7 +91,7 @@ from dr_exec.recording.models import (
     UntrustedCommandTargetRecord,
     UntrustedPythonTargetRecord,
 )
-from dr_exec.recording.provenance import _executor_source_snapshot
+from dr_exec.recording.provenance import executor_source_snapshot
 from dr_exec.recording.references import attempt_id_for_job
 from dr_exec.recording.store import FinalizableRun, PreparedRun
 from dr_exec.runtime.protocol import ProtocolStreamResult, read_protocol_stream
@@ -120,10 +118,6 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _finite_ns(budget: object, /) -> int | None:
-    return budget.max_ns if isinstance(budget, FiniteDurationLimit) else None
-
-
 def _validate_platform() -> None:
     if sys.platform != SUPPORTED_PLATFORM:
         raise DeclarationError(
@@ -145,7 +139,7 @@ def _resolve_executable(
 
 
 def _target_of(job: ExecutionJob, runtime: Runtime, /) -> _ResolvedTarget:
-    digest = _canonical_declaration_digest(job.target)
+    digest = canonical_declaration_digest(job.target)
     match job.target:
         case TrustedCommandTarget():
             return _ResolvedTarget(
@@ -503,9 +497,7 @@ def _tear_down(
         # No child-owned group exists on this setup-failure path.
         with suppress(OSError):
             process.send_signal(TERMINATION_SIGNAL)
-        if not _reaped_within(
-            process, _finite_ns(self_budgets.termination_time)
-        ):
+        if not _reaped_within(process, self_budgets.termination_time.limit):
             with suppress(OSError):
                 process.send_signal(ESCALATION_SIGNAL)
         process.wait()
@@ -513,7 +505,7 @@ def _tear_down(
     signal_process_group(process.pid, TERMINATION_SIGNAL)
     with suppress(OSError):
         process.send_signal(TERMINATION_SIGNAL)
-    if not _reaped_within(process, _finite_ns(self_budgets.termination_time)):
+    if not _reaped_within(process, self_budgets.termination_time.limit):
         signal_process_group(process.pid, ESCALATION_SIGNAL)
         with suppress(OSError):
             process.send_signal(ESCALATION_SIGNAL)
@@ -592,7 +584,7 @@ class _Transports:
             os.write(self.release_write, b"\0")
 
     def join(self, self_budgets: ExecutorSelfBudgets, /) -> None:
-        join_ns = _finite_ns(self_budgets.join_time)
+        join_ns = self_budgets.join_time.limit
         deadline = None if join_ns is None else time.monotonic_ns() + join_ns
         for worker in self.threads:
             remaining = (
@@ -707,9 +699,7 @@ def _degraded_receipt(
     return DegradedRecordReceipt(
         execution_id=run.execution_id,
         reference=run.reference,
-        latest_state=RecordState.PREPARED
-        if isinstance(run, PreparedRun)
-        else RecordState.RUNNING,
+        latest_state=run.durable_state,
         failures=(
             *prior_failures,
             RecordingFailure(
@@ -778,10 +768,10 @@ class _EngineCall:
     ) -> PreparedRecord:
         return PreparedRecord(
             header=RunRecordHeader(
-                executor_identity=_build_executor_identity(
-                    _executor_source_snapshot()
+                executor_identity=build_executor_identity(
+                    executor_source_snapshot()
                 ),
-                executor_config_identity=_build_executor_config_identity(
+                executor_config_identity=build_executor_config_identity(
                     self.self_budgets
                 ),
                 prepared_at=_now(),
@@ -789,7 +779,7 @@ class _EngineCall:
             declaration=RunDeclaration(
                 execution_id=execution_id,
                 target=target.record,
-                env=_build_env_grant_record(job.env),
+                env=build_env_grant_record(job.env),
                 budgets=job.budgets,
             ),
         )
@@ -986,7 +976,7 @@ class _EngineCall:
         setup_failure = parse_setup_status(
             _read_setup_status(
                 transports.status_read,
-                _finite_ns(self.self_budgets.startup_time),
+                self.self_budgets.startup_time.limit,
             )
         )
         if setup_failure is not None:
@@ -1095,7 +1085,7 @@ class _EngineCall:
     def _deadline_ns(
         self, job: ExecutionJob, started_ns: int, /
     ) -> int | None:
-        wall_time_ns = _finite_ns(job.budgets.wall_time)
+        wall_time_ns = job.budgets.wall_time.limit
         return None if wall_time_ns is None else started_ns + wall_time_ns
 
     def _outcome_of(

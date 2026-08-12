@@ -33,8 +33,8 @@ from dr_exec.core.model import (
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import Budgets, EnvGrantRecord
 from dr_exec.recording.identity import (
-    _validate_executor_config_identity,
-    _validate_executor_identity,
+    validate_executor_config_identity,
+    validate_executor_identity,
 )
 from dr_exec.runtime.host import RuntimeRecord
 
@@ -46,11 +46,11 @@ class RunRecordHeader(ContractModel):
     prepared_at: UtcDatetime
 
     _validated_executor_identity = field_validator("executor_identity")(
-        _validate_executor_identity
+        validate_executor_identity
     )
     _validated_executor_config_identity = field_validator(
         "executor_config_identity"
-    )(_validate_executor_config_identity)
+    )(validate_executor_config_identity)
 
 
 class TrustedCommandTargetRecord(ContractModel):
@@ -87,20 +87,11 @@ class UntrustedPythonTargetRecord(ContractModel):
     runtime: RuntimeRecord
 
 
-class InProcessImportableJsonTargetRecord(ContractModel):
-    kind: Literal[ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON] = (
-        ExecutionTargetKind.IN_PROCESS_IMPORTABLE_JSON
-    )
-    canonical_declaration_sha256: Sha256Digest
-    request_id_sha256: Sha256Digest
-
-
 type ExecutionTargetRecord = Annotated[
     TrustedCommandTargetRecord
     | TrustedPythonTargetRecord
     | UntrustedCommandTargetRecord
-    | UntrustedPythonTargetRecord
-    | InProcessImportableJsonTargetRecord,
+    | UntrustedPythonTargetRecord,
     Field(discriminator="kind"),
 ]
 
@@ -255,61 +246,7 @@ type ExecutionOutcome = Annotated[
 ]
 
 
-class ExitedOutcomeRecord(ContractModel):
-    kind: Literal[OutcomeKind.EXITED] = OutcomeKind.EXITED
-    exit_code: int
-
-
-class SignaledOutcomeRecord(ContractModel):
-    kind: Literal[OutcomeKind.SIGNALED] = OutcomeKind.SIGNALED
-    signal_number: PositiveInt
-
-
-class SpawnAbsentOutcomeRecord(ContractModel):
-    kind: Literal[OutcomeKind.SPAWN_ABSENT] = OutcomeKind.SPAWN_ABSENT
-    executable: str
-
-
-class SpawnFailedOutcomeRecord(ContractModel):
-    kind: Literal[OutcomeKind.SPAWN_FAILED] = OutcomeKind.SPAWN_FAILED
-    errno: int
-    error_message: str
-
-
-class BudgetExceededOutcomeRecord(ContractModel):
-    kind: Literal[OutcomeKind.BUDGET_EXCEEDED] = OutcomeKind.BUDGET_EXCEEDED
-    axis: BudgetAxis
-
-
-class ProtocolFailedOutcomeRecord(ContractModel):
-    kind: Literal[OutcomeKind.PROTOCOL_FAILED] = OutcomeKind.PROTOCOL_FAILED
-    failure_code: ProtocolFailureCode
-    failure_detail: str
-    accepted_output_count: NonNegativeInt
-
-
-class CancelledOutcomeRecord(ContractModel):
-    kind: Literal[OutcomeKind.CANCELLED] = OutcomeKind.CANCELLED
-
-
-type ExecutionOutcomeRecord = Annotated[
-    ExitedOutcomeRecord
-    | SignaledOutcomeRecord
-    | SpawnAbsentOutcomeRecord
-    | SpawnFailedOutcomeRecord
-    | BudgetExceededOutcomeRecord
-    | ProtocolFailedOutcomeRecord
-    | CancelledOutcomeRecord,
-    Field(discriminator="kind"),
-]
-
-
 class ExecutionAttribution(ContractModel):
-    owner: FailureOwner
-    detail: str | None = None
-
-
-class ExecutionAttributionRecord(ContractModel):
     owner: FailureOwner
     detail: str | None = None
 
@@ -350,8 +287,8 @@ class ExecutionResult(ContractModel):
 
 class ExecutionResultRecord(ContractModel):
     execution_id: ExecutionId
-    outcome: ExecutionOutcomeRecord
-    attribution: ExecutionAttributionRecord
+    outcome: ExecutionOutcome
+    attribution: ExecutionAttribution
     protocol_outputs: tuple[IdentityDocumentField, ...]
     payload_outputs: PayloadOutputRecords
     measurements: ExecutionMeasurements
@@ -361,7 +298,7 @@ class ExecutionResultRecord(ContractModel):
         self,
     ) -> ExecutionResultRecord:
         if isinstance(
-            self.outcome, ProtocolFailedOutcomeRecord
+            self.outcome, ProtocolFailedOutcome
         ) and self.outcome.accepted_output_count != len(self.protocol_outputs):
             raise ValueError(
                 "accepted protocol output count does not match outputs"
@@ -483,25 +420,19 @@ class CompletedExecution(ContractModel):
 
 __all__ = [
     "BudgetExceededOutcome",
-    "BudgetExceededOutcomeRecord",
     "CancelledOutcome",
-    "CancelledOutcomeRecord",
     "CompleteRecordReceipt",
     "CompletedExecution",
     "DegradedRecordReceipt",
     "ExecutionAttribution",
-    "ExecutionAttributionRecord",
     "ExecutionMeasurements",
     "ExecutionOutcome",
-    "ExecutionOutcomeRecord",
     "ExecutionResult",
     "ExecutionResultRecord",
     "ExecutionTargetRecord",
     "ExitedOutcome",
-    "ExitedOutcomeRecord",
     "FakeRecordReceipt",
     "FinalizedRecord",
-    "InProcessImportableJsonTargetRecord",
     "InProcessRecordReceipt",
     "OutputArtifactRecord",
     "OutputArtifactRecords",
@@ -510,7 +441,6 @@ __all__ = [
     "PreparedRecord",
     "ProcessRecord",
     "ProtocolFailedOutcome",
-    "ProtocolFailedOutcomeRecord",
     "RealRecordReceipt",
     "RecordReceipt",
     "RecordingFailure",
@@ -522,11 +452,8 @@ __all__ = [
     "RunRecordReference",
     "RunningRecord",
     "SignaledOutcome",
-    "SignaledOutcomeRecord",
     "SpawnAbsentOutcome",
-    "SpawnAbsentOutcomeRecord",
     "SpawnFailedOutcome",
-    "SpawnFailedOutcomeRecord",
     "TrustedCommandTargetRecord",
     "TrustedPythonTargetRecord",
     "UntrustedCommandTargetRecord",

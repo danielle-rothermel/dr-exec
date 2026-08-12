@@ -9,14 +9,14 @@ from dr_exec import (
     UntrustedPythonTarget,
 )
 from dr_exec.core.model import canonical_model_bytes
-from dr_exec.recording.identity import _build_env_grant_record
+from dr_exec.recording.identity import build_env_grant_record
 
 SECRET_ENV_VALUE = "hunter2-env-secret"
 
 
 def test_environment_records_never_carry_values() -> None:
     grant = EnvGrant.fixed({"TOKEN": SECRET_ENV_VALUE, "LANG": "C.UTF-8"})
-    projected = canonical_model_bytes(_build_env_grant_record(grant))
+    projected = canonical_model_bytes(build_env_grant_record(grant))
     assert SECRET_ENV_VALUE.encode() not in projected
     assert b"C.UTF-8" not in projected
     assert b'"var_names":["LANG","TOKEN"]' in projected

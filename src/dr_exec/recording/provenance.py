@@ -37,6 +37,12 @@ def _resolve_package_version() -> str:
         return _UNKNOWN
 
 
+def is_git_object_id(value: str, /) -> bool:
+    return len(value) in _GIT_OBJECT_ID_LENGTHS and all(
+        character in _LOWERCASE_HEXADECIMAL for character in value
+    )
+
+
 def _embedded_source_commit() -> str | None:
     try:
         embedded = metadata(_PACKAGE_NAME).get(_SOURCE_COMMIT_METADATA_KEY)
@@ -45,11 +51,7 @@ def _embedded_source_commit() -> str | None:
     if embedded is None:
         return None
     commit = embedded.strip()
-    if len(commit) not in _GIT_OBJECT_ID_LENGTHS or any(
-        character not in _LOWERCASE_HEXADECIMAL for character in commit
-    ):
-        return None
-    return commit
+    return commit if is_git_object_id(commit) else None
 
 
 def _snapshot_source() -> ExecutorSourceSnapshot:
@@ -64,8 +66,13 @@ def _snapshot_source() -> ExecutorSourceSnapshot:
 
 
 @cache
-def _executor_source_snapshot() -> ExecutorSourceSnapshot:
+def executor_source_snapshot() -> ExecutorSourceSnapshot:
     return _snapshot_source()
 
 
-__all__ = ["ExecutorSourceSnapshot", "SourceState"]
+__all__ = [
+    "ExecutorSourceSnapshot",
+    "SourceState",
+    "executor_source_snapshot",
+    "is_git_object_id",
+]

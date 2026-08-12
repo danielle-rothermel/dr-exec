@@ -5,8 +5,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** Removed the seven `*OutcomeRecord` models, the
+  `ExecutionOutcomeRecord` union, and `ExecutionAttributionRecord`, which were
+  field-identical twins of `ExecutionOutcome`/`ExecutionAttribution`;
+  `ExecutionResultRecord` now carries those types directly. Persisted manifest
+  bytes are unchanged; the root export count drops from 125 to 115.
+- **Breaking:** Removed `UnbudgetedOutput`, a second name for `UnbudgetedLimit`;
+  `OutputBudget` is now `UnbudgetedLimit | FiniteOutput` and
+  `Budgets.payload_output` defaults to `UnbudgetedLimit`. The wire form
+  `{"kind": "unbudgeted"}` is unchanged.
+- Removed `InProcessImportableJsonTargetRecord` from `ExecutionTargetRecord`,
+  which no execution mode can persist, so the union names exactly the four
+  target kinds that reach a durable run record.
+- Removed `runtime.protocol.encode_frame` and
+  `runtime.protocol.request_identity_digest`, the module's two test-only
+  exports; `runtime/protocol.py` is now a pure reader.
+- Removed dead `DirectoryRunStore._load_prepared` and
+  `runtime.identity._validate_isolated_host_runtime_identity`.
+
 ### Changed
 
+- Budget models own their limit: `UnbudgetedLimit.limit` is `None` and each
+  finite limit returns its maximum, replacing five private per-axis unwrapping
+  helpers and two `object`-typed signatures across the protocol reader, engine,
+  outcomes, and declaration validation.
+- Moved `ImportableEntryPoint` into `dr_exec.declarations.models` beside
+  `InProcessImportableJsonTarget` and deleted the single-class top-level
+  module; the root export is unchanged.
+- Identity helpers crossing a module boundary lost their leading underscore,
+  and `core/identity.py`, `runtime/identity.py`, and `recording/identity.py`
+  now declare an `__all__` naming exactly those.
+- `session_id` on the executor identity payload validates through the shared
+  `CanonicalUuidSpelling` alias in `core/model.py` instead of a hand-rolled
+  round-trip check, so one owner defines canonical UUID spelling.
+- Git object IDs validate through one `is_git_object_id` predicate in
+  `recording/provenance.py`.
+- `PreparedRun` and `RunningRun` carry `durable_state`, so the store and the
+  engine read the recorded state instead of each decoding it from the handle
+  type.
 - **Breaking:** `Executor.run()` is now awaitable and offloads to
   `Executor.run_blocking()`, the renamed blocking primitive. Standalone async
   callers use `await executor.run(job)`; sync callers and scheduler worker

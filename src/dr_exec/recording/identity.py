@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Literal, cast
-from uuid import UUID
 
 from dr_serialize import (
     IdentityDocument,
@@ -17,10 +16,10 @@ from pydantic import field_validator, model_validator
 from dr_exec.core.identity import (
     IDENTITY_SCHEMA_VERSION,
     NonemptyString,
-    _identity_payload,
-    _require_identity_role,
+    identity_payload,
+    require_identity_role,
 )
-from dr_exec.core.model import ContractModel
+from dr_exec.core.model import CanonicalUuidSpelling, ContractModel
 from dr_exec.declarations.models import (
     ByteBudget,
     CountBudget,
@@ -30,35 +29,21 @@ from dr_exec.declarations.models import (
     ExecutionTarget,
     ExecutorSelfBudgets,
 )
-from dr_exec.recording.provenance import ExecutorSourceSnapshot
+from dr_exec.recording.provenance import (
+    ExecutorSourceSnapshot,
+    is_git_object_id,
+)
 
 EXECUTOR_IDENTITY_SCHEMA = "dr_exec.executor"
 EXECUTOR_CONFIG_IDENTITY_SCHEMA = "dr_exec.executor_config"
 EXECUTOR_IDENTITY_KIND = "process_executor"
 
-_LOWERCASE_HEXADECIMAL = frozenset("0123456789abcdef")
-
 
 def _validate_git_object_id(value: str | None) -> str | None:
-    if value is not None and (
-        len(value) not in {40, 64}
-        or any(character not in _LOWERCASE_HEXADECIMAL for character in value)
-    ):
+    if value is not None and not is_git_object_id(value):
         raise ValueError(
             "source_commit must be a complete lowercase Git object ID"
         )
-    return value
-
-
-def _validate_canonical_uuid(value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        parsed = UUID(value)
-    except (AttributeError, ValueError) as error:
-        raise ValueError("session_id must be a canonical UUID") from error
-    if str(parsed) != value:
-        raise ValueError("session_id must be a canonical UUID")
     return value
 
 
@@ -70,13 +55,10 @@ class _ExecutorIdentityPayload(ContractModel):
     package_version: NonemptyString
     source_commit: str | None
     source_state: Literal["clean", "unknown"]
-    session_id: str | None
+    session_id: CanonicalUuidSpelling | None
 
     _validated_source_commit = field_validator("source_commit")(
         _validate_git_object_id
-    )
-    _validated_session_id = field_validator("session_id")(
-        _validate_canonical_uuid
     )
 
     @model_validator(mode="after")
@@ -101,10 +83,10 @@ class _ExecutorConfigIdentityPayload(ContractModel):
     join_time: DurationBudget
 
 
-def _validate_executor_identity(
+def validate_executor_identity(
     document: IdentityDocument,
 ) -> IdentityDocument:
-    payload = _require_identity_role(
+    payload = require_identity_role(
         document,
         schema=EXECUTOR_IDENTITY_SCHEMA,
     )
@@ -112,10 +94,10 @@ def _validate_executor_identity(
     return document
 
 
-def _validate_executor_config_identity(
+def validate_executor_config_identity(
     document: IdentityDocument,
 ) -> IdentityDocument:
-    payload = _require_identity_role(
+    payload = require_identity_role(
         document,
         schema=EXECUTOR_CONFIG_IDENTITY_SCHEMA,
     )
@@ -123,7 +105,7 @@ def _validate_executor_config_identity(
     return document
 
 
-def _build_executor_identity(
+def build_executor_identity(
     snapshot: ExecutorSourceSnapshot,
     /,
 ) -> IdentityDocument:
@@ -137,23 +119,23 @@ def _build_executor_identity(
     return build_identity_document(
         schema=EXECUTOR_IDENTITY_SCHEMA,
         schema_version=IDENTITY_SCHEMA_VERSION,
-        payload=_identity_payload(payload),
+        payload=identity_payload(payload),
     )
 
 
-def _build_executor_config_identity(
+def build_executor_config_identity(
     self_budgets: ExecutorSelfBudgets,
     /,
 ) -> IdentityDocument:
     return build_identity_document(
         schema=EXECUTOR_CONFIG_IDENTITY_SCHEMA,
         schema_version=IDENTITY_SCHEMA_VERSION,
-        payload=_identity_payload(self_budgets),
+        payload=identity_payload(self_budgets),
     )
 
 
-def _canonical_declaration_digest(target: ExecutionTarget, /) -> Sha256Digest:
-    return json_hash(_identity_payload(target))
+def canonical_declaration_digest(target: ExecutionTarget, /) -> Sha256Digest:
+    return json_hash(identity_payload(target))
 
 
 def _canonical_env_values_digest(grant: EnvGrant, /) -> Sha256Digest:
@@ -167,7 +149,7 @@ def _canonical_sorted_names(names: Iterable[str], /) -> tuple[str, ...]:
     return tuple(cast("list[str]", canonical_sorted_values(names)))
 
 
-def _build_env_grant_record(grant: EnvGrant, /) -> EnvGrantRecord:
+def build_env_grant_record(grant: EnvGrant, /) -> EnvGrantRecord:
     return EnvGrantRecord(
         kind=grant.kind,
         var_names=_canonical_sorted_names(
@@ -176,3 +158,13 @@ def _build_env_grant_record(grant: EnvGrant, /) -> EnvGrantRecord:
         excluded_var_names=_canonical_sorted_names(grant.excluded_var_names),
         canonical_values_sha256=_canonical_env_values_digest(grant),
     )
+
+
+__all__ = [
+    "build_env_grant_record",
+    "build_executor_config_identity",
+    "build_executor_identity",
+    "canonical_declaration_digest",
+    "validate_executor_config_identity",
+    "validate_executor_identity",
+]
