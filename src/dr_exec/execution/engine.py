@@ -462,13 +462,16 @@ def _await_child(
             return _StopReason(axis=BudgetAxis.PAYLOAD_OUTPUT, cancelled=False)
         if cancellation is not None and cancellation.cancelled:
             return _StopReason(axis=None, cancelled=True)
+        needs_cooperative_wake = cancellation is not None or fail_on_overflow
         timeout: float | None = None
         if deadline_ns is not None:
             remaining_ns = deadline_ns - time.monotonic_ns()
             if remaining_ns <= 0:
                 return _StopReason(axis=BudgetAxis.WALL_TIME, cancelled=False)
             timeout = remaining_ns / 1e9
-        elif cancellation is not None or fail_on_overflow:
+            if needs_cooperative_wake:
+                timeout = min(timeout, 0.05)
+        elif needs_cooperative_wake:
             # Cooperative stop conditions still need wakeups when no wall-time
             # budget bounds the wait; blocking until child exit would hide them.
             timeout = 0.05
