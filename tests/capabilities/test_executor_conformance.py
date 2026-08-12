@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -17,6 +18,8 @@ from support.executor import (
 
 from dr_exec import (
     Budgets,
+    CancelToken,
+    CompletedExecution,
     CompleteRecordReceipt,
     DeclarationError,
     DirectoryRunStore,
@@ -184,7 +187,7 @@ def test_every_executor_rejects_the_same_invalid_declarations(
     executor: Executor, declaration: Callable[[], ExecutionJob]
 ) -> None:
     with pytest.raises(DeclarationError):
-        executor.run(declaration())
+        executor.run_blocking(declaration())
 
 
 def valid_absolute_command() -> ExecutionJob:
@@ -228,13 +231,13 @@ VALID_DECLARATIONS = [
 def test_every_executor_accepts_the_same_supported_declarations(
     executor: Executor, declaration: Callable[[], ExecutionJob]
 ) -> None:
-    executor.run(declaration())
+    executor.run_blocking(declaration())
 
 
 def test_each_executor_enforces_its_own_receipt_kind(
     executor: Executor,
 ) -> None:
-    receipt = executor.run(valid_absolute_command()).record_receipt
+    receipt = executor.run_blocking(valid_absolute_command()).record_receipt
 
     if isinstance(executor, FakeExecutor):
         assert isinstance(receipt, FakeRecordReceipt)
@@ -246,3 +249,55 @@ def test_each_executor_enforces_its_own_receipt_kind(
         assert executor.run_store.load(receipt.reference).state is (
             RecordState.FINALIZED
         )
+
+
+@pytest.mark.parametrize("declaration", VALID_DECLARATIONS)
+def test_awaitable_run_matches_run_blocking_for_valid_declarations(
+    executor: Executor, declaration: Callable[[], ExecutionJob]
+) -> None:
+    job = declaration()
+
+    async def collect() -> tuple[CompletedExecution, object]:
+        offloaded, tick = await asyncio.gather(
+            executor.run(job),
+            asyncio.sleep(0),
+        )
+        return offloaded, tick
+
+    offloaded, tick = asyncio.run(collect())
+    assert tick is None
+    blocking = executor.run_blocking(declaration())
+    assert offloaded.result.outcome == blocking.result.outcome
+    assert type(offloaded.record_receipt) is type(blocking.record_receipt)
+
+
+def test_awaitable_run_delegates_to_the_same_blocking_path_as_run_blocking() -> (
+    None
+):
+    shared = fake_completion()
+    executor = FakeExecutor(responder=lambda _job, _cancellation: shared)
+    job = valid_absolute_command()
+
+    async def collect() -> CompletedExecution:
+        return await executor.run(job)
+
+    assert asyncio.run(collect()) is shared
+    assert executor.run_blocking(job) is shared
+
+
+def test_awaitable_run_forwards_cancellation_like_run_blocking(
+    executor: Executor,
+) -> None:
+    token = CancelToken()
+    token.cancel()
+    job = valid_absolute_command()
+
+    async def collect() -> CompletedExecution:
+        return await executor.run(job, cancellation=token)
+
+    offloaded = asyncio.run(collect())
+    blocking = executor.run_blocking(
+        valid_absolute_command(), cancellation=token
+    )
+    assert offloaded.result.outcome == blocking.result.outcome
+    assert type(offloaded.record_receipt) is type(blocking.record_receipt)

@@ -44,6 +44,7 @@ from dr_exec.recording.models import (
     InProcessRecordReceipt,
     ProtocolFailedOutcome,
 )
+from dr_exec.scheduling.offload import offload_run_blocking
 from dr_exec.scheduling.pool import (
     ExecutionPool,
     ExecutionPoolConfig,
@@ -65,7 +66,16 @@ class _StopState:
 class ImportableJsonExecutor:
     """Run trusted importable-JSON entry points in-process."""
 
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        return await offload_run_blocking(self, job, cancellation=cancellation)
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,

@@ -87,7 +87,7 @@ def test_run_binds_the_finalized_manifest_to_the_returned_execution(
     executor: ProcessExecutor,
     store: DirectoryRunStore,
 ) -> None:
-    completed = executor.run(job_for(trusted_target()))
+    completed = executor.run_blocking(job_for(trusted_target()))
 
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
     receipt = completed.record_receipt

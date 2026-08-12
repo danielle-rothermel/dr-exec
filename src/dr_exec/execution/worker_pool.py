@@ -68,6 +68,7 @@ from dr_exec.recording.models import (
     SpawnFailedOutcome,
     WorkerPoolRecordReceipt,
 )
+from dr_exec.scheduling.offload import offload_run_blocking
 from dr_exec.scheduling.pool import (
     AutoPoolCapacity,
     ExecutionPool,
@@ -388,7 +389,16 @@ class WorkerPoolImportableJsonExecutor:
 
         return self._workers.width
 
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        return await offload_run_blocking(self, job, cancellation=cancellation)
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,

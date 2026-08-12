@@ -139,20 +139,33 @@ date = "2026-08-06"
 [[contracts]]
 title = "Executor calls are concurrently isolated"
 statement = """
-Every `Executor.run()` implementation is safe for concurrent isolated calls. \
-The scheduler invokes one executor instance from multiple worker threads, so \
-each call owns independent mutable attempt state."""
+Every `Executor.run_blocking()` implementation is safe for concurrent isolated \
+calls. The scheduler invokes one executor instance from multiple worker \
+threads, so each call owns independent mutable attempt state."""
 rationale = """
 The scheduler's capacity model depends on overlapping calls, not executor \
 cloning or external serialization."""
 date = "2026-08-05"
 
 [[contracts]]
+title = "Awaitable run offloads blocking work once"
+statement = """
+`Executor.run()` is awaitable and offloads to `run_blocking()` through one \
+package-owned `asyncio.to_thread` helper. Pooled execution calls \
+`run_blocking()` directly on scheduler worker threads with no second offload. \
+No async `Runtime` or `RunStore` Protocol follows."""
+rationale = """
+Blocking syscalls have no async form, so the blocking primitive stays on the \
+Protocol while async callers get one owned offload path instead of re-deriving \
+it per consumer."""
+date = "2026-08-11"
+
+[[contracts]]
 title = "Fake execution preserves only shared caller contracts"
 statement = """
-`FakeExecutor.run()` uses shared declaration validation, returns only fake \
-receipts and creates no durable state, and captures exact calls thread-safely. \
-It performs no host checks, spawning, or containment behavior."""
+`FakeExecutor.run_blocking()` uses shared declaration validation, returns only \
+fake receipts and creates no durable state, and captures exact calls \
+thread-safely. It performs no host checks, spawning, or containment behavior."""
 rationale = """
 The fake preserves declaration and concurrency semantics without implying \
 production platform support, durable evidence, or containment."""
@@ -295,7 +308,8 @@ statement = """
 For in-process importable JSON jobs, finite wall time arms a one-shot cancel \
 signal when the budget expires. The worker thread cannot hard-stop arbitrary \
 Python user code; cancellation is observed before dispatch and after the entry \
-point returns. `ImportableJsonExecutor.run()` also maps `KeyboardInterrupt` to \
+point returns. `ImportableJsonExecutor.run_blocking()` also maps \
+`KeyboardInterrupt` to \
 `ExitedOutcome(1)` so pools stay healthy; Ctrl+C does not propagate through \
 `run()`."""
 rationale = """

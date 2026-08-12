@@ -73,7 +73,7 @@ def test_process_executor_rejects_in_process_target(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ExecutorFailure):
-        executor.run(build_job())
+        executor.run_blocking(build_job())
 
 
 def test_wall_time_budget_exceeds_on_blocking_entry_point() -> None:
@@ -85,7 +85,7 @@ def test_wall_time_budget_exceeds_on_blocking_entry_point() -> None:
         ),
     )
     executor = ImportableJsonExecutor()
-    completed = executor.run(job)
+    completed = executor.run_blocking(job)
 
     assert isinstance(completed.result.outcome, BudgetExceededOutcome)
     assert completed.result.outcome.axis is BudgetAxis.WALL_TIME
@@ -153,7 +153,7 @@ def test_caller_cancel_wins_over_wall_time_budget() -> None:
 
     def run_job() -> None:
         completed_holder.append(
-            executor.run(job, cancellation=token),
+            executor.run_blocking(job, cancellation=token),
         )
 
     thread = threading.Thread(target=run_job)

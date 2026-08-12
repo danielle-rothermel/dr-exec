@@ -5,6 +5,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `Executor.run()` is now awaitable and offloads to
+  `Executor.run_blocking()`, the renamed blocking primitive. Standalone async
+  callers use `await executor.run(job)`; sync callers and scheduler worker
+  threads use `executor.run_blocking(job)`.
+
 ## [0.1.9] - 2026-08-11
 
 ### Added

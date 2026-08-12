@@ -179,7 +179,11 @@ job = build_untrusted_importable_json_job(
     env=EnvGrant.none(),
     budgets=budgets,
 )
-completed = executor.run(job)
+completed = executor.run_blocking(job)
+result = parse_importable_json_result(completed)
+
+# In an async stage body:
+completed = await executor.run(job)
 result = parse_importable_json_result(completed)
 ```
 
@@ -291,9 +295,6 @@ the entry point is a crash in your process.
 
 ### Mode 3: worker pool (`WorkerPoolImportableJsonExecutor`)
 
-The implementation contract is in
-[`docs/worker_pool_design.md`](docs/worker_pool_design.md).
-
 **What actually happens.** The pool starts N long-lived worker processes, each
 a freshly spawned interpreter. Each worker imports the entry-point module
 **once**, at startup, and then waits. Jobs are sent to idle workers as the same
@@ -366,7 +367,7 @@ async with executor.open_pool() as pool:
         result = parse_importable_json_result(item.completed_execution)
 ```
 
-`ImportableJsonExecutor.run()` never raises for entry-point failures; it
+`ImportableJsonExecutor.run_blocking()` never raises for entry-point failures; it
 returns typed outcomes instead so pools stay healthy. That includes
 `KeyboardInterrupt`: Ctrl+C during an in-process job is mapped to
 `ExitedOutcome(1)` rather than propagating through `run()`, so CLI callers
@@ -432,9 +433,6 @@ reading that pipe, so it instead notices that it has been reparented and exits.
 This is best-effort cleanup for an abnormal death, not supervision: it puts no
 ceiling on how long a job may run or how large a payload may be.
 
-The full implementation contract is in
-[`docs/worker_pool_design.md`](docs/worker_pool_design.md).
-
 ### Measuring your own workload
 
 Run the representative resource and throughput investigation with:
@@ -490,7 +488,15 @@ implementation should remain substitutable.
 
 ```python
 class Executor(Protocol):
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution: ...
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,
@@ -499,8 +505,9 @@ class Executor(Protocol):
     ) -> CompletedExecution: ...
 ```
 
-The production executor exposes one-job, finite-batch, and asynchronous-pool
-entry points over the same execution and scheduling contracts.
+The production executor exposes awaitable one-job, blocking one-job,
+finite-batch, and asynchronous-pool entry points over the same execution and
+scheduling contracts.
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -509,7 +516,15 @@ class ProcessExecutor:
     run_store: RunStore
     self_budgets: ExecutorSelfBudgets = ...
 
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution: ...
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,

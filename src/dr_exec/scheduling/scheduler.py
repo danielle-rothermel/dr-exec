@@ -275,7 +275,7 @@ class _ExecutionScheduler(Generic[ContextT]):  # noqa: UP046
 
     def _run_one(self, admitted: _Admitted[ContextT], /) -> None:
         try:
-            completed = self._executor.run(
+            completed = self._executor.run_blocking(
                 admitted.job, cancellation=admitted.cancellation
             )
         except BaseException as failure:  # noqa: BLE001

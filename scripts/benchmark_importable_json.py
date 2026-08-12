@@ -537,7 +537,7 @@ def _evidence_report(
     success: CompletedExecution,
     budgets: Budgets,
 ) -> dict[str, Jsonable]:
-    failed = executor.run(
+    failed = executor.run_blocking(
         _build_job(
             ImportableEntryPoint(
                 module_name=FIXTURE_MODULE,
