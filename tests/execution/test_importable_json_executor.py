@@ -243,20 +243,14 @@ def test_async_run_maps_cancelled_error_to_exited_outcome() -> None:
 def test_an_interrupted_run_reports_the_elapsed_run_duration() -> None:
     executor = ImportableJsonExecutor()
     job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
-    # A controlled clock, not elapsed real time: the run is stamped at the
-    # first reading and the interrupt completion is built at the second.
+    # A controlled clock, not elapsed real time: the one clock is read twice,
+    # once when ``run`` stamps the attempt and once when the interrupt
+    # completion is built.
     readings = iter((1_000, 5_000_000_000))
 
     async def collect() -> CompletedExecution:
         with (
-            patch(
-                "dr_exec.execution.importable_json_executor.time.monotonic_ns",
-                lambda: next(readings),
-            ),
-            patch(
-                "dr_exec.execution.outcomes.time.monotonic_ns",
-                lambda: next(readings),
-            ),
+            patch("time.monotonic_ns", lambda: next(readings)),
             patch(
                 "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
                 _raise_keyboard_interrupt,

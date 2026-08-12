@@ -14,7 +14,6 @@ from dr_exec.core.errors import ExecutorFailure
 from dr_exec.core.kinds import (
     BudgetAxis,
     ExecutorFailureCode,
-    ProtocolFailureCode,
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
@@ -26,6 +25,7 @@ from dr_exec.declarations.validation import validate_declaration
 from dr_exec.execution.outcomes import (
     completed_execution,
     executor_protocol_failure_attribution,
+    malformed_frame_outcome,
 )
 from dr_exec.importable_json import (
     ENVELOPE_SCHEMA,
@@ -125,12 +125,13 @@ class ImportableJsonExecutor:
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         token = cancellation if cancellation is not None else CancelToken()
-        # Stamped before the offload so an interrupt reports the elapsed run
-        # rather than the moment the interrupt arrived.
-        execution = _attempt(job, _in_process_target(job))
+        # The attempt facts are built once, before the offload, so an interrupt
+        # reports the elapsed run rather than the moment the interrupt arrived.
+        target = _in_process_target(job)
+        execution = _attempt(job, target)
         try:
             return await offload_blocking_daemon(
-                self.run_blocking, job, cancellation=token
+                self._run_attempt, execution, target, job, cancellation=token
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
             token.cancel()
@@ -147,7 +148,19 @@ class ImportableJsonExecutor:
         cancellation: CancelToken | None = None,
     ) -> CompletedExecution:
         target = _in_process_target(job)
-        execution = _attempt(job, target)
+        return self._run_attempt(
+            _attempt(job, target), target, job, cancellation=cancellation
+        )
+
+    def _run_attempt(
+        self,
+        execution: _Execution,
+        target: InProcessImportableJsonTarget,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None,
+    ) -> CompletedExecution:
         stop = _StopState()
         deadline_timer: Timer | None = None
         deadline_ns = job.budgets.wall_time.limit
@@ -198,11 +211,13 @@ class ImportableJsonExecutor:
             )
         except ImportableJsonExecutorDispatchError as error:
             return execution.completed(
-                outcome=_malformed_frame(str(error)),
+                outcome=malformed_frame_outcome(str(error)),
                 attribution_override=executor_protocol_failure_attribution,
             )
         except ImportableJsonPayloadResultError as error:
-            return execution.completed(outcome=_malformed_frame(str(error)))
+            return execution.completed(
+                outcome=malformed_frame_outcome(str(error))
+            )
         except ImportableJsonPayloadDispatchError as error:
             stopped = _stopped(execution, cancellation, stop)
             if stopped is not None:
@@ -287,14 +302,6 @@ def _stopped(
     if outcome is None:
         return None
     return execution.completed(outcome=outcome)
-
-
-def _malformed_frame(detail: str, /) -> ProtocolFailedOutcome:
-    return ProtocolFailedOutcome(
-        failure_code=ProtocolFailureCode.MALFORMED_FRAME,
-        failure_detail=detail,
-        accepted_output_count=0,
-    )
 
 
 __all__ = ["ImportableJsonExecutor"]

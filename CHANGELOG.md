@@ -41,7 +41,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   record-less completion from an already-constructed receipt, so the in-process
   and worker-pool executors keep only their own receipt and their own attempt
   value object; the in-process executor's four attempt facts became a frozen
-  `_Execution` instead of a four-tuple threaded through eleven call sites.
+  `_Execution` instead of a four-tuple threaded through eleven call sites. Both
+  executors also build malformed-frame outcomes through one shared
+  `execution.outcomes.malformed_frame_outcome`.
 - The in-process `_run_body` observes its stop condition through one
   `_StopState.outcome(cancellation)` reader that latches nothing, mirroring the
   worker pool's `_StopWatch.outcome()`.

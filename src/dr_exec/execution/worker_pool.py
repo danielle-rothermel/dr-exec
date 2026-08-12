@@ -27,7 +27,6 @@ from dr_exec.core.errors import ExecutorFailure
 from dr_exec.core.kinds import (
     BudgetAxis,
     ExecutorFailureCode,
-    ProtocolFailureCode,
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
@@ -40,6 +39,7 @@ from dr_exec.declarations.validation import validate_declaration
 from dr_exec.execution.outcomes import (
     completed_execution,
     executor_protocol_failure_attribution,
+    malformed_frame_outcome,
 )
 from dr_exec.execution.worker_pool_worker import (
     DETAIL_KEY,
@@ -646,7 +646,9 @@ class _Execution:
                     attribution_detail=str(detail),
                 )
             case WorkerFrameStatus.PAYLOAD_RESULT_INVALID:
-                return self.completed(outcome=_malformed_frame(str(detail)))
+                return self.completed(
+                    outcome=malformed_frame_outcome(str(detail))
+                )
             case WorkerFrameStatus.EXECUTOR_REJECTED:
                 return self.protocol_failed(str(detail))
             case _:
@@ -656,7 +658,7 @@ class _Execution:
 
     def protocol_failed(self, detail: str, /) -> CompletedExecution:
         return self.completed(
-            outcome=_malformed_frame(detail),
+            outcome=malformed_frame_outcome(detail),
             attribution_override=executor_protocol_failure_attribution,
         )
 
@@ -693,14 +695,6 @@ def _frame_status(payload: dict[str, Jsonable], /) -> WorkerFrameStatus | None:
         return WorkerFrameStatus(payload.get(STATUS_KEY))
     except ValueError:
         return None
-
-
-def _malformed_frame(detail: str, /) -> ProtocolFailedOutcome:
-    return ProtocolFailedOutcome(
-        failure_code=ProtocolFailureCode.MALFORMED_FRAME,
-        failure_detail=detail,
-        accepted_output_count=0,
-    )
 
 
 def _worker_frame_payload(frame: bytes, /) -> dict[str, Jsonable]:

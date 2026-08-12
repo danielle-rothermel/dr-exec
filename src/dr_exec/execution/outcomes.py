@@ -139,6 +139,14 @@ def completed_execution(
     )
 
 
+def malformed_frame_outcome(detail: str, /) -> ProtocolFailedOutcome:
+    return ProtocolFailedOutcome(
+        failure_code=ProtocolFailureCode.MALFORMED_FRAME,
+        failure_detail=detail,
+        accepted_output_count=0,
+    )
+
+
 def empty_payload_outputs() -> PayloadOutputs:
     empty = RetainedPayloadStream(
         head=b"",
@@ -154,4 +162,5 @@ __all__ = [
     "completed_execution",
     "empty_payload_outputs",
     "executor_protocol_failure_attribution",
+    "malformed_frame_outcome",
 ]
