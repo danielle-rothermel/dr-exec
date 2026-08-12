@@ -187,7 +187,7 @@ def test_finite_input_budget_is_enforced_before_fake_execution() -> None:
     executor = FakeExecutor([_completion()])
 
     with pytest.raises(DeclarationError):
-        executor.run(job)
+        executor.run_blocking(job)
 
     assert executor.calls == ()
 
@@ -242,7 +242,7 @@ def test_fake_captures_the_exact_job_and_parser_returns_its_json() -> None:
     scripted = _completion(outputs=(_envelope({"answer": [42, None]}),))
     executor = FakeExecutor([scripted])
 
-    completed = executor.run(job)
+    completed = executor.run_blocking(job)
 
     assert executor.calls == (job,)
     assert parse_importable_json_result(completed) == {"answer": [42, None]}

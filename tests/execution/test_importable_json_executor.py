@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -73,7 +74,7 @@ def test_process_executor_rejects_in_process_target(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ExecutorFailure):
-        executor.run(build_job())
+        executor.run_blocking(build_job())
 
 
 def test_wall_time_budget_exceeds_on_blocking_entry_point() -> None:
@@ -85,7 +86,7 @@ def test_wall_time_budget_exceeds_on_blocking_entry_point() -> None:
         ),
     )
     executor = ImportableJsonExecutor()
-    completed = executor.run(job)
+    completed = executor.run_blocking(job)
 
     assert isinstance(completed.result.outcome, BudgetExceededOutcome)
     assert completed.result.outcome.axis is BudgetAxis.WALL_TIME
@@ -153,7 +154,7 @@ def test_caller_cancel_wins_over_wall_time_budget() -> None:
 
     def run_job() -> None:
         completed_holder.append(
-            executor.run(job, cancellation=token),
+            executor.run_blocking(job, cancellation=token),
         )
 
     thread = threading.Thread(target=run_job)
@@ -168,3 +169,105 @@ def test_caller_cancel_wins_over_wall_time_budget() -> None:
     assert not isinstance(
         completed_holder[0].result.outcome, BudgetExceededOutcome
     )
+
+
+def test_async_run_does_not_block_the_event_loop() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job()
+
+    async def collect() -> tuple[CompletedExecution, object]:
+        completed, tick = await asyncio.gather(
+            executor.run(job),
+            asyncio.sleep(0),
+        )
+        return completed, tick
+
+    completed, tick = asyncio.run(collect())
+
+    assert tick is None
+    assert isinstance(completed.result.outcome, ExitedOutcome)
+    assert completed.result.outcome.exit_code == 0
+
+
+async def _raise_keyboard_interrupt(*_args: object, **_kwargs: object) -> None:
+    raise KeyboardInterrupt
+
+
+async def _raise_cancelled_error(*_args: object, **_kwargs: object) -> None:
+    raise asyncio.CancelledError
+
+
+def test_async_run_maps_keyboard_interrupt_to_exited_outcome() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
+
+    async def collect() -> CompletedExecution:
+        with patch(
+            "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
+            _raise_keyboard_interrupt,
+        ):
+            return await executor.run(job)
+
+    completed = asyncio.run(collect())
+
+    assert isinstance(completed.result.outcome, ExitedOutcome)
+    assert completed.result.outcome.exit_code == 1
+    assert (
+        completed.result.attribution.detail
+        == "the importable JSON entry point terminated"
+    )
+
+
+def test_async_run_maps_cancelled_error_to_exited_outcome() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
+
+    async def collect() -> CompletedExecution:
+        with patch(
+            "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
+            _raise_cancelled_error,
+        ):
+            return await executor.run(job)
+
+    completed = asyncio.run(collect())
+
+    assert isinstance(completed.result.outcome, ExitedOutcome)
+    assert completed.result.outcome.exit_code == 1
+    assert (
+        completed.result.attribution.detail
+        == "the importable JSON entry point terminated"
+    )
+
+
+def test_async_run_cancels_token_on_keyboard_interrupt() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
+    token = CancelToken()
+
+    async def collect() -> CompletedExecution:
+        with patch(
+            "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
+            _raise_keyboard_interrupt,
+        ):
+            return await executor.run(job, cancellation=token)
+
+    asyncio.run(collect())
+
+    assert token.cancelled
+
+
+def test_async_run_cancels_token_on_cancelled_error() -> None:
+    executor = ImportableJsonExecutor()
+    job = build_job(entry_point=SLEEP_LONG, request={"seconds": 10})
+    token = CancelToken()
+
+    async def collect() -> CompletedExecution:
+        with patch(
+            "dr_exec.execution.importable_json_executor.offload_blocking_daemon",
+            _raise_cancelled_error,
+        ):
+            return await executor.run(job, cancellation=token)
+
+    asyncio.run(collect())
+
+    assert token.cancelled

@@ -9,6 +9,7 @@ from dr_exec.core.errors import ExecutorFailure
 from dr_exec.declarations.models import ExecutionJob
 from dr_exec.declarations.validation import validate_declaration
 from dr_exec.recording.models import CompletedExecution, FakeRecordReceipt
+from dr_exec.scheduling.offload import offload_run_blocking
 
 
 class FakeExecutor:
@@ -38,7 +39,16 @@ class FakeExecutor:
         self._calls = []
         self._lock = Lock()
 
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        return await offload_run_blocking(self, job, cancellation=cancellation)
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,

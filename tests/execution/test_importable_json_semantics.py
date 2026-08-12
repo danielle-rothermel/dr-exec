@@ -91,7 +91,7 @@ def run_one(
     cancellation: CancelToken | None = None,
 ) -> CompletedExecution:
     with harness.open(entry_point, workers=1) as executor:
-        return executor.run(
+        return executor.run_blocking(
             build_job(entry_point, request, budgets=budgets),
             cancellation=cancellation,
         )
@@ -178,7 +178,7 @@ def test_wrong_target_raises_executor_failure(
         harness.open(ECHO, workers=1) as executor,
         pytest.raises(ExecutorFailure),
     ):
-        executor.run(job_for(trusted_python_target()))
+        executor.run_blocking(job_for(trusted_python_target()))
 
 
 def test_non_empty_env_is_rejected_before_run(
@@ -190,7 +190,7 @@ def test_non_empty_env_is_rejected_before_run(
         harness.open(ECHO, workers=1) as executor,
         pytest.raises(DeclarationError),
     ):
-        executor.run(job)
+        executor.run_blocking(job)
 
 
 def test_finite_input_budget_is_enforced_before_run(
@@ -205,7 +205,7 @@ def test_finite_input_budget_is_enforced_before_run(
         harness.open(ECHO, workers=1) as executor,
         pytest.raises(DeclarationError),
     ):
-        executor.run(job)
+        executor.run_blocking(job)
 
 
 def test_finite_payload_output_budget_is_rejected_before_run(
@@ -228,7 +228,7 @@ def test_finite_payload_output_budget_is_rejected_before_run(
         harness.open(ECHO, workers=1) as executor,
         pytest.raises(DeclarationError, match="payload_output"),
     ):
-        executor.run(job)
+        executor.run_blocking(job)
 
 
 def test_pre_cancelled_token_returns_cancelled_outcome(

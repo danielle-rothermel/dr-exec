@@ -174,7 +174,7 @@ class Harness:
                 self_budgets=self_budgets,
             )
         )
-        return executor.run(
+        return executor.run_blocking(
             self.job(
                 driver_source,
                 count=count,
@@ -300,7 +300,7 @@ def test_python_target_trust_variants_share_callable_and_protocol_behavior(
         echo="same-path",
         trusted=trusted,
     )
-    completed = harness.executor.run(job)
+    completed = harness.executor.run_blocking(job)
 
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
     assert payloads_of(completed) == [

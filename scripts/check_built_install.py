@@ -83,8 +83,8 @@ def _check_importable_json_process_jobs(repository_root: Path, /) -> None:
             env=dr_exec.EnvGrant.none(),
         )
 
-        trusted_completion = executor.run(trusted)
-        untrusted_completion = executor.run(untrusted)
+        trusted_completion = executor.run_blocking(trusted)
+        untrusted_completion = executor.run_blocking(untrusted)
         trusted_result = dr_exec.parse_importable_json_result(
             trusted_completion
         )
@@ -126,7 +126,7 @@ def _check_importable_json_process_jobs(repository_root: Path, /) -> None:
             dr_exec.ContainmentProfile.PROCESS_BOUNDARY_ONLY
         )
 
-        null_completion = executor.run(
+        null_completion = executor.run_blocking(
             _trusted_job(fixture_module, "return_null", None)
         )
         assert dr_exec.parse_importable_json_result(null_completion) is None
@@ -140,18 +140,18 @@ def _check_importable_json_process_jobs(repository_root: Path, /) -> None:
             (fixture_module, "return_coroutine"),
             (fixture_module, "return_generator"),
         ):
-            failed = executor.run(
+            failed = executor.run_blocking(
                 _trusted_job(module_name, attribute_name, {"value": 1})
             )
             _assert_parse_fails(failed)
 
-        nonzero = executor.run(
+        nonzero = executor.run_blocking(
             _trusted_job(fixture_module, "register_nonzero_exit", "result")
         )
         assert nonzero.result.outcome == dr_exec.ExitedOutcome(exit_code=7)
         _assert_parse_fails(nonzero)
 
-        output_limited = executor.run(
+        output_limited = executor.run_blocking(
             _trusted_job(
                 fixture_module,
                 "emit_payload_output",
@@ -185,7 +185,7 @@ def _check_importable_json_process_jobs(repository_root: Path, /) -> None:
                 input_bytes=dr_exec.FiniteByteLimit(max_bytes=4096)
             ),
         )
-        assert _object_result(executor.run(finite_job))["value"] == {
+        assert _object_result(executor.run_blocking(finite_job))["value"] == {
             "small": True
         }
 
@@ -261,7 +261,7 @@ def _check_protocol_budgets(
             run_store=store,
             self_budgets=self_budgets,
         )
-        completed = executor.run(
+        completed = executor.run_blocking(
             _trusted_job(
                 fixture_module,
                 invocation[0],
@@ -285,7 +285,7 @@ def _check_timeout_and_cancellation(
     timeout_gate = root / "timeout.fifo"
     timeout_ready = root / "timeout.ready"
     os.mkfifo(timeout_gate)
-    timed_out = executor.run(
+    timed_out = executor.run_blocking(
         _trusted_job(
             fixture_module,
             "block_after_ready",
@@ -313,7 +313,7 @@ def _check_timeout_and_cancellation(
     def run() -> None:
         try:
             completed.append(
-                executor.run(
+                executor.run_blocking(
                     _trusted_job(
                         fixture_module,
                         "block_after_ready",

@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `Executor.run()` is now awaitable and offloads to
+  `Executor.run_blocking()`, the renamed blocking primitive. Standalone async
+  callers use `await executor.run(job)`; sync callers and scheduler worker
+  threads use `executor.run_blocking(job)`.
+- **Breaking:** `WorkerPoolImportableJsonExecutor.close()` is now awaitable and
+  offloads to `close_blocking()`, the renamed blocking teardown primitive. Sync
+  `with` calls `close_blocking()` via `__exit__`; async callers use
+  `await executor.close()` or `async with WorkerPoolImportableJsonExecutor(...)`.
+- Closed worker pools reject new jobs with `ProtocolFailedOutcome` instead of
+  dequeuing terminated idle workers.
+- In-process async `run()` preserves Ctrl+C → `ExitedOutcome(1)` via
+  daemon-thread offload and an interrupt bridge; the entry point may continue
+  until it returns in the background.
+
 ## [0.1.9] - 2026-08-11
 
 ### Added

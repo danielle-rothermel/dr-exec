@@ -68,6 +68,7 @@ from dr_exec.recording.models import (
     SpawnFailedOutcome,
     WorkerPoolRecordReceipt,
 )
+from dr_exec.scheduling.offload import offload_blocking, offload_run_blocking
 from dr_exec.scheduling.pool import (
     AutoPoolCapacity,
     ExecutionPool,
@@ -285,8 +286,15 @@ class _WorkerSet:
         up here rather than wait behind work it never bounded.
         """
 
+        if self._closed.is_set():
+            raise _WorkerSetClosed
+
         slot = self._take_slot(stop=stop)
         if slot is not None:
+            if self._closed.is_set():
+                self._retire(slot)
+                self._slots.put(None)
+                raise _WorkerSetClosed
             return _WorkerLease(self, slot)
         try:
             worker = _spawn_worker(self._entry_point)
@@ -349,6 +357,25 @@ class _WorkerSet:
             self._live.clear()
         for worker in live:
             worker.terminate()
+        self._drain_idle_workers()
+
+    def _drain_idle_workers(self) -> None:
+        """Retire idle workers still waiting in the slot queue.
+
+        A worker returned to the queue before ``close()`` remains dequeueable
+        even after it is terminated; replace those entries with empty slots.
+        """
+
+        pending: list[_Worker | None] = []
+        while True:
+            try:
+                pending.append(self._slots.get(block=False))
+            except queue.Empty:
+                break
+        for slot in pending:
+            if slot is not None:
+                slot.terminate()
+            self._slots.put(None)
 
     def _retire(self, worker: _Worker, /) -> None:
         with self._lock:
@@ -388,7 +415,16 @@ class WorkerPoolImportableJsonExecutor:
 
         return self._workers.width
 
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        return await offload_run_blocking(self, job, cancellation=cancellation)
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,
@@ -489,10 +525,15 @@ class WorkerPoolImportableJsonExecutor:
             ),
         )
 
-    def close(self) -> None:
+    def close_blocking(self) -> None:
         """Stop every worker process this executor owns."""
 
         self._workers.close()
+
+    async def close(self) -> None:
+        """Stop every worker process without blocking the event loop."""
+
+        await offload_blocking(self.close_blocking)
 
     def __enter__(self) -> WorkerPoolImportableJsonExecutor:  # noqa: PYI034
         return self
@@ -503,7 +544,18 @@ class WorkerPoolImportableJsonExecutor:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        self.close_blocking()
+
+    async def __aenter__(self) -> WorkerPoolImportableJsonExecutor:  # noqa: PYI034
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
 
     def _pool_capacity(self, config: ExecutionPoolConfig | None, /) -> int:
         if config is None:

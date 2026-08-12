@@ -8,6 +8,7 @@ from dr_exec.core.cancel import CancelToken
 from dr_exec.declarations.models import ExecutionJob, ExecutorSelfBudgets
 from dr_exec.execution.engine import run_execution
 from dr_exec.recording.models import CompletedExecution
+from dr_exec.scheduling.offload import offload_run_blocking
 from dr_exec.scheduling.pool import (
     ExecutionPool,
     ExecutionPoolConfig,
@@ -26,7 +27,16 @@ class ProcessExecutor:
         default_factory=ExecutorSelfBudgets.unbudgeted
     )
 
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        return await offload_run_blocking(self, job, cancellation=cancellation)
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,

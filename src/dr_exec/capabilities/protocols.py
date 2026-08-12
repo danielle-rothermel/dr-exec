@@ -23,7 +23,16 @@ from dr_exec.runtime.host import PreparedPythonProcess, RuntimeRecord
 
 
 class Executor(Protocol):
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        raise NotImplementedError
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,

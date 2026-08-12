@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ from dr_exec.recording.models import (
     InProcessRecordReceipt,
     ProtocolFailedOutcome,
 )
+from dr_exec.scheduling.offload import offload_blocking_daemon
 from dr_exec.scheduling.pool import (
     ExecutionPool,
     ExecutionPoolConfig,
@@ -65,7 +67,23 @@ class _StopState:
 class ImportableJsonExecutor:
     """Run trusted importable-JSON entry points in-process."""
 
-    def run(
+    async def run(
+        self,
+        job: ExecutionJob,
+        /,
+        *,
+        cancellation: CancelToken | None = None,
+    ) -> CompletedExecution:
+        token = cancellation if cancellation is not None else CancelToken()
+        try:
+            return await offload_blocking_daemon(
+                self.run_blocking, job, cancellation=token
+            )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            token.cancel()
+            return _keyboard_interrupt_completion(job)
+
+    def run_blocking(
         self,
         job: ExecutionJob,
         /,
@@ -79,13 +97,9 @@ class ImportableJsonExecutor:
                 "the importable JSON executor accepts only in-process "
                 "importable JSON targets"
             )
-        execution_id = ExecutionId(
-            job_id=job.job_id,
-            attempt_id=AttemptId(uuid4()),
+        execution_id, started_at, started_ns, input_bytes = _run_preamble(
+            job, target
         )
-        started_at = datetime.now(UTC)
-        started_ns = time.monotonic_ns()
-        input_bytes = len(request_transport_bytes(target.request))
         stop = _StopState()
         if cancellation is not None and cancellation.cancelled:
             stop.caller_cancelled = True
@@ -260,6 +274,43 @@ class ImportableJsonExecutor:
             executor=self,
             config=config or ExecutionPoolConfig(),
         )
+
+
+def _run_preamble(
+    job: ExecutionJob,
+    target: InProcessImportableJsonTarget,
+    /,
+) -> tuple[ExecutionId, datetime, int, int]:
+    execution_id = ExecutionId(
+        job_id=job.job_id,
+        attempt_id=AttemptId(uuid4()),
+    )
+    started_at = datetime.now(UTC)
+    started_ns = time.monotonic_ns()
+    input_bytes = len(request_transport_bytes(target.request))
+    return execution_id, started_at, started_ns, input_bytes
+
+
+def _keyboard_interrupt_completion(job: ExecutionJob, /) -> CompletedExecution:
+    validate_declaration(job)
+    target = job.target
+    if not isinstance(target, InProcessImportableJsonTarget):
+        raise ExecutorFailure(
+            "the importable JSON executor accepts only in-process "
+            "importable JSON targets"
+        )
+    execution_id, started_at, started_ns, input_bytes = _run_preamble(
+        job, target
+    )
+    return _completed(
+        execution_id=execution_id,
+        outcome=ExitedOutcome(exit_code=1),
+        protocol_outputs=(),
+        started_at=started_at,
+        started_ns=started_ns,
+        input_bytes=input_bytes,
+        attribution_detail="the importable JSON entry point terminated",
+    )
 
 
 def _should_stop(
