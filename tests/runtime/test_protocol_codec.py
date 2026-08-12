@@ -5,13 +5,13 @@ import io
 from typing import IO, cast
 
 import pytest
-from conftest import encode_frame
 from dr_serialize import (
     IdentityDocument,
     Sha256Digest,
     build_identity_document,
 )
 from pydantic import ValidationError
+from support.protocol import encode_frame
 
 from dr_exec import (
     ExecutorSelfBudgets,
