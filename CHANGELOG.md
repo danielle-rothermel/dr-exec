@@ -169,6 +169,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added persisted `ExecutorFailureCode` on `RecordingFailure.failure_code` for
   degraded receipts when executor machinery fails.
 
+## [0.1.10] - 2026-08-12
+
+### Changed
+
+- Updated `dr-store` to 0.2.3. No dr-exec code changes were required; the
+  document-directory and verified-read APIs this release uses are unchanged.
+
 ## [0.1.9] - 2026-08-11
 
 ### Added
