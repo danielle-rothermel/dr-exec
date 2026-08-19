@@ -94,11 +94,31 @@ def validate_working_directory_grant(grant: WorkingDirectoryGrant, /) -> None:
                 )
 
 
+def resolve_working_directory_grant(
+    grant: WorkingDirectoryGrant,
+    /,
+) -> WorkingDirectoryGrant:
+    """Return a grant whose caller path is resolved once for the attempt."""
+
+    validate_working_directory_grant(grant)
+    match grant.kind:
+        case WorkingDirectoryGrantKind.SCRATCH:
+            return grant
+        case WorkingDirectoryGrantKind.CALLER:
+            assert grant.path is not None
+            return WorkingDirectoryGrant.caller(grant.path.resolve())
+
+
 def validate_declaration(job: ExecutionJob, /) -> None:
     validate_input_budget(job, _declared_input_bytes(job))
     validate_working_directory_grant(job.workspace)
     match job.target:
         case InProcessImportableJsonTarget():
+            if job.workspace.kind is not WorkingDirectoryGrantKind.SCRATCH:
+                raise DeclarationError(
+                    "in-process importable JSON jobs accept only scratch "
+                    "working-directory grants"
+                )
             if job.env.kind is not EnvGrantKind.NONE:
                 raise DeclarationError(
                     "in-process importable JSON jobs accept no environment "
@@ -120,6 +140,7 @@ def validate_declaration(job: ExecutionJob, /) -> None:
 
 __all__ = [
     "granted_environment",
+    "resolve_working_directory_grant",
     "validate_command_resolvability",
     "validate_declaration",
     "validate_input_budget",

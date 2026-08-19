@@ -41,6 +41,7 @@ from dr_exec.declarations.models import (
 )
 from dr_exec.declarations.validation import (
     granted_environment,
+    resolve_working_directory_grant,
     validate_declaration,
 )
 from dr_exec.execution.outcomes import (
@@ -725,6 +726,7 @@ class _EngineCall:
             )
         _validate_platform()
         validate_declaration(job)
+        workspace = resolve_working_directory_grant(job.workspace)
         target = _target_of(job, self.runtime)
         environment = granted_environment(job.env)
         executable = _resolve_executable(target.argv, environment)
@@ -734,21 +736,21 @@ class _EngineCall:
             attempt_id=attempt_id_for_job(job.job_id),
         )
         prepared = self.run_store.prepare(
-            self._prepared_record(job, target, execution_id)
+            self._prepared_record(job, target, execution_id, workspace)
         )
         if cancellation is not None and cancellation.cancelled:
             return self._finalize_pre_spawn(
                 prepared,
                 CancelledOutcome(),
             )
-        with _working_directory(job.workspace) as workspace:
+        with _working_directory(workspace) as run_directory:
             return self._run_spawned(
                 job,
                 target,
                 prepared,
                 executable=executable,
                 environment=environment,
-                scratch=workspace,
+                scratch=run_directory,
                 cancellation=cancellation,
             )
 
@@ -757,6 +759,7 @@ class _EngineCall:
         job: ExecutionJob,
         target: _ResolvedTarget,
         execution_id: ExecutionId,
+        workspace: WorkingDirectoryGrant,
         /,
     ) -> PreparedRecord:
         return PreparedRecord(
@@ -774,7 +777,7 @@ class _EngineCall:
                 target=target.record,
                 env=build_env_grant_record(job.env),
                 budgets=job.budgets,
-                workspace=build_working_directory_grant_record(job.workspace),
+                workspace=build_working_directory_grant_record(workspace),
             ),
         )
 

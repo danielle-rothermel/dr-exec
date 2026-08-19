@@ -29,6 +29,7 @@ from dr_exec import (
     UntrustedPythonTarget,
     WorkingDirectoryGrant,
     WorkingDirectoryGrantKind,
+    WorkingDirectoryGrantRecord,
 )
 
 if TYPE_CHECKING:
@@ -423,3 +424,13 @@ def test_scratch_working_directory_grants_reject_a_path() -> None:
 def test_caller_working_directory_grants_require_a_path() -> None:
     with pytest.raises(ValueError, match="caller working-directory"):
         WorkingDirectoryGrant(kind=WorkingDirectoryGrantKind.CALLER)
+
+
+def test_caller_working_directory_grant_records_reject_noncanonical_paths() -> (
+    None
+):
+    with pytest.raises(ValueError, match="canonical"):
+        WorkingDirectoryGrantRecord(
+            kind=WorkingDirectoryGrantKind.CALLER,
+            path="/tmp/../private/tmp/example",
+        )

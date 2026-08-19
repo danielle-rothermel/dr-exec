@@ -6,8 +6,10 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
+from dr_serialize import build_identity_document
 from support.executor import (
     fake_completion,
     job_for,
@@ -30,7 +32,10 @@ from dr_exec import (
     FakeExecutor,
     FakeRecordReceipt,
     FiniteByteLimit,
+    ImportableEntryPoint,
+    InProcessImportableJsonTarget,
     IsolatedHostPythonRuntime,
+    JobId,
     ProcessExecutor,
     RecordReceiptKind,
     RecordState,
@@ -148,6 +153,27 @@ def trusted_python_request_exceeding_its_declared_budget() -> ExecutionJob:
     )
 
 
+def in_process_caller_workspace() -> ExecutionJob:
+    workspace = Path(tempfile.mkdtemp(prefix="dr-exec-conformance-"))
+    return ExecutionJob(
+        job_id=JobId(uuid4()),
+        target=InProcessImportableJsonTarget(
+            entry_point=ImportableEntryPoint(
+                module_name="support.in_process_entry_points",
+                attribute_name="echo",
+            ),
+            request=build_identity_document(
+                schema="dr_exec.test_request",
+                schema_version=1,
+                payload={"echo": "value"},
+            ),
+        ),
+        env=EnvGrant.none(),
+        budgets=Budgets.unbudgeted(),
+        workspace=WorkingDirectoryGrant.caller(workspace),
+    )
+
+
 INVALID_DECLARATIONS = [
     pytest.param(
         relative_executable_without_granted_path, id="relative-no-path"
@@ -186,6 +212,14 @@ def test_every_executor_rejects_the_same_invalid_declarations(
 ) -> None:
     with pytest.raises(DeclarationError):
         executor.run_blocking(declaration())
+
+
+def test_fake_executor_rejects_in_process_caller_workspace() -> None:
+    executor = FakeExecutor(
+        responder=lambda _job, _cancellation: fake_completion()
+    )
+    with pytest.raises(DeclarationError, match="only scratch"):
+        executor.run_blocking(in_process_caller_workspace())
 
 
 def valid_absolute_command() -> ExecutionJob:
@@ -230,6 +264,10 @@ VALID_DECLARATIONS = [
     pytest.param(valid_input_within_its_budget, id="input-within-budget"),
     pytest.param(valid_untrusted_command, id="untrusted-command"),
     pytest.param(valid_python_target, id="untrusted-python"),
+]
+
+PROCESS_VALID_DECLARATIONS = [
+    *VALID_DECLARATIONS,
     pytest.param(valid_caller_workspace, id="caller-workspace"),
 ]
 
@@ -308,3 +346,17 @@ def test_awaitable_run_forwards_cancellation_like_run_blocking(
     )
     assert offloaded.result.outcome == blocking.result.outcome
     assert type(offloaded.record_receipt) is type(blocking.record_receipt)
+
+
+@requires_posix
+@pytest.mark.integration
+@pytest.mark.subprocess
+@pytest.mark.platform_posix
+@pytest.mark.parametrize("declaration", PROCESS_VALID_DECLARATIONS)
+def test_process_executor_accepts_process_specific_declarations(
+    tmp_path: Path,
+    host_runtime: IsolatedHostPythonRuntime,
+    declaration: Callable[[], ExecutionJob],
+) -> None:
+    executor = build_process_executor(tmp_path, host_runtime)
+    executor.run_blocking(declaration())

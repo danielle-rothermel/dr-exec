@@ -116,12 +116,22 @@ class WorkingDirectoryGrantRecord(ContractModel):
             raise ValueError(
                 "scratch working-directory grants must not contain a path"
             )
-        if self.kind == WorkingDirectoryGrantKind.CALLER and (
-            self.path is None or not self.path.startswith("/")
-        ):
-            raise ValueError(
-                "caller working-directory grants require an absolute path"
-            )
+        if self.kind == WorkingDirectoryGrantKind.CALLER:
+            if self.path is None:
+                raise ValueError(
+                    "caller working-directory grants require an absolute path"
+                )
+            path = Path(self.path)
+            if not path.is_absolute():
+                raise ValueError(
+                    "caller working-directory grants require an absolute path"
+                )
+            resolved = path.resolve().as_posix()
+            if path.as_posix() != resolved:
+                raise ValueError(
+                    "caller working-directory paths must be canonical: "
+                    + self.path
+                )
         return self
 
 

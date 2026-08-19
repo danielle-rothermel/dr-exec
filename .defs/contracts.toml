@@ -378,9 +378,10 @@ statement = """
 `ImportableJsonExecutor` runs trusted `InProcessImportableJsonTarget` jobs \
 synchronously in the caller interpreter through one importable entry point \
 lookup and one JSON call. It creates no durable run record, accepts no \
-environment grant, rejects process and untrusted targets, rejects finite \
-payload_output budgets, and makes no containment claim beyond caller-side \
-trust in the declared entry point."""
+environment grant, accepts only scratch working-directory grants, rejects \
+process and untrusted targets, rejects finite payload_output budgets, and \
+makes no containment claim beyond caller-side trust in the declared entry \
+point."""
 rationale = """
 Trusted preprocessing and similar workloads need pool-driven throughput without \
 a second thread pool or subprocess overhead. The separate target kind keeps \
@@ -413,12 +414,12 @@ jobs across long-lived worker processes. Workers are freshly spawned \
 interpreters, never forked, and each imports its entry point exactly once, so a \
 pool is bound to one entry point for its lifetime and rejects jobs naming \
 another. Worker processes exist for parallelism on real cores: the mode creates \
-no durable run record, accepts no environment grant, and makes no containment \
-or isolation claim, though crash containment follows as a side effect. The \
-parent and worker exchange the existing importable JSON envelope as canonical \
-JSON over dedicated pipes with no pickle in either direction, and the parent \
-drains a worker's results concurrently with writing its requests so no payload \
-size can deadlock the pair."""
+no durable run record, accepts no environment grant, accepts only scratch \
+working-directory grants, and makes no containment or isolation claim, though \
+crash containment follows as a side effect. The parent and worker exchange the \
+existing importable JSON envelope as canonical JSON over dedicated pipes with \
+no pickle in either direction, and the parent drains a worker's results \
+concurrently with writing its requests so no payload size can deadlock the pair."""
 rationale = """
 Trusted CPU-bound fan-out has no execution mode when spawn-per-job startup \
 dominates millisecond work and in-process threads serialize under the GIL. \

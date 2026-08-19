@@ -173,12 +173,14 @@ class ExecutionJob:
     workspace: WorkingDirectoryGrant = ...
 ```
 
-Each job declares exactly one working-directory grant. A scratch grant creates
-a fresh per-run directory that the executor best-effort removes afterward. A
-caller grant uses a caller-supplied absolute path that must already exist;
-symlinks are canonicalized through ``Path.resolve()`` for spawn and run-record
-persistence, and the executor never removes the directory. Run-record sidecars
-remain in the run store, not the workspace.
+Each job declares exactly one working-directory grant. On
+`ProcessExecutor`, a scratch grant creates a fresh per-run directory that the
+executor best-effort removes afterward. A caller grant uses a caller-supplied
+absolute path that must already exist; symlinks are canonicalized through
+``Path.resolve()`` for spawn and run-record persistence, and the executor never
+removes the directory. In-process and worker-pool importable JSON modes accept
+only scratch grants because they do not spawn a per-job child cwd. Run-record
+sidecars remain in the run store, not the workspace.
 
 V1 accepts finite workload limits only for wall time, input bytes, and
 aggregate captured payload output. Memory, CPU time, process count, file size,
