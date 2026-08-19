@@ -107,3 +107,19 @@ def test_resolve_working_directory_grant_rejects_a_nonexistent_path() -> None:
                 Path("/nonexistent/dr-exec-validation-workspace")
             )
         )
+
+
+def test_caller_workspace_declaration_allows_parent_components(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    grant = WorkingDirectoryGrant.caller(jobs / ".." / "workspace")
+
+    validate_working_directory_grant(grant)
+
+    resolved = resolve_working_directory_grant(grant)
+
+    assert resolved.path == workspace.resolve()

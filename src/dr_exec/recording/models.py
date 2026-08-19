@@ -33,7 +33,9 @@ from dr_exec.core.model import (
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import Budgets, EnvGrantRecord
-from dr_exec.declarations.validation import absolute_posix_path_shape_error
+from dr_exec.declarations.validation import (
+    persisted_caller_workspace_path_shape_error,
+)
 from dr_exec.recording.identity import (
     validate_executor_config_identity,
     validate_executor_identity,
@@ -122,7 +124,9 @@ class WorkingDirectoryGrantRecord(ContractModel):
                 raise ValueError(
                     "caller working-directory grants require an absolute path"
                 )
-            shape_error = absolute_posix_path_shape_error(self.path)
+            shape_error = persisted_caller_workspace_path_shape_error(
+                self.path
+            )
             if shape_error is not None:
                 raise ValueError(shape_error)
         return self

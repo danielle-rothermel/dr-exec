@@ -71,20 +71,33 @@ def validate_command_resolvability(
             )
 
 
-def absolute_posix_path_shape_error(path: Path | str, /) -> str | None:
-    """Return an error when a path is not a canonical absolute POSIX spelling."""
+def absolute_caller_workspace_declaration_error(
+    path: Path | str,
+    /,
+) -> str | None:
+    """Return an error when a declared caller path is not absolute."""
 
     posix = path.as_posix() if isinstance(path, Path) else path
     if not posix:
         return "caller working-directory paths must be absolute"
-    pure = PurePosixPath(posix)
-    if not pure.is_absolute():
+    if not PurePosixPath(posix).is_absolute():
         return "caller working-directory paths must be absolute: " + posix
+    return None
+
+
+def persisted_caller_workspace_path_shape_error(path: str, /) -> str | None:
+    """Return an error when a persisted caller path is not canonical evidence."""
+
+    if not path:
+        return "caller working-directory paths must be absolute"
+    pure = PurePosixPath(path)
+    if not pure.is_absolute():
+        return "caller working-directory paths must be absolute: " + path
     canonical = pure.as_posix()
-    if posix != canonical:
-        return "caller working-directory paths must be canonical: " + posix
+    if path != canonical:
+        return "caller working-directory paths must be canonical: " + path
     if any(part in {".", ".."} for part in pure.parts):
-        return "caller working-directory paths must be canonical: " + posix
+        return "caller working-directory paths must be canonical: " + path
     return None
 
 
@@ -98,7 +111,7 @@ def validate_working_directory_grant(grant: WorkingDirectoryGrant, /) -> None:
                 raise DeclarationError(
                     "caller working-directory grants require a path"
                 )
-            shape_error = absolute_posix_path_shape_error(path)
+            shape_error = absolute_caller_workspace_declaration_error(path)
             if shape_error is not None:
                 raise DeclarationError(shape_error)
 
@@ -154,8 +167,9 @@ def validate_declaration(job: ExecutionJob, /) -> None:
 
 
 __all__ = [
-    "absolute_posix_path_shape_error",
+    "absolute_caller_workspace_declaration_error",
     "granted_environment",
+    "persisted_caller_workspace_path_shape_error",
     "resolve_working_directory_grant",
     "validate_command_resolvability",
     "validate_declaration",
