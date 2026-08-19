@@ -34,8 +34,7 @@ required by its target transport. A scratch working-directory grant creates a \
 fresh per-run directory that the executor best-effort removes on every exit \
 path; a caller working-directory grant uses the supplied absolute path, \
 canonicalized through ``Path.resolve()`` for spawn and persistence, and the \
-executor never removes it. Scratch cleanup failure cannot replace an otherwise \
-trustworthy result, and v1 has no narration surface on which to report it."""
+executor never removes it."""
 rationale = """
 Explicit state keeps concurrent attempts independent. Cleanup failure cannot \
 replace an otherwise trustworthy result, and v1 has no narration surface on \
@@ -97,16 +96,17 @@ date = "2026-08-05"
 [[contracts]]
 title = "Self-budgets are enforced only at owned v1 boundaries"
 statement = """
-Executor self-budgets default to explicitly unbudgeted. V1 enforces finite \
-startup, termination, and join time, plus protocol frame bytes, total bytes, \
-output count, and JSON depth. Run-record manifests publish within a fixed \
-256 MiB structural parser ceiling that is not an executor self-budget axis. \
-V1 exposes no narration surface."""
+Executor self-budgets default to explicitly unbudgeted except a finite \
+30-second termination grace; ``ExecutorSelfBudgets.unbudgeted()`` opts every \
+axis out explicitly. V1 enforces finite startup, termination, and join time, \
+plus protocol frame bytes, total bytes, output count, and JSON depth. \
+Run-record manifests publish within a fixed 256 MiB structural parser ceiling \
+that is not an executor self-budget axis. V1 exposes no narration surface."""
 rationale = """
 A self-budget axis belongs in recorded identity only when v1 enforces it at an \
 owned boundary. Structural parser ceilings are safety bounds, not caller \
 self-budget declarations."""
-date = "2026-08-06"
+date = "2026-08-18"
 
 [[contracts]]
 title = "Lifecycle reach ends at the original process group"

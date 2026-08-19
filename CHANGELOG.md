@@ -25,6 +25,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ProcessExecutor` defaults to a finite 30-second `termination_time` grace
   before SIGKILL escalation; `ExecutorSelfBudgets.unbudgeted()` still opts every
   axis out explicitly, including infinite SIGTERM grace.
+- Default `ExecutorSelfBudgets` executor-config identity re-pins with finite
+  `termination_time` on the wire.
 
 ## [0.1.10] - 2026-08-12
 
