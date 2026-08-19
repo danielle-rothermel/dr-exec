@@ -7,7 +7,8 @@
 | --- | --- | --- |
 
 **dr-exec runs local processes through explicit, typed contracts.**
-Production execution currently targets macOS and is organized into these
+Production execution currently targets qualified POSIX platforms (macOS and
+Linux) and is organized into these
 functional areas:
 
 Here, “untrusted” describes who controls the payload; it does not mean
@@ -144,6 +145,18 @@ class EnvGrant:
     def fixed(cls, variables: Mapping[str, str]) -> EnvGrant: ...
 
 
+@dataclass(frozen=True, slots=True)
+class WorkingDirectoryGrant:
+    kind: WorkingDirectoryGrantKind
+    path: Path | None = None
+
+    @classmethod
+    def scratch(cls) -> WorkingDirectoryGrant: ...
+
+    @classmethod
+    def caller(cls, path: Path | str) -> WorkingDirectoryGrant: ...
+
+
 class Budgets(ContractModel):
     wall_time: DurationBudget = ...
     input_bytes: ByteBudget = ...
@@ -157,7 +170,17 @@ class ExecutionJob:
     target: ExecutionTarget
     env: EnvGrant
     budgets: Budgets = ...
+    workspace: WorkingDirectoryGrant = ...
 ```
+
+Each job declares exactly one working-directory grant. On
+`ProcessExecutor`, a scratch grant creates a fresh per-run directory that the
+executor best-effort removes afterward. A caller grant uses a caller-supplied
+absolute path that must already exist; symlinks are canonicalized through
+``Path.resolve()`` for spawn and run-record persistence, and the executor never
+removes the directory. In-process and worker-pool importable JSON modes accept
+only scratch grants because they do not spawn a per-job child cwd. Run-record
+sidecars remain in the run store, not the workspace.
 
 V1 accepts finite workload limits only for wall time, input bytes, and
 aggregate captured payload output. Memory, CPU time, process count, file size,
@@ -544,6 +567,23 @@ class ProcessExecutor:
         config: ExecutionPoolConfig | None = None,
     ) -> ExecutionPool: ...
 ```
+
+### Parent shutdown and cancellation
+
+`CancelToken` carries explicit cancellation into `run_blocking()`. Cluster
+workers that receive SIGTERM or SIGINT from a launcher or scheduler should
+wrap the blocking call with `forward_parent_signals(cancellation)` on the
+thread that receives those signals. That maps parent shutdown to token
+cancellation, which completes the run as `CancelledOutcome` and tears the child
+down through the existing SIGTERM grace (`termination_time`) and SIGKILL
+escalation path.
+
+Payloads that must checkpoint before exit should treat SIGTERM as a cooperative
+shutdown request and exit cleanly within the declared grace period.
+`ProcessExecutor` defaults to a 30-second `termination_time` grace before
+SIGKILL escalation; pass `ExecutorSelfBudgets.unbudgeted()` for infinite
+SIGTERM grace on every axis. `termination_time` is declared in nanoseconds;
+`FiniteDurationLimit.from_seconds()` converts from seconds.
 
 ## Recording
 

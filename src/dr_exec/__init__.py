@@ -1,6 +1,6 @@
 from dr_exec.capabilities.fake import FakeExecutor
 from dr_exec.capabilities.protocols import Executor, RunStore, Runtime
-from dr_exec.core.cancel import CancelToken
+from dr_exec.core.cancel import CancelToken, forward_parent_signals
 from dr_exec.core.errors import (
     DeclarationError,
     ExecutorFailure,
@@ -22,6 +22,7 @@ from dr_exec.core.kinds import (
     RecordReceiptKind,
     RecordState,
     RuntimeKind,
+    WorkingDirectoryGrantKind,
 )
 from dr_exec.core.names import AttemptId, ExecutionId, JobId
 from dr_exec.declarations.models import (
@@ -48,6 +49,7 @@ from dr_exec.declarations.models import (
     UnbudgetedLimit,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
 )
 from dr_exec.execution.executor import ProcessExecutor
 from dr_exec.execution.importable_json_executor import ImportableJsonExecutor
@@ -101,6 +103,7 @@ from dr_exec.recording.models import (
     UntrustedCommandTargetRecord,
     UntrustedPythonTargetRecord,
     WorkerPoolRecordReceipt,
+    WorkingDirectoryGrantRecord,
 )
 from dr_exec.recording.store import (
     DirectoryRunStore,
@@ -237,9 +240,13 @@ __all__ = [
     "UntrustedPythonTargetRecord",
     "WorkerPoolImportableJsonExecutor",
     "WorkerPoolRecordReceipt",
+    "WorkingDirectoryGrant",
+    "WorkingDirectoryGrantKind",
+    "WorkingDirectoryGrantRecord",
     "build_in_process_importable_json_job",
     "build_trusted_importable_json_job",
     "build_untrusted_importable_json_job",
+    "forward_parent_signals",
     "parse_importable_json_result",
     "resolve_pool_capacity",
 ]

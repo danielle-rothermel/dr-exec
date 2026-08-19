@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -12,7 +11,14 @@ from uuid import uuid4
 
 import pytest
 from dr_serialize import IdentityDocument, build_identity_document
-from support.process import Gate, finish_threaded_calls, start_threaded_calls
+from support.process import (
+    Gate,
+    assert_fd_count_unchanged,
+    finish_threaded_calls,
+    open_fd_count,
+    requires_posix,
+    start_threaded_calls,
+)
 
 import dr_exec.execution.engine
 from dr_exec import (
@@ -55,6 +61,9 @@ from dr_exec import (
     TrustedPythonTargetRecord,
     UntrustedPythonTarget,
     UntrustedPythonTargetRecord,
+    WorkingDirectoryGrant,
+    WorkingDirectoryGrantKind,
+    WorkingDirectoryGrantRecord,
 )
 from dr_exec.core.model import canonical_model_bytes
 from dr_exec.recording.store import FinalizableRun, PreparedRun, RunningRun
@@ -66,14 +75,10 @@ from dr_exec.runtime.bootstrap import (
 if TYPE_CHECKING:
     from dr_exec.recording.models import CompletedExecution
 
-requires_macos = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="real macOS process semantics",
-)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.subprocess,
-    pytest.mark.platform_macos,
+    pytest.mark.platform_posix,
     pytest.mark.usefixtures("process_watchdog"),
 ]
 
@@ -294,7 +299,7 @@ def protocol_failure_of(
     return outcome
 
 
-@requires_macos
+@requires_posix
 def test_a_python_target_returns_its_outputs_and_a_clean_exit(
     harness: Harness,
 ) -> None:
@@ -307,7 +312,7 @@ def test_a_python_target_returns_its_outputs_and_a_clean_exit(
     ]
 
 
-@requires_macos
+@requires_posix
 @pytest.mark.parametrize(
     "trusted", [True, False], ids=["trusted", "untrusted"]
 )
@@ -351,7 +356,7 @@ def test_python_target_trust_variants_share_callable_and_protocol_behavior(
         )
 
 
-@requires_macos
+@requires_posix
 def test_a_driver_emitting_nothing_completes_with_no_outputs(
     harness: Harness,
 ) -> None:
@@ -361,7 +366,7 @@ def test_a_driver_emitting_nothing_completes_with_no_outputs(
     assert completed.result.protocol_outputs == ()
 
 
-@requires_macos
+@requires_posix
 def test_the_request_reaches_the_child_intact_through_eof(
     harness: Harness,
 ) -> None:
@@ -371,7 +376,7 @@ def test_the_request_reaches_the_child_intact_through_eof(
     assert payloads_of(completed) == [{"index": 0, "echo": "é中\U0001f600"}]
 
 
-@requires_macos
+@requires_posix
 def test_recorded_input_bytes_are_the_canonical_request_length(
     harness: Harness,
 ) -> None:
@@ -389,7 +394,7 @@ def test_recorded_input_bytes_are_the_canonical_request_length(
     )
 
 
-@requires_macos
+@requires_posix
 def test_protocol_bytes_are_counted_apart_from_payload_output(
     harness: Harness,
 ) -> None:
@@ -413,7 +418,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     )
 
 
-@requires_macos
+@requires_posix
 def test_python_wrapper_closes_protected_fd_before_domain_code(
     harness: Harness,
 ) -> None:
@@ -438,7 +443,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert live == {"0": True, "1": True, "2": True, "3": False}
 
 
-@requires_macos
+@requires_posix
 def test_the_payload_cannot_write_the_protected_stream_directly(
     harness: Harness,
 ) -> None:
@@ -460,7 +465,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert payloads_of(completed) == [{"reached": False}]
 
 
-@requires_macos
+@requires_posix
 def test_the_protected_handle_survives_replaced_language_level_streams(
     harness: Harness,
 ) -> None:
@@ -480,7 +485,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert payloads_of(completed) == [{"survived": True}]
 
 
-@requires_macos
+@requires_posix
 def test_driver_source_is_not_a_payload_argument_or_shell_syntax(
     harness: Harness,
 ) -> None:
@@ -499,7 +504,37 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert reported["argv"] == ["-c"]
 
 
-@requires_macos
+@requires_posix
+def test_a_caller_workspace_is_used_for_a_python_target(
+    harness: Harness, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "python-caller"
+    workspace.mkdir()
+    marker = workspace / "cwd.txt"
+    driver = f"""
+def {DRIVER_ENTRYPOINT_NAME}(request, emit):
+    import os
+    from pathlib import Path
+    Path({str(marker)!r}).write_text(os.getcwd())
+"""
+    job = replace(
+        harness.job(driver),
+        workspace=WorkingDirectoryGrant.caller(workspace),
+    )
+    completed = harness.executor.run_blocking(job)
+
+    assert completed.result.outcome == ExitedOutcome(exit_code=0)
+    assert marker.read_text() == workspace.resolve().as_posix()
+    record = harness.store.load(reference_of(completed))
+    assert isinstance(record, FinalizedRecord)
+    assert record.declaration.workspace == WorkingDirectoryGrantRecord(
+        kind=WorkingDirectoryGrantKind.CALLER,
+        path=workspace.resolve().as_posix(),
+    )
+
+
+@requires_posix
+@assert_fd_count_unchanged
 def test_a_started_protocol_worker_failure_raises_after_lifecycle_cleanup(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -510,7 +545,7 @@ def test_a_started_protocol_worker_failure_raises_after_lifecycle_cleanup(
     monkeypatch.setattr(
         dr_exec.execution.engine, "read_protocol_stream", failing_read
     )
-    before = len(os.listdir("/dev/fd"))
+    before = open_fd_count()
     driver = f"""
 import time
 
@@ -530,7 +565,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
         )
 
     assert isinstance(exc.value.__cause__, RuntimeError)
-    assert len(os.listdir("/dev/fd")) == before
+    assert open_fd_count() == before
     assert (
         harness.store.load(harness.only_record_reference()).state
         is RecordState.RUNNING
@@ -539,7 +574,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
 @pytest.mark.parametrize(
     "driver",
     [
@@ -561,7 +596,7 @@ def test_a_payload_owned_driver_failure_is_an_incomplete_stream_outcome(
     assert isinstance(completed.record_receipt, CompleteRecordReceipt)
 
 
-@requires_macos
+@requires_posix
 def test_a_later_failure_preserves_every_previously_accepted_output(
     harness: Harness,
 ) -> None:
@@ -579,7 +614,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert payloads_of(completed) == [{"index": 0}, {"index": 1}]
 
 
-@requires_macos
+@requires_posix
 def test_accepted_outputs_survive_a_driver_that_exits_the_process(
     harness: Harness,
 ) -> None:
@@ -598,7 +633,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert payloads_of(completed) == [{"index": 0}]
 
 
-@requires_macos
+@requires_posix
 def test_a_driver_emitting_a_non_identity_document_fails_the_stream(
     harness: Harness,
 ) -> None:
@@ -613,7 +648,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert completed.result.protocol_outputs == ()
 
 
-@requires_macos
+@requires_posix
 def test_a_protocol_failure_is_recorded_with_its_accepted_outputs(
     harness: Harness,
 ) -> None:
@@ -631,7 +666,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     ] == [{"index": 0}]
 
 
-@requires_macos
+@requires_posix
 def test_an_output_count_budget_stops_the_stream_as_an_oversized_frame(
     harness: Harness,
 ) -> None:
@@ -650,7 +685,7 @@ def test_an_output_count_budget_stops_the_stream_as_an_oversized_frame(
     assert completed.result.attribution.owner is FailureOwner.EXECUTOR
 
 
-@requires_macos
+@requires_posix
 def test_an_output_count_exactly_at_its_budget_completes(
     harness: Harness,
 ) -> None:
@@ -666,7 +701,7 @@ def test_an_output_count_exactly_at_its_budget_completes(
     assert len(completed.result.protocol_outputs) == 2
 
 
-@requires_macos
+@requires_posix
 def test_a_frame_byte_budget_refuses_an_oversized_frame(
     harness: Harness,
 ) -> None:
@@ -684,7 +719,7 @@ def test_a_frame_byte_budget_refuses_an_oversized_frame(
     assert outcome.failure_code is ProtocolFailureCode.OVERSIZED_FRAME
 
 
-@requires_macos
+@requires_posix
 def test_an_unbudgeted_protocol_axis_installs_no_hidden_limit(
     harness: Harness,
 ) -> None:
@@ -694,7 +729,7 @@ def test_an_unbudgeted_protocol_axis_installs_no_hidden_limit(
     assert len(completed.result.protocol_outputs) == 64
 
 
-@requires_macos
+@requires_posix
 def test_an_over_budget_request_is_refused_before_any_spawn(
     harness: Harness,
 ) -> None:
@@ -708,7 +743,7 @@ def test_an_over_budget_request_is_refused_before_any_spawn(
     assert list(harness.root.iterdir()) == []
 
 
-@requires_macos
+@requires_posix
 def test_wall_time_overflow_beats_the_incomplete_stream_it_causes(
     harness: Harness,
 ) -> None:
@@ -734,7 +769,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert payloads_of(completed) == [{"index": 0}]
 
 
-@requires_macos
+@requires_posix
 def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -772,7 +807,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert record.state is RecordState.FINALIZED
 
 
-@requires_macos
+@requires_posix
 def test_the_record_carries_python_specific_durable_evidence(
     harness: Harness,
 ) -> None:
@@ -790,7 +825,7 @@ def test_the_record_carries_python_specific_durable_evidence(
     assert target.runtime == harness.executor.runtime.describe()
 
 
-@requires_macos
+@requires_posix
 def test_a_relative_prepared_argv_fails_classified_without_a_granted_path(
     harness: Harness,
 ) -> None:
@@ -812,7 +847,7 @@ def test_a_relative_prepared_argv_fails_classified_without_a_granted_path(
     assert completed.result.attribution.owner is FailureOwner.EXECUTOR
 
 
-@requires_macos
+@requires_posix
 def test_the_record_never_exposes_the_driver_source_or_the_request(
     harness: Harness,
 ) -> None:
@@ -833,7 +868,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     assert "SECRET_LITERAL" not in manifest
 
 
-@requires_macos
+@requires_posix
 def test_accepted_outputs_are_recorded_inline_not_as_digests(
     harness: Harness,
 ) -> None:
@@ -846,7 +881,7 @@ def test_accepted_outputs_are_recorded_inline_not_as_digests(
     ] == [{"index": index, "echo": "inline"} for index in range(2)]
 
 
-@requires_macos
+@requires_posix
 def test_concurrent_python_calls_keep_their_streams_separate(
     harness: Harness, tmp_path: Path
 ) -> None:

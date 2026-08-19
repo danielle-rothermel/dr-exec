@@ -15,6 +15,7 @@ from support.importable_json import (
     RAISE_SYSTEM_EXIT,
     SLEEP_LONG,
 )
+from support.process import requires_posix
 
 from dr_exec import (
     Budgets,
@@ -45,11 +46,6 @@ from dr_exec.recording.models import BudgetExceededOutcome
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
 
-requires_macos = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="real macOS process semantics",
-)
-
 
 def build_job(
     entry_point: ImportableEntryPoint = ECHO,
@@ -66,7 +62,7 @@ def build_job(
     )
 
 
-@requires_macos
+@requires_posix
 def test_process_executor_rejects_in_process_target(tmp_path: Path) -> None:
     runtime = IsolatedHostPythonRuntime(executable=Path(sys.executable))
     records = tmp_path / "records"

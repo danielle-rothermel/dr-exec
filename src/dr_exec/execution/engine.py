@@ -25,6 +25,7 @@ from dr_exec.core.kinds import (
     BudgetAxis,
     ExecutorFailureCode,
     OutputOverflowPolicy,
+    WorkingDirectoryGrantKind,
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
@@ -36,9 +37,11 @@ from dr_exec.declarations.models import (
     TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
 )
 from dr_exec.declarations.validation import (
     granted_environment,
+    resolve_working_directory_grant,
     validate_declaration,
 )
 from dr_exec.execution.outcomes import (
@@ -64,6 +67,7 @@ from dr_exec.recording.identity import (
     build_env_grant_record,
     build_executor_config_identity,
     build_executor_identity,
+    build_working_directory_grant_record,
     canonical_declaration_digest,
 )
 from dr_exec.recording.models import (
@@ -97,7 +101,7 @@ from dr_exec.recording.references import attempt_id_for_job
 from dr_exec.recording.store import FinalizableRun, PreparedRun
 from dr_exec.runtime.protocol import ProtocolStreamResult, read_protocol_stream
 
-_SUPPORTED_PLATFORM: Final = "darwin"
+_SUPPORTED_PLATFORMS: Final = frozenset({"darwin", "linux"})
 
 SCRATCH_DIRECTORY_PREFIX: Final = "dr-exec-run-"
 
@@ -120,9 +124,10 @@ def _now() -> datetime:
 
 
 def _validate_platform() -> None:
-    if sys.platform != _SUPPORTED_PLATFORM:
+    if sys.platform not in _SUPPORTED_PLATFORMS:
         raise DeclarationError(
-            f"dr-exec v1 executes only on {_SUPPORTED_PLATFORM}"
+            "dr-exec v1 executes only on "
+            + ", ".join(sorted(_SUPPORTED_PLATFORMS))
         )
 
 
@@ -137,7 +142,7 @@ def _resolve_executable(
     # An absolute argv[0] is a Runtime conformance obligation, so a prepared
     # relative name reaches here only from a nonconforming runtime. It stays
     # unresolved and fails at spawn as a classified outcome; the child's cwd
-    # is the fresh scratch directory, where a relative name cannot resolve.
+    # is the job's working directory, where a relative name cannot resolve.
     granted_path = environment.get("PATH")
     if granted_path is None:
         return name
@@ -210,6 +215,17 @@ def _scratch_workspace() -> Iterator[Path]:
         yield directory
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+@contextmanager
+def _working_directory(grant: WorkingDirectoryGrant, /) -> Iterator[Path]:
+    match grant.kind:
+        case WorkingDirectoryGrantKind.SCRATCH:
+            with _scratch_workspace() as directory:
+                yield directory
+        case WorkingDirectoryGrantKind.CALLER:
+            assert grant.path is not None
+            yield grant.path.resolve()
 
 
 @dataclass(slots=True)
@@ -710,6 +726,7 @@ class _EngineCall:
             )
         _validate_platform()
         validate_declaration(job)
+        workspace = resolve_working_directory_grant(job.workspace)
         target = _target_of(job, self.runtime)
         environment = granted_environment(job.env)
         executable = _resolve_executable(target.argv, environment)
@@ -719,21 +736,21 @@ class _EngineCall:
             attempt_id=attempt_id_for_job(job.job_id),
         )
         prepared = self.run_store.prepare(
-            self._prepared_record(job, target, execution_id)
+            self._prepared_record(job, target, execution_id, workspace)
         )
         if cancellation is not None and cancellation.cancelled:
             return self._finalize_pre_spawn(
                 prepared,
                 CancelledOutcome(),
             )
-        with _scratch_workspace() as scratch:
+        with _working_directory(workspace) as run_directory:
             return self._run_spawned(
                 job,
                 target,
                 prepared,
                 executable=executable,
                 environment=environment,
-                scratch=scratch,
+                scratch=run_directory,
                 cancellation=cancellation,
             )
 
@@ -742,6 +759,7 @@ class _EngineCall:
         job: ExecutionJob,
         target: _ResolvedTarget,
         execution_id: ExecutionId,
+        workspace: WorkingDirectoryGrant,
         /,
     ) -> PreparedRecord:
         return PreparedRecord(
@@ -759,6 +777,7 @@ class _EngineCall:
                 target=target.record,
                 env=build_env_grant_record(job.env),
                 budgets=job.budgets,
+                workspace=build_working_directory_grant_record(workspace),
             ),
         )
 
@@ -877,7 +896,7 @@ class _EngineCall:
                 executable=executable,
                 argv=target.argv,
                 environment=environment,
-                scratch_directory=scratch.as_posix(),
+                working_directory=scratch.as_posix(),
                 descriptor_map=tuple(descriptor_map),
                 status_write=status_write,
             )

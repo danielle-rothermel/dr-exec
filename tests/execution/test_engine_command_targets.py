@@ -3,24 +3,29 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
 from dr_serialize import build_identity_document
 from support.process import (
     Gate,
+    assert_fd_count_unchanged,
     cleanup_exact_pids,
     exact_pid_exists,
     finish_threaded_calls,
+    open_fd_count,
+    requires_posix,
     start_threaded_calls,
 )
 
@@ -71,6 +76,10 @@ from dr_exec import (
     UntrustedCommandTarget,
     UntrustedCommandTargetRecord,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
+    WorkingDirectoryGrantKind,
+    WorkingDirectoryGrantRecord,
+    forward_parent_signals,
 )
 from dr_exec.core.model import canonical_model_bytes
 from dr_exec.execution.engine import SCRATCH_DIRECTORY_PREFIX, run_execution
@@ -84,14 +93,10 @@ if TYPE_CHECKING:
 
     from dr_exec.recording.models import CompletedExecution
 
-requires_macos = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="real macOS process semantics",
-)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.subprocess,
-    pytest.mark.platform_macos,
+    pytest.mark.platform_posix,
     pytest.mark.usefixtures("process_watchdog"),
 ]
 
@@ -100,6 +105,20 @@ WATCHDOG_JOIN_TIME = FiniteDurationLimit(max_ns=5_000_000_000)
 ESCAPEE_JOIN_TIME = FiniteDurationLimit(max_ns=500_000_000)
 
 UNREADABLE_STDIN_BYTES = 8 * 1024 * 1024
+
+
+def _guard_caller_workspace_removal(
+    monkeypatch: pytest.MonkeyPatch, workspace: Path, /
+) -> None:
+    original = cast("Callable[..., None]", shutil.rmtree)
+    resolved = workspace.resolve()
+
+    def guarded(path: Path | str, /, *args: object, **kwargs: object) -> None:
+        if Path(path).resolve() == resolved:
+            pytest.fail("engine attempted to remove caller workspace")
+        original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", guarded)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +139,7 @@ class Harness:
         self_budgets: ExecutorSelfBudgets | None = None,
         cancellation: CancelToken | None = None,
         untrusted: bool = False,
+        workspace: WorkingDirectoryGrant | None = None,
     ) -> CompletedExecution:
         target = (
             UntrustedCommandTarget(
@@ -135,6 +155,11 @@ class Harness:
             target=target,
             env=env if env is not None else EnvGrant.none(),
             budgets=budgets if budgets is not None else Budgets.unbudgeted(),
+            workspace=(
+                WorkingDirectoryGrant.scratch()
+                if workspace is None
+                else workspace
+            ),
         )
         return self.execute(
             job,
@@ -253,7 +278,7 @@ def python_command(source: str, /) -> tuple[str, ...]:
     return (sys.executable, "-I", "-c", source)
 
 
-@requires_macos
+@requires_posix
 def test_a_clean_exit_returns_exit_data_with_no_failure_owner(
     harness: Harness,
 ) -> None:
@@ -263,7 +288,7 @@ def test_a_clean_exit_returns_exit_data_with_no_failure_owner(
     assert completed.result.attribution.owner is FailureOwner.NONE
 
 
-@requires_macos
+@requires_posix
 def test_a_nonzero_exit_stays_raw_data_attributed_to_the_payload(
     harness: Harness,
 ) -> None:
@@ -273,7 +298,7 @@ def test_a_nonzero_exit_stays_raw_data_attributed_to_the_payload(
     assert completed.result.attribution.owner is FailureOwner.PAYLOAD
 
 
-@requires_macos
+@requires_posix
 def test_a_signalled_child_reports_its_signal_number(
     harness: Harness,
 ) -> None:
@@ -288,7 +313,7 @@ def test_a_signalled_child_reports_its_signal_number(
     )
 
 
-@requires_macos
+@requires_posix
 def test_a_missing_executable_is_spawn_absence_not_a_raise(
     harness: Harness,
 ) -> None:
@@ -301,7 +326,7 @@ def test_a_missing_executable_is_spawn_absence_not_a_raise(
     assert isinstance(completed.record_receipt, CompleteRecordReceipt)
 
 
-@requires_macos
+@requires_posix
 def test_a_non_executable_file_is_a_spawn_failure_preserving_its_errno(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -317,7 +342,7 @@ def test_a_non_executable_file_is_a_spawn_failure_preserving_its_errno(
     assert completed.result.attribution.owner is FailureOwner.MACHINE
 
 
-@requires_macos
+@requires_posix
 def test_a_bootstrap_setup_failure_names_the_stage_that_failed(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -340,7 +365,7 @@ def test_a_bootstrap_setup_failure_names_the_stage_that_failed(
     assert outcome.error_message == SETUP_STAGE_CHDIR
 
 
-@requires_macos
+@requires_posix
 def test_declared_stdin_reaches_the_child_and_is_followed_by_eof(
     harness: Harness,
 ) -> None:
@@ -360,7 +385,7 @@ def test_declared_stdin_reaches_the_child_and_is_followed_by_eof(
     )
 
 
-@requires_macos
+@requires_posix
 def test_payload_stdout_and_stderr_stay_separate_raw_byte_channels(
     harness: Harness,
 ) -> None:
@@ -376,7 +401,7 @@ def test_payload_stdout_and_stderr_stay_separate_raw_byte_channels(
     assert completed.result.payload_outputs.stderr.head == b"err\r\n"
 
 
-@requires_macos
+@requires_posix
 def test_both_streams_drain_concurrently_past_one_pipe_buffer(
     harness: Harness,
 ) -> None:
@@ -395,7 +420,7 @@ def test_both_streams_drain_concurrently_past_one_pipe_buffer(
     assert completed.result.payload_outputs.stdout.head == b"o" * volume
 
 
-@requires_macos
+@requires_posix
 def test_a_command_child_excludes_a_high_inheritable_parent_descriptor(
     harness: Harness,
 ) -> None:
@@ -425,7 +450,7 @@ def test_a_command_child_excludes_a_high_inheritable_parent_descriptor(
     assert completed.result.payload_outputs.stdout.head == b"False"
 
 
-@requires_macos
+@requires_posix
 def test_the_child_receives_only_the_granted_environment(
     harness: Harness,
 ) -> None:
@@ -446,7 +471,7 @@ def test_the_child_receives_only_the_granted_environment(
     assert "DR_EXEC_TEST_AMBIENT_SECRET" not in names
 
 
-@requires_macos
+@requires_posix
 def test_a_named_grant_snapshots_values_when_the_grant_is_built(
     harness: Harness,
 ) -> None:
@@ -467,7 +492,7 @@ def test_a_named_grant_snapshots_values_when_the_grant_is_built(
     assert completed.result.payload_outputs.stdout.head == b"at construction"
 
 
-@requires_macos
+@requires_posix
 def test_the_child_runs_in_a_fresh_scratch_directory_removed_afterwards(
     harness: Harness,
 ) -> None:
@@ -482,7 +507,7 @@ def test_the_child_runs_in_a_fresh_scratch_directory_removed_afterwards(
     assert not reported.exists()
 
 
-@requires_macos
+@requires_posix
 def test_two_runs_never_share_a_scratch_directory(
     harness: Harness,
 ) -> None:
@@ -496,7 +521,161 @@ def test_two_runs_never_share_a_scratch_directory(
     )
 
 
-@requires_macos
+@requires_posix
+def test_a_caller_workspace_is_used_and_survives_after_the_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "attempt"
+    workspace.mkdir()
+    marker = workspace / "checkpoint.txt"
+    completed = harness.run(
+        python_command(
+            "import os\n"
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text(os.getcwd())\n"
+            "import sys\n"
+            "sys.stdout.write(os.getcwd())\n"
+        ),
+        workspace=WorkingDirectoryGrant.caller(workspace),
+    )
+
+    reported = Path(
+        completed.result.payload_outputs.stdout.head.decode()
+    ).resolve()
+    assert reported == workspace.resolve()
+    assert marker.read_text() == workspace.resolve().as_posix()
+    record = finalized_record(harness.store, reference_of(completed))
+    assert record.declaration.workspace == WorkingDirectoryGrantRecord(
+        kind=WorkingDirectoryGrantKind.CALLER,
+        path=workspace.resolve().as_posix(),
+    )
+
+
+@requires_posix
+def test_a_missing_caller_workspace_is_refused_before_anything_durable(
+    harness: Harness, tmp_path: Path
+) -> None:
+    missing = tmp_path / "missing"
+
+    with pytest.raises(DeclarationError, match="existing directory"):
+        harness.run(
+            python_command("pass"),
+            workspace=WorkingDirectoryGrant.caller(missing),
+        )
+
+    assert list(harness.root.iterdir()) == []
+
+
+@requires_posix
+def test_a_symlinked_caller_workspace_is_canonicalized_for_spawn_and_records(
+    harness: Harness, tmp_path: Path
+) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    marker = target / "checkpoint.txt"
+
+    completed = harness.run(
+        python_command(
+            "import os\n"
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text(os.getcwd())\n"
+        ),
+        workspace=WorkingDirectoryGrant.caller(link),
+    )
+
+    assert marker.read_text() == target.resolve().as_posix()
+    record = finalized_record(harness.store, reference_of(completed))
+    assert record.declaration.workspace == WorkingDirectoryGrantRecord(
+        kind=WorkingDirectoryGrantKind.CALLER,
+        path=target.resolve().as_posix(),
+    )
+
+
+@requires_posix
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param("cancel", id="cancel"),
+        pytest.param("budget", id="budget"),
+        pytest.param("spawn-failure", id="spawn-failure"),
+    ],
+)
+def test_a_caller_workspace_survives_non_clean_exit_paths(
+    harness: Harness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    workspace = tmp_path / "caller"
+    workspace.mkdir()
+    sentinel = workspace / "keep.me"
+    sentinel.write_text("stay")
+    _guard_caller_workspace_removal(monkeypatch, workspace)
+
+    if scenario == "cancel":
+        ready = Gate.create(tmp_path, f"{scenario}-ready")
+        token = CancelToken()
+
+        def cancel_ready_child() -> int:
+            int(ready.receive())
+            token.cancel()
+            return 0
+
+        (canceller,) = start_threaded_calls((cancel_ready_child,))
+        try:
+            completed = harness.run(
+                python_command(
+                    "import os, signal\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    f"with open({str(ready.path)!r}, 'w') as gate:\n"
+                    "    gate.write(str(os.getpid()))\n"
+                    "signal.pause()\n"
+                ),
+                workspace=WorkingDirectoryGrant.caller(workspace),
+                budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+                self_budgets=ExecutorSelfBudgets(
+                    termination_time=FiniteDurationLimit.from_seconds(2)
+                ),
+                cancellation=token,
+            )
+        finally:
+            finish_threaded_calls((canceller,))
+        assert completed.result.outcome == CancelledOutcome()
+    elif scenario == "budget":
+        completed = harness.run(
+            python_command("import time; time.sleep(2)"),
+            workspace=WorkingDirectoryGrant.caller(workspace),
+            budgets=Budgets(
+                wall_time=FiniteDurationLimit(max_ns=100_000_000),
+            ),
+            self_budgets=ExecutorSelfBudgets(
+                termination_time=FiniteDurationLimit.from_seconds(2)
+            ),
+        )
+        assert completed.result.outcome == BudgetExceededOutcome(
+            axis=BudgetAxis.WALL_TIME
+        )
+    else:
+
+        def failing_launch(**_: object) -> subprocess.Popen[bytes]:
+            raise OSError(errno.EMFILE, "synthetic launch failure")
+
+        monkeypatch.setattr(
+            dr_exec.execution.engine, "launch_bootstrap", failing_launch
+        )
+        with pytest.raises(ExecutorFailure, match="could not start"):
+            harness.run(
+                python_command("pass"),
+                workspace=WorkingDirectoryGrant.caller(workspace),
+            )
+
+    assert sentinel.read_text() == "stay"
+    assert workspace.exists()
+
+
+@requires_posix
 def test_the_child_leads_a_fresh_session_and_process_group(
     harness: Harness,
 ) -> None:
@@ -514,7 +693,7 @@ def test_the_child_leads_a_fresh_session_and_process_group(
     assert pgid != os.getpgrp()
 
 
-@requires_macos
+@requires_posix
 def test_a_relative_executable_resolves_through_the_granted_path(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -532,7 +711,7 @@ def test_a_relative_executable_resolves_through_the_granted_path(
     assert completed.result.payload_outputs.stdout.head == b"resolved"
 
 
-@requires_macos
+@requires_posix
 def test_a_relative_executable_without_a_granted_path_is_refused(
     harness: Harness,
 ) -> None:
@@ -542,7 +721,7 @@ def test_a_relative_executable_without_a_granted_path_is_refused(
     assert list(harness.root.iterdir()) == []
 
 
-@requires_macos
+@requires_posix
 def test_an_absolute_executable_resolves_without_any_granted_path(
     harness: Harness,
 ) -> None:
@@ -551,7 +730,7 @@ def test_an_absolute_executable_resolves_without_any_granted_path(
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
 
 
-@requires_macos
+@requires_posix
 def test_a_relative_granted_path_entry_is_refused_before_anything_durable(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -571,7 +750,7 @@ def test_a_relative_granted_path_entry_is_refused_before_anything_durable(
     assert list(harness.root.iterdir()) == []
 
 
-@requires_macos
+@requires_posix
 def test_an_empty_granted_path_entry_is_refused_before_anything_durable(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -587,7 +766,7 @@ def test_an_empty_granted_path_entry_is_refused_before_anything_durable(
     assert list(harness.root.iterdir()) == []
 
 
-@requires_macos
+@requires_posix
 def test_a_relative_name_absent_from_the_granted_path_is_spawn_absence(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -604,7 +783,7 @@ def test_a_relative_name_absent_from_the_granted_path_is_spawn_absence(
     )
 
 
-@requires_macos
+@requires_posix
 def test_argv_reaches_the_child_verbatim_without_shell_interpretation(
     harness: Harness,
 ) -> None:
@@ -625,15 +804,15 @@ def test_argv_reaches_the_child_verbatim_without_shell_interpretation(
 def test_an_unsupported_platform_is_refused_before_anything_durable(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "win32")
 
-    with pytest.raises(DeclarationError, match="darwin"):
+    with pytest.raises(DeclarationError, match="darwin, linux"):
         harness.run(python_command("pass"))
 
     assert list(harness.root.iterdir()) == []
 
 
-@requires_macos
+@requires_posix
 def test_every_declared_target_kind_runs_through_the_one_engine_path(
     harness: Harness,
 ) -> None:
@@ -662,7 +841,7 @@ def test_every_declared_target_kind_runs_through_the_one_engine_path(
         assert isinstance(completed.record_receipt, CompleteRecordReceipt)
 
 
-@requires_macos
+@requires_posix
 def test_an_untrusted_command_records_its_containment_profile(
     harness: Harness,
 ) -> None:
@@ -676,7 +855,7 @@ def test_an_untrusted_command_records_its_containment_profile(
     )
 
 
-@requires_macos
+@requires_posix
 def test_an_over_budget_input_is_refused_before_any_spawn(
     harness: Harness,
 ) -> None:
@@ -690,7 +869,7 @@ def test_an_over_budget_input_is_refused_before_any_spawn(
     assert list(harness.root.iterdir()) == []
 
 
-@requires_macos
+@requires_posix
 def test_an_input_exactly_at_its_budget_is_within_it(
     harness: Harness,
 ) -> None:
@@ -706,7 +885,7 @@ def test_an_input_exactly_at_its_budget_is_within_it(
     assert completed.result.measurements.input_bytes == 4
 
 
-@requires_macos
+@requires_posix
 def test_wall_time_overflow_terminates_an_otherwise_immortal_child(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -729,7 +908,7 @@ def test_wall_time_overflow_terminates_an_otherwise_immortal_child(
     assert completed.result.payload_outputs.stdout.head == b"running"
 
 
-@requires_macos
+@requires_posix
 def test_an_unbudgeted_run_retains_every_produced_byte(
     harness: Harness,
 ) -> None:
@@ -770,7 +949,7 @@ def finite_output(
     )
 
 
-@requires_macos
+@requires_posix
 def test_output_exactly_at_the_aggregate_budget_is_retained_whole(
     harness: Harness,
 ) -> None:
@@ -796,7 +975,7 @@ def test_output_exactly_at_the_aggregate_budget_is_retained_whole(
     assert stdout.dropped_bytes == 0
 
 
-@requires_macos
+@requires_posix
 def test_marked_truncation_keeps_head_and_tail_and_exact_counts(
     harness: Harness,
 ) -> None:
@@ -831,7 +1010,7 @@ def test_marked_truncation_keeps_head_and_tail_and_exact_counts(
     )
 
 
-@requires_macos
+@requires_posix
 def test_marked_truncation_counts_production_through_eof(
     harness: Harness,
 ) -> None:
@@ -858,7 +1037,7 @@ def test_marked_truncation_counts_production_through_eof(
     )
 
 
-@requires_macos
+@requires_posix
 def test_the_fail_policy_terminates_a_child_that_would_never_exit(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -890,7 +1069,7 @@ def test_the_fail_policy_terminates_a_child_that_would_never_exit(
     assert completed.result.payload_outputs.stdout.head == b"y" * 8
 
 
-@requires_macos
+@requires_posix
 def test_a_recorded_output_violation_beats_a_clean_exit(
     harness: Harness,
 ) -> None:
@@ -911,7 +1090,7 @@ def test_a_recorded_output_violation_beats_a_clean_exit(
     )
 
 
-@requires_macos
+@requires_posix
 def test_a_recorded_output_violation_beats_the_wall_clock_deadline(
     harness: Harness,
 ) -> None:
@@ -941,7 +1120,7 @@ def test_a_recorded_output_violation_beats_the_wall_clock_deadline(
     )
 
 
-@requires_macos
+@requires_posix
 def test_teardown_reaches_the_original_process_group(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -969,7 +1148,7 @@ def test_teardown_reaches_the_original_process_group(
         os.kill(descendant, 0)
 
 
-@requires_macos
+@requires_posix
 def test_the_direct_child_is_reaped_so_no_zombie_remains(
     harness: Harness,
 ) -> None:
@@ -982,7 +1161,7 @@ def test_the_direct_child_is_reaped_so_no_zombie_remains(
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
 def test_a_clean_exit_still_tears_down_the_group_it_led(
     harness: Harness,
 ) -> None:
@@ -1005,7 +1184,7 @@ def test_a_clean_exit_still_tears_down_the_group_it_led(
         os.kill(descendant, 0)
 
 
-@requires_macos
+@requires_posix
 def test_exact_pid_cleanup_runs_when_the_case_body_fails() -> None:
 
     class _ForcedFailure(Exception):
@@ -1034,7 +1213,7 @@ def test_exact_pid_cleanup_runs_when_the_case_body_fails() -> None:
     process.wait()
 
 
-@requires_macos
+@requires_posix
 def test_finite_termination_budget_allows_a_cooperative_term_exit(
     harness: Harness,
     tmp_path: Path,
@@ -1086,6 +1265,7 @@ def test_finite_termination_budget_allows_a_cooperative_term_exit(
 
     assert completed.result.outcome == CancelledOutcome()
     assert handled.read_text() == str(child_pid)
+    assert not exact_pid_exists(child_pid)
     assert [
         number
         for number in group_signals
@@ -1093,7 +1273,107 @@ def test_finite_termination_budget_allows_a_cooperative_term_exit(
     ] == [signal.SIGTERM]
 
 
-@requires_macos
+@requires_posix
+def test_forward_parent_signals_cancels_a_long_running_child(
+    harness: Harness,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready = Gate.create(tmp_path, "parent-shutdown-ready")
+    handled = tmp_path / "parent-term-handled"
+    token = CancelToken()
+    group_signals: list[int] = []
+    original_signal_group = dr_exec.execution.engine.signal_process_group
+
+    def record_group_signal(pid: int, number: int, /) -> bool:
+        group_signals.append(number)
+        return original_signal_group(pid, number)
+
+    monkeypatch.setattr(
+        dr_exec.execution.engine,
+        "signal_process_group",
+        record_group_signal,
+    )
+
+    def signal_parent_when_ready() -> int:
+        int(ready.receive())
+        os.kill(os.getpid(), signal.SIGTERM)
+        return 0
+
+    with forward_parent_signals(token):
+        (signaller,) = start_threaded_calls((signal_parent_when_ready,))
+        try:
+            completed = harness.run(
+                python_command(
+                    "import os, signal\n"
+                    "def handle_term(_number, _frame):\n"
+                    f"    with open({str(handled)!r}, 'w') as marker:\n"
+                    "        marker.write(str(os.getpid()))\n"
+                    "    raise SystemExit(0)\n"
+                    "signal.signal(signal.SIGTERM, handle_term)\n"
+                    f"with open({str(ready.path)!r}, 'w') as gate:\n"
+                    "    gate.write(str(os.getpid()))\n"
+                    "signal.pause()\n"
+                ),
+                budgets=Budgets(wall_time=WATCHDOG_WALL_TIME),
+                self_budgets=ExecutorSelfBudgets(
+                    termination_time=FiniteDurationLimit.from_seconds(1)
+                ),
+                cancellation=token,
+            )
+        finally:
+            finish_threaded_calls((signaller,))
+
+    assert completed.result.outcome == CancelledOutcome()
+    assert handled.read_text() != ""
+    assert not exact_pid_exists(int(handled.read_text()))
+    assert [
+        number
+        for number in group_signals
+        if number in {signal.SIGTERM, signal.SIGKILL}
+    ] == [signal.SIGTERM]
+
+
+@requires_posix
+def test_a_multi_hour_wall_budget_still_honors_cancellation(
+    harness: Harness,
+    tmp_path: Path,
+) -> None:
+    ready = Gate.create(tmp_path, "long-budget-ready")
+    token = CancelToken()
+
+    def cancel_ready_child() -> int:
+        int(ready.receive())
+        token.cancel()
+        return 0
+
+    (canceller,) = start_threaded_calls((cancel_ready_child,))
+    try:
+        completed = harness.run(
+            python_command(
+                "import signal\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"with open({str(ready.path)!r}, 'w') as gate:\n"
+                "    gate.write(str(__import__('os').getpid()))\n"
+                "signal.pause()\n"
+            ),
+            budgets=Budgets(
+                wall_time=FiniteDurationLimit(
+                    max_ns=4 * 3600 * 1_000_000_000,
+                )
+            ),
+            self_budgets=ExecutorSelfBudgets(
+                termination_time=FiniteDurationLimit.from_seconds(2)
+            ),
+            cancellation=token,
+        )
+    finally:
+        finish_threaded_calls((canceller,))
+
+    assert completed.result.outcome == CancelledOutcome()
+
+
+@requires_posix
 def test_finite_termination_budget_escalates_a_term_ignoring_child(
     harness: Harness,
     tmp_path: Path,
@@ -1147,7 +1427,7 @@ def test_finite_termination_budget_escalates_a_term_ignoring_child(
     ] == [signal.SIGTERM, signal.SIGKILL]
 
 
-@requires_macos
+@requires_posix
 def test_a_descendant_that_leaves_the_session_escapes_the_claim(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1188,7 +1468,7 @@ def test_a_descendant_that_leaves_the_session_escapes_the_claim(
     assert record.state is RecordState.RUNNING
 
 
-@requires_macos
+@requires_posix
 def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1230,7 +1510,7 @@ def test_an_escapee_holding_a_full_stdin_pipe_still_returns_the_join_failure(
     assert record.state is RecordState.RUNNING
 
 
-@requires_macos
+@requires_posix
 def test_pre_spawn_cancellation_records_without_launching_a_child(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1252,7 +1532,7 @@ def test_pre_spawn_cancellation_records_without_launching_a_child(
     assert record.state is RecordState.FINALIZED
 
 
-@requires_macos
+@requires_posix
 def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1283,7 +1563,7 @@ def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     assert record.state is RecordState.FINALIZED
 
 
-@requires_macos
+@requires_posix
 def test_a_completed_run_finalizes_with_digest_matching_sidecars(
     harness: Harness,
 ) -> None:
@@ -1308,7 +1588,7 @@ def test_a_completed_run_finalizes_with_digest_matching_sidecars(
     )
 
 
-@requires_macos
+@requires_posix
 def test_the_record_carries_the_declaration_digest_but_never_argv(
     harness: Harness,
 ) -> None:
@@ -1328,7 +1608,7 @@ def test_the_record_carries_the_declaration_digest_but_never_argv(
     assert len(target_record.canonical_declaration_sha256) == 64
 
 
-@requires_macos
+@requires_posix
 def test_the_record_names_granted_variables_but_never_their_values(
     harness: Harness,
 ) -> None:
@@ -1344,7 +1624,7 @@ def test_the_record_names_granted_variables_but_never_their_values(
     assert "the-secret-value" not in manifest
 
 
-@requires_macos
+@requires_posix
 def test_a_spawn_absence_finalizes_directly_from_prepared(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1368,7 +1648,7 @@ def test_a_spawn_absence_finalizes_directly_from_prepared(
     assert record.state is RecordState.FINALIZED
 
 
-@requires_macos
+@requires_posix
 def test_the_running_manifest_is_published_while_the_child_is_alive(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1481,7 +1761,7 @@ class _GatedMarkingStore(DirectoryRunStore):
         return DirectoryRunStore.mark_running(self, prepared_run, process)
 
 
-@requires_macos
+@requires_posix
 def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
     tmp_path: Path,
     host_runtime: IsolatedHostPythonRuntime,
@@ -1518,7 +1798,7 @@ def test_the_running_publish_does_not_stall_a_child_that_fills_a_pipe(
     assert store.load(reference_of(completed)).state is RecordState.FINALIZED
 
 
-@requires_macos
+@requires_posix
 def test_declared_stdin_larger_than_a_pipe_buffer_survives_the_publish(
     tmp_path: Path,
     host_runtime: IsolatedHostPythonRuntime,
@@ -1567,7 +1847,7 @@ class _UnwritableStore(DirectoryRunStore):
         )
 
 
-@requires_macos
+@requires_posix
 def test_finalization_failure_degrades_the_receipt_not_the_outcome(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1606,7 +1886,7 @@ class _UnmarkableStore(DirectoryRunStore):
         )
 
 
-@requires_macos
+@requires_posix
 def test_a_failed_running_publication_degrades_the_receipt_by_name(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1641,7 +1921,7 @@ class _UnpreparableStore(DirectoryRunStore):
         )
 
 
-@requires_macos
+@requires_posix
 def test_prepare_failure_prevents_the_spawn_and_raises(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1668,7 +1948,7 @@ def test_prepare_failure_prevents_the_spawn_and_raises(
     assert not marker.exists()
 
 
-@requires_macos
+@requires_posix
 def test_measurements_describe_the_attempt_the_engine_observed(
     harness: Harness,
 ) -> None:
@@ -1684,7 +1964,7 @@ def test_measurements_describe_the_attempt_the_engine_observed(
     assert measurements.protocol_bytes_received == 0
 
 
-@requires_macos
+@requires_posix
 def test_concurrent_calls_keep_their_attempts_fully_separate(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1746,7 +2026,7 @@ def test_concurrent_calls_keep_their_attempts_fully_separate(
     assert len(attempt_ids) == call_count
 
 
-@requires_macos
+@requires_posix
 def test_every_call_gets_a_fresh_child_and_distinct_job_ids_get_distinct_attempt_ids(
     harness: Harness,
 ) -> None:
@@ -1780,7 +2060,8 @@ def test_every_call_gets_a_fresh_child_and_distinct_job_ids_get_distinct_attempt
     )
 
 
-@requires_macos
+@requires_posix
+@assert_fd_count_unchanged
 def test_bootstrap_launch_failure_closes_every_attempt_resource(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1798,7 +2079,7 @@ def test_bootstrap_launch_failure_closes_every_attempt_resource(
         executable: str,
         argv: tuple[str, ...],
         environment: dict[str, str],
-        scratch_directory: str,
+        working_directory: str,
         descriptor_map: tuple[tuple[int, int], ...],
         status_write: int,
     ) -> subprocess.Popen[bytes]:
@@ -1806,7 +2087,7 @@ def test_bootstrap_launch_failure_closes_every_attempt_resource(
             executable,
             argv,
             environment,
-            scratch_directory,
+            working_directory,
             descriptor_map,
             status_write,
         )
@@ -1818,13 +2099,13 @@ def test_bootstrap_launch_failure_closes_every_attempt_resource(
     monkeypatch.setattr(
         dr_exec.execution.engine, "launch_bootstrap", failing_launch
     )
-    before = len(os.listdir("/dev/fd"))
+    before = open_fd_count()
 
     with pytest.raises(ExecutorFailure, match="could not start") as raised:
         harness.run(python_command("pass"))
 
     assert isinstance(raised.value.__cause__, OSError)
-    assert len(os.listdir("/dev/fd")) == before
+    assert open_fd_count() == before
     assert len(scratch_paths) == 1
     assert not scratch_paths[0].exists()
     record = harness.store.load(harness.only_record_reference())
@@ -1833,7 +2114,8 @@ def test_bootstrap_launch_failure_closes_every_attempt_resource(
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
+@assert_fd_count_unchanged
 def test_a_started_output_worker_failure_raises_after_lifecycle_cleanup(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1844,7 +2126,7 @@ def test_a_started_output_worker_failure_raises_after_lifecycle_cleanup(
     monkeypatch.setattr(
         dr_exec.execution.engine._OutputPump, "run", failing_run
     )
-    before = len(os.listdir("/dev/fd"))
+    before = open_fd_count()
 
     with pytest.raises(
         ExecutorFailure, match="output transport worker"
@@ -1856,14 +2138,14 @@ def test_a_started_output_worker_failure_raises_after_lifecycle_cleanup(
         )
 
     assert isinstance(exc.value.__cause__, RuntimeError)
-    assert len(os.listdir("/dev/fd")) == before
+    assert open_fd_count() == before
     record = harness.store.load(harness.only_record_reference())
     assert record.state is RecordState.RUNNING
     with pytest.raises(ChildProcessError):
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
 def test_an_escaped_stdin_oserror_remains_ordinary_transport_behavior(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1878,7 +2160,7 @@ def test_an_escaped_stdin_oserror_remains_ordinary_transport_behavior(
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
 
 
-@requires_macos
+@requires_posix
 def test_a_store_failure_after_the_spawn_still_reaps_the_direct_child(
     harness: Harness,
 ) -> None:
@@ -1902,7 +2184,7 @@ def test_a_store_failure_after_the_spawn_still_reaps_the_direct_child(
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
 def test_a_thread_that_cannot_start_still_tears_down_the_group(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1938,7 +2220,8 @@ def test_a_thread_that_cannot_start_still_tears_down_the_group(
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
+@assert_fd_count_unchanged
 def test_a_partial_transport_start_leaks_no_descriptor(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1974,14 +2257,14 @@ def test_a_partial_transport_start_leaks_no_descriptor(
             harness.execute(job)
 
     attempt()
-    before = len(os.listdir("/dev/fd"))
+    before = open_fd_count()
     for _ in range(8):
         attempt()
 
-    assert len(os.listdir("/dev/fd")) == before
+    assert open_fd_count() == before
 
 
-@requires_macos
+@requires_posix
 def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1993,7 +2276,7 @@ def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
         executable: str,
         argv: tuple[str, ...],
         environment: dict[str, str],
-        scratch_directory: str,
+        working_directory: str,
         descriptor_map: tuple[tuple[int, int], ...],
         status_write: int,
     ) -> subprocess.Popen[bytes]:
@@ -2004,7 +2287,7 @@ def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
             executable=executable,
             argv=argv,
             environment=environment,
-            scratch_directory=scratch_directory,
+            working_directory=working_directory,
             descriptor_map=descriptor_map,
             status_write=status_write,
         )
@@ -2029,7 +2312,7 @@ def test_a_stalled_bootstrap_is_stopped_by_the_startup_budget(
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
 def test_a_helper_stopped_before_setsid_is_still_reaped(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2043,7 +2326,7 @@ def test_a_helper_stopped_before_setsid_is_still_reaped(
         *,
         executable: str,
         argv: tuple[str, ...],
-        scratch_directory: str,
+        working_directory: str,
         descriptor_map: tuple[tuple[int, int], ...],
         status_descriptor: int,
     ) -> str:
@@ -2053,7 +2336,7 @@ def test_a_helper_stopped_before_setsid_is_still_reaped(
         return prologue + original(
             executable=executable,
             argv=argv,
-            scratch_directory=scratch_directory,
+            working_directory=working_directory,
             descriptor_map=descriptor_map,
             status_descriptor=status_descriptor,
         )
@@ -2079,7 +2362,7 @@ def test_a_helper_stopped_before_setsid_is_still_reaped(
         os.waitpid(-1, os.WNOHANG)
 
 
-@requires_macos
+@requires_posix
 def test_an_unbudgeted_startup_axis_installs_no_deadline(
     harness: Harness,
 ) -> None:
@@ -2091,7 +2374,7 @@ def test_an_unbudgeted_startup_axis_installs_no_deadline(
     assert completed.result.outcome == ExitedOutcome(exit_code=0)
 
 
-@requires_macos
+@requires_posix
 def test_a_setup_failure_after_setsid_still_tears_down_the_group(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,15 +1,16 @@
 [[contracts]]
-title = "Production execution is local and macOS-only"
+title = "Production execution is local POSIX qualified on macOS and Linux"
 statement = """
 `ProcessExecutor` v1 production execution runs one machine-local child per job \
-on macOS through one direct-argv execution path. It invokes no shell or remote \
-executor. In-process importable JSON execution uses a separate executor and is \
-not isolated by a child process. Worker pool importable JSON execution uses a \
-separate executor whose worker processes provide parallelism, not isolation."""
+on qualified POSIX platforms through one direct-argv execution path. It \
+invokes no shell or remote executor. In-process importable JSON execution \
+uses a separate executor and is not isolated by a child process. Worker pool \
+importable JSON execution uses a separate executor whose worker processes \
+provide parallelism, not isolation."""
 rationale = """
-One qualified platform and one lifecycle owner keep spawning, transport, \
+Qualified POSIX platforms and one lifecycle owner keep spawning, transport, \
 budget enforcement, teardown, attribution, and recording on the same path."""
-date = "2026-08-05"
+date = "2026-08-18"
 
 [[contracts]]
 title = "Trust is explicit and containment claims are narrow"
@@ -25,17 +26,46 @@ must not be presented as a restriction on what the payload can access."""
 date = "2026-08-05"
 
 [[contracts]]
-title = "Inherited state and scratch space are call-local"
+title = "Inherited state and working directory are call-local"
 statement = """
-A child receives environment values only through its explicit grant, uses a \
-fresh per-run scratch directory as its working directory, and inherits only \
-the descriptors required by its target transport. Scratch cleanup is attempted \
-on every exit path but is best-effort and silent."""
+A child receives environment values only through its explicit grant, uses the \
+working directory declared on its job, and inherits only the descriptors \
+required by its target transport. A scratch working-directory grant creates a \
+fresh per-run directory that the executor best-effort removes on every exit \
+path; a caller working-directory grant uses the supplied absolute path, \
+canonicalized through ``Path.resolve()`` for spawn and persistence, and the \
+executor never removes it."""
 rationale = """
 Explicit state keeps concurrent attempts independent. Cleanup failure cannot \
 replace an otherwise trustworthy result, and v1 has no narration surface on \
 which to report it."""
-date = "2026-08-05"
+date = "2026-08-18"
+
+[[contracts]]
+title = "Caller workspace paths persist as declaration evidence"
+statement = """
+Run records persist the resolved absolute path for caller working-directory \
+grants on `RunDeclaration.workspace`. This is declaration evidence for replay \
+and audit, not a store locator; `RunRecordReference` remains the only \
+backend-neutral access path."""
+rationale = """
+Caller grants name a durable directory the executor does not own. Persisting \
+the resolved path makes the declared cwd reconstructible without teaching \
+callers to join storage layout."""
+date = "2026-08-18"
+
+[[contracts]]
+title = "Parent shutdown signals map to cooperative cancellation"
+statement = """
+`forward_parent_signals()` installs SIGTERM and SIGINT handlers on the main \
+thread that call `CancelToken.cancel()`. Cluster workers wrapping \
+`ProcessExecutor.run_blocking()` should use it on the thread that receives \
+parent shutdown so teardown runs through the normal cancellation and default \
+finite `termination_time` grace path."""
+rationale = """
+Explicit parent-signal forwarding keeps shutdown behavior on the same \
+cancellation and escalation path as in-process token cancellation."""
+date = "2026-08-18"
 
 [[contracts]]
 title = "Isolated host Python is not a verified runtime closure"
@@ -66,16 +96,17 @@ date = "2026-08-05"
 [[contracts]]
 title = "Self-budgets are enforced only at owned v1 boundaries"
 statement = """
-Executor self-budgets default to explicitly unbudgeted. V1 enforces finite \
-startup, termination, and join time, plus protocol frame bytes, total bytes, \
-output count, and JSON depth. Run-record manifests publish within a fixed \
-256 MiB structural parser ceiling that is not an executor self-budget axis. \
-V1 exposes no narration surface."""
+Executor self-budgets default to explicitly unbudgeted except a finite \
+30-second termination grace; ``ExecutorSelfBudgets.unbudgeted()`` opts every \
+axis out explicitly. V1 enforces finite startup, termination, and join time, \
+plus protocol frame bytes, total bytes, output count, and JSON depth. \
+Run-record manifests publish within a fixed 256 MiB structural parser ceiling \
+that is not an executor self-budget axis. V1 exposes no narration surface."""
 rationale = """
 A self-budget axis belongs in recorded identity only when v1 enforces it at an \
 owned boundary. Structural parser ceilings are safety bounds, not caller \
 self-budget declarations."""
-date = "2026-08-06"
+date = "2026-08-18"
 
 [[contracts]]
 title = "Lifecycle reach ends at the original process group"
@@ -347,9 +378,10 @@ statement = """
 `ImportableJsonExecutor` runs trusted `InProcessImportableJsonTarget` jobs \
 synchronously in the caller interpreter through one importable entry point \
 lookup and one JSON call. It creates no durable run record, accepts no \
-environment grant, rejects process and untrusted targets, rejects finite \
-payload_output budgets, and makes no containment claim beyond caller-side \
-trust in the declared entry point."""
+environment grant, accepts only scratch working-directory grants, rejects \
+process and untrusted targets, rejects finite payload_output budgets, and \
+makes no containment claim beyond caller-side trust in the declared entry \
+point."""
 rationale = """
 Trusted preprocessing and similar workloads need pool-driven throughput without \
 a second thread pool or subprocess overhead. The separate target kind keeps \
@@ -382,12 +414,12 @@ jobs across long-lived worker processes. Workers are freshly spawned \
 interpreters, never forked, and each imports its entry point exactly once, so a \
 pool is bound to one entry point for its lifetime and rejects jobs naming \
 another. Worker processes exist for parallelism on real cores: the mode creates \
-no durable run record, accepts no environment grant, and makes no containment \
-or isolation claim, though crash containment follows as a side effect. The \
-parent and worker exchange the existing importable JSON envelope as canonical \
-JSON over dedicated pipes with no pickle in either direction, and the parent \
-drains a worker's results concurrently with writing its requests so no payload \
-size can deadlock the pair."""
+no durable run record, accepts no environment grant, accepts only scratch \
+working-directory grants, and makes no containment or isolation claim, though \
+crash containment follows as a side effect. The parent and worker exchange the \
+existing importable JSON envelope as canonical JSON over dedicated pipes with \
+no pickle in either direction, and the parent drains a worker's results \
+concurrently with writing its requests so no payload size can deadlock the pair."""
 rationale = """
 Trusted CPU-bound fan-out has no execution mode when spawn-per-job startup \
 dominates millisecond work and in-process threads serialize under the GIL. \

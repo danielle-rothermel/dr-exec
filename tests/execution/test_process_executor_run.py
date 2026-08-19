@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from dr_serialize import build_identity_document
+from support.process import requires_posix
 
 from dr_exec import (
     Budgets,
@@ -19,6 +20,7 @@ from dr_exec import (
     ExecutorSelfBudgets,
     ExitedOutcome,
     FinalizedRecord,
+    FiniteDurationLimit,
     ImportableEntryPoint,
     InProcessImportableJsonTarget,
     IsolatedHostPythonRuntime,
@@ -31,11 +33,6 @@ from dr_exec import (
 
 if TYPE_CHECKING:
     from dr_exec.recording.models import CompletedExecution
-
-requires_macos = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="real macOS process semantics",
-)
 
 
 @pytest.fixture
@@ -84,10 +81,10 @@ def reference_of(completed: CompletedExecution, /) -> RunRecordReference:
     return receipt.reference
 
 
-@requires_macos
+@requires_posix
 @pytest.mark.integration
 @pytest.mark.subprocess
-@pytest.mark.platform_macos
+@pytest.mark.platform_posix
 def test_run_binds_the_finalized_manifest_to_the_returned_execution(
     executor: ProcessExecutor,
     store: DirectoryRunStore,
@@ -132,7 +129,7 @@ def test_an_in_process_target_is_refused_before_declaration_validation(
     assert raised.value.code is ExecutorFailureCode.TARGET_NOT_SUPPORTED
 
 
-def test_run_defaults_to_unbudgeted_self_budgets(
+def test_run_defaults_to_production_self_budgets(
     store: DirectoryRunStore,
     host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
@@ -141,4 +138,7 @@ def test_run_defaults_to_unbudgeted_self_budgets(
         run_store=store,
     )
 
-    assert executor.self_budgets == ExecutorSelfBudgets.unbudgeted()
+    assert executor.self_budgets == ExecutorSelfBudgets()
+    termination = executor.self_budgets.termination_time
+    assert isinstance(termination, FiniteDurationLimit)
+    assert termination.max_ns == 30_000_000_000

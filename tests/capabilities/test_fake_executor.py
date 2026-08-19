@@ -24,6 +24,7 @@ from dr_exec import (
     ExecutorFailure,
     FakeExecutor,
     JobId,
+    WorkingDirectoryGrant,
 )
 
 WATCHDOG_SECONDS = 30.0
@@ -69,6 +70,20 @@ def test_an_empty_queue_still_admits_a_responder() -> None:
     assert executor.run_blocking(job()).record_receipt.kind is (
         fake_completion().record_receipt.kind
     )
+
+
+def test_fake_executor_accepts_a_nonexistent_caller_workspace() -> None:
+    executor = FakeExecutor([fake_completion()])
+    caller_job = job_for(
+        trusted_target(("/usr/bin/true",)),
+        workspace=WorkingDirectoryGrant.caller(
+            Path("/nonexistent/dr-exec-fake-workspace")
+        ),
+    )
+
+    executor.run_blocking(caller_job)
+
+    assert executor.calls == (caller_job,)
 
 
 def test_queued_responses_are_returned_in_declared_order() -> None:

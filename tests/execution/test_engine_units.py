@@ -15,6 +15,7 @@ from dr_exec import (
     BudgetExceededOutcome,
     Budgets,
     CancelledOutcome,
+    CancelToken,
     ExecutorFailure,
     ExecutorSelfBudgets,
     ExitedOutcome,
@@ -231,7 +232,7 @@ def test_the_helper_embeds_every_declared_value_as_an_inert_literal() -> None:
     source = spawn_bootstrap_source(
         executable=hostile,
         argv=(hostile, hostile),
-        scratch_directory=hostile,
+        working_directory=hostile,
         descriptor_map=((7, 0),),
         status_descriptor=9,
     )
@@ -241,7 +242,7 @@ def test_the_helper_embeds_every_declared_value_as_an_inert_literal() -> None:
     exec(bindings, namespace)  # noqa: S102 - the embedding is under test
     assert namespace["_DR_EXEC_EXECUTABLE"] == hostile
     assert namespace["_DR_EXEC_ARGV"] == [hostile, hostile]
-    assert namespace["_DR_EXEC_SCRATCH_DIRECTORY"] == hostile
+    assert namespace["_DR_EXEC_WORKING_DIRECTORY"] == hostile
     assert namespace["_DR_EXEC_DESCRIPTOR_MAP"] == [[7, 0]]
 
 
@@ -249,7 +250,7 @@ def test_the_helper_renders_the_pinned_literals_once_each() -> None:
     source = spawn_bootstrap_source(
         executable="/bin/true",
         argv=("/bin/true",),
-        scratch_directory="/tmp",
+        working_directory="/tmp",
         descriptor_map=((7, 0),),
         status_descriptor=9,
     )
@@ -421,6 +422,43 @@ def test_await_child_wakes_for_transport_failure_without_a_wall_budget() -> (
 
     assert result is None
     assert child.wait_timeouts == [_COOPERATIVE_WAKE_SECONDS]
+
+
+@dataclass
+class _CancellingBlockingChild:
+    token: CancelToken
+    target_wakes: int
+    wait_timeouts: list[float | None] = field(default_factory=list)
+
+    def poll(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        import subprocess
+
+        self.wait_timeouts.append(timeout)
+        if len(self.wait_timeouts) >= self.target_wakes:
+            self.token.cancel()
+        raise subprocess.TimeoutExpired(cmd="child", timeout=timeout or 0)
+
+
+def test_await_child_survives_many_unbudgeted_poll_iterations() -> None:
+    token = CancelToken()
+    target_wakes = 2_000
+    child = _CancellingBlockingChild(token=token, target_wakes=target_wakes)
+
+    result = _await_child(
+        cast("subprocess.Popen[bytes]", child),
+        _DrainState(retention=PayloadRetention.for_budget(UnbudgetedLimit())),
+        deadline_ns=None,
+        fail_on_overflow=False,
+        cancellation=token,
+        transport_failed=lambda: False,
+    )
+
+    assert result is not None
+    assert result.cancelled
+    assert len(child.wait_timeouts) == target_wakes
 
 
 def test_a_transport_worker_captures_non_exception_base_failures() -> None:

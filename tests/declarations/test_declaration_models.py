@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,6 +27,9 @@ from dr_exec import (
     UnbudgetedLimit,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
+    WorkingDirectoryGrantKind,
+    WorkingDirectoryGrantRecord,
 )
 
 if TYPE_CHECKING:
@@ -384,3 +388,78 @@ def test_budgets_accept_the_finite_limits_v1_enforces() -> None:
 
     assert budgets.wall_time == wall_time
     assert budgets.input_bytes == input_bytes
+
+
+def test_finite_duration_limit_from_seconds_converts_to_nanoseconds() -> None:
+    limit = FiniteDurationLimit.from_seconds(30)
+
+    assert limit.max_ns == 30_000_000_000
+
+
+def test_finite_duration_limit_from_seconds_rejects_nonpositive() -> None:
+    with pytest.raises(ValueError, match="positive finite number"):
+        FiniteDurationLimit.from_seconds(0)
+
+
+def test_finite_duration_limit_from_seconds_rejects_sub_nanosecond_values() -> (
+    None
+):
+    with pytest.raises(ValueError, match="positive nanosecond count"):
+        FiniteDurationLimit.from_seconds(1e-10)
+
+
+def test_finite_duration_limit_from_seconds_rejects_overflow() -> None:
+    with pytest.raises(ValueError, match="positive nanosecond count"):
+        FiniteDurationLimit.from_seconds(float(2**256))
+
+
+def test_scratch_working_directory_grants_reject_a_path() -> None:
+    with pytest.raises(ValueError, match="scratch working-directory"):
+        WorkingDirectoryGrant(
+            kind=WorkingDirectoryGrantKind.SCRATCH,
+            path=Path("/tmp"),
+        )
+
+
+def test_caller_working_directory_grants_require_a_path() -> None:
+    with pytest.raises(ValueError, match="caller working-directory"):
+        WorkingDirectoryGrant(kind=WorkingDirectoryGrantKind.CALLER)
+
+
+def test_caller_working_directory_grant_records_reject_noncanonical_paths() -> (
+    None
+):
+    with pytest.raises(ValueError, match="canonical"):
+        WorkingDirectoryGrantRecord(
+            kind=WorkingDirectoryGrantKind.CALLER,
+            path="/tmp/../private/tmp/example",
+        )
+
+
+def test_caller_working_directory_grant_records_accept_portable_paths() -> (
+    None
+):
+    record = WorkingDirectoryGrantRecord(
+        kind=WorkingDirectoryGrantKind.CALLER,
+        path="/tmp/example",
+    )
+
+    assert record.path == "/tmp/example"
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/tmp/./workspace",
+        "/tmp//workspace",
+        "/tmp/workspace/",
+    ),
+)
+def test_caller_working_directory_grant_records_reject_lossy_posix_paths(
+    path: str,
+) -> None:
+    with pytest.raises(ValueError, match="canonical"):
+        WorkingDirectoryGrantRecord(
+            kind=WorkingDirectoryGrantKind.CALLER,
+            path=path,
+        )

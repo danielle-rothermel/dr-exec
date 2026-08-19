@@ -20,12 +20,12 @@ from dr_exec.scheduling.scheduler import run_batch
 
 @dataclass(frozen=True, slots=True)
 class ProcessExecutor:
-    """Production executor supported on macOS only."""
+    """Production executor supported on qualified POSIX platforms."""
 
     runtime: Runtime
     run_store: RunStore
     self_budgets: ExecutorSelfBudgets = field(
-        default_factory=ExecutorSelfBudgets.unbudgeted
+        default_factory=ExecutorSelfBudgets
     )
 
     async def run(

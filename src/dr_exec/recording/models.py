@@ -22,6 +22,7 @@ from dr_exec.core.kinds import (
     ProtocolFailureCode,
     RecordReceiptKind,
     RecordState,
+    WorkingDirectoryGrantKind,
 )
 from dr_exec.core.model import (
     Base64UrlBytes,
@@ -32,6 +33,9 @@ from dr_exec.core.model import (
 )
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import Budgets, EnvGrantRecord
+from dr_exec.declarations.validation import (
+    persisted_caller_workspace_path_shape_error,
+)
 from dr_exec.recording.identity import (
     validate_executor_config_identity,
     validate_executor_identity,
@@ -96,11 +100,46 @@ type ExecutionTargetRecord = Annotated[
 ]
 
 
+class WorkingDirectoryGrantRecord(ContractModel):
+    kind: WorkingDirectoryGrantKind
+    path: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @classmethod
+    def scratch(cls) -> WorkingDirectoryGrantRecord:
+        return cls(kind=WorkingDirectoryGrantKind.SCRATCH)
+
+    @model_validator(mode="after")
+    def path_must_match_kind(self) -> WorkingDirectoryGrantRecord:
+        if (
+            self.kind == WorkingDirectoryGrantKind.SCRATCH
+            and self.path is not None
+        ):
+            raise ValueError(
+                "scratch working-directory grants must not contain a path"
+            )
+        if self.kind == WorkingDirectoryGrantKind.CALLER:
+            if self.path is None:
+                raise ValueError(
+                    "caller working-directory grants require an absolute path"
+                )
+            shape_error = persisted_caller_workspace_path_shape_error(
+                self.path
+            )
+            if shape_error is not None:
+                raise ValueError(shape_error)
+        return self
+
+
 class RunDeclaration(ContractModel):
     execution_id: ExecutionId
     target: ExecutionTargetRecord
     env: EnvGrantRecord
     budgets: Budgets
+    workspace: WorkingDirectoryGrantRecord = Field(
+        default_factory=WorkingDirectoryGrantRecord.scratch
+    )
 
 
 class ProcessRecord(ContractModel):
@@ -459,4 +498,5 @@ __all__ = [
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTargetRecord",
     "WorkerPoolRecordReceipt",
+    "WorkingDirectoryGrantRecord",
 ]

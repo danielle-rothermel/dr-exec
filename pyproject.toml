@@ -1,6 +1,6 @@
 [project]
 name = "dr-exec"
-version = "0.1.10"
+version = "0.1.11"
 description = "Contract-driven local process execution"
 readme = "README.md"
 license = "MIT"
@@ -37,7 +37,7 @@ addopts = "--strict-markers --strict-config"
 markers = [
     "integration: crosses a filesystem, runtime, or process boundary",
     "subprocess: starts, probes, or supervises a real child process",
-    "platform_macos: qualifies behavior supported only on macOS",
+    "platform_posix: qualifies behavior on macOS and Linux",
     "serial_fork: calls os.fork directly and must run outside xdist workers",
 ]
 

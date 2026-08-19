@@ -22,6 +22,12 @@ class EnvGrantKind(StrEnum):
 
 
 @verify(UNIQUE)
+class WorkingDirectoryGrantKind(StrEnum):
+    SCRATCH = "scratch"
+    CALLER = "caller"
+
+
+@verify(UNIQUE)
 class LimitKind(StrEnum):
     UNBUDGETED = "unbudgeted"
     FINITE = "finite"
@@ -159,4 +165,5 @@ __all__ = [
     "RecordReceiptKind",
     "RecordState",
     "RuntimeKind",
+    "WorkingDirectoryGrantKind",
 ]

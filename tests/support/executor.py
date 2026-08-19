@@ -32,6 +32,7 @@ from dr_exec import (
     TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
 )
 
 ECHO_DRIVER = """
@@ -123,12 +124,16 @@ def job_for(
     *,
     env: EnvGrant | None = None,
     budgets: Budgets | None = None,
+    workspace: WorkingDirectoryGrant | None = None,
 ) -> ExecutionJob:
     return ExecutionJob(
         job_id=JobId(uuid4()),
         target=target,
         env=EnvGrant.none() if env is None else env,
         budgets=Budgets.unbudgeted() if budgets is None else budgets,
+        workspace=(
+            WorkingDirectoryGrant.scratch() if workspace is None else workspace
+        ),
     )
 
 

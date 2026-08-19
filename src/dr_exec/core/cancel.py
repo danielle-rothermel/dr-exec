@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from threading import Event
+import signal
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import cast
 
 
 class CancelToken:
@@ -9,7 +13,7 @@ class CancelToken:
     __slots__ = ("_event",)
 
     def __init__(self) -> None:
-        self._event = Event()
+        self._event = threading.Event()
 
     def cancel(self) -> None:
         self._event.set()
@@ -22,4 +26,36 @@ class CancelToken:
         return self._event.wait(timeout)
 
 
-__all__ = ["CancelToken"]
+@contextmanager
+def forward_parent_signals(token: CancelToken, /) -> Iterator[None]:
+    """Map SIGTERM and SIGINT received by this process to ``token.cancel()``.
+
+    Install this on the thread or process that receives parent shutdown
+    signals, typically the main thread of a worker wrapping ``run_blocking()``.
+    ``signal.signal`` is main-thread-only in CPython, so this context manager
+    raises ``ValueError`` when entered from any other thread.
+    """
+
+    if threading.current_thread() is not threading.main_thread():
+        raise ValueError(
+            "forward_parent_signals must be installed on the main thread"
+        )
+
+    previous: dict[int, signal.Handlers] = {}
+
+    def forward(_signum: int, _frame: object) -> None:
+        token.cancel()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous[signum] = cast(
+            signal.Handlers,
+            signal.signal(signum, forward),
+        )
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+__all__ = ["CancelToken", "forward_parent_signals"]

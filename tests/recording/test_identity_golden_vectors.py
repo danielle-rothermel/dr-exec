@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from dr_serialize import (
     build_identity_document,
@@ -21,12 +23,15 @@ from dr_exec import (
     TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
 )
+from dr_exec.core.model import canonical_model_bytes
 from dr_exec.recording.identity import (
     _canonical_env_values_digest,
     build_env_grant_record,
     build_executor_config_identity,
     build_executor_identity,
+    build_working_directory_grant_record,
     canonical_declaration_digest,
     validate_executor_config_identity,
     validate_executor_identity,
@@ -100,6 +105,21 @@ def test_unbudgeted_executor_config_identity_is_pinned() -> None:
     )
 
 
+def test_default_executor_config_identity_is_pinned() -> None:
+    document = build_executor_config_identity(ExecutorSelfBudgets())
+    assert canonical_identity_json_bytes(document) == (
+        b'{"payload":{"join_time":{"kind":"unbudgeted"},"json_depth":{"kind":'
+        b'"unbudgeted"},"protocol_frame_bytes":{"kind":"unbudgeted"},'
+        b'"protocol_output_count":{"kind":"unbudgeted"},"protocol_total_bytes":'
+        b'{"kind":"unbudgeted"},"startup_time":{"kind":"unbudgeted"},'
+        b'"termination_time":{"kind":"finite","max_ns":30000000000}},'
+        b'"schema":"dr_exec.executor_config","schema_version":1}'
+    )
+    assert identity_document_hash(document) == (
+        "d9dcc8c8dc0034b938aca36f80c227b36ca5f1b7f6a7334e95ec39278eda873d"
+    )
+
+
 def test_representative_finite_executor_config_identity_is_pinned() -> None:
     document = build_executor_config_identity(
         ExecutorSelfBudgets(
@@ -114,10 +134,11 @@ def test_representative_finite_executor_config_identity_is_pinned() -> None:
         b'"protocol_output_count":{"kind":"finite","max_count":3},'
         b'"protocol_total_bytes":{"kind":"unbudgeted"},"startup_time":{"kind":'
         b'"finite","max_ns":5000000000},"termination_time":{"kind":'
-        b'"unbudgeted"}},"schema":"dr_exec.executor_config","schema_version":1}'
+        b'"finite","max_ns":30000000000}},"schema":"dr_exec.executor_config",'
+        b'"schema_version":1}'
     )
     assert identity_document_hash(document) == (
-        "9bee8d00b961b2ff935270b47e251a0cff7c25c4a8e1ef841a68ee79f4dc2a1e"
+        "f1a55f23016b436c8dee86aad958ebe8aaf9059beb41ec89aebd83e1374e80b9"
     )
 
 
@@ -298,3 +319,23 @@ def test_env_grant_names_use_canonical_not_local_ordering() -> None:
     assert record.var_names == ("Z", "é", "a")
     assert record.var_names != tuple(sorted(names))
     assert record.excluded_var_names == ("Q", "ü")
+
+
+def test_scratch_working_directory_grant_record_shape_is_pinned() -> None:
+    record = build_working_directory_grant_record(
+        WorkingDirectoryGrant.scratch()
+    )
+    assert canonical_model_bytes(record) == b'{"kind":"scratch"}'
+
+
+def test_caller_working_directory_grant_record_carries_the_resolved_path() -> (
+    None
+):
+    path = Path("/tmp/dr-exec-golden-caller-workspace")
+    record = build_working_directory_grant_record(
+        WorkingDirectoryGrant.caller(path)
+    )
+    assert record.model_dump(exclude_none=True) == {
+        "kind": "caller",
+        "path": path.resolve().as_posix(),
+    }

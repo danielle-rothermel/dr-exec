@@ -13,7 +13,7 @@ from dr_serialize import Jsonable, validate_strict_json
 
 import dr_exec
 
-EXPECTED_ROOT_EXPORT_COUNT = 115
+EXPECTED_ROOT_EXPORT_COUNT = 119
 WATCHDOG_SECONDS = 30.0
 
 
@@ -47,7 +47,7 @@ def main() -> None:
     if missing_exports:
         raise ValueError(f"missing root exports: {missing_exports!r}")
 
-    if sys.platform == "darwin":
+    if sys.platform in {"darwin", "linux"}:
         _check_importable_json_process_jobs(repository_root)
     print(
         f"Validated {len(exports)} root exports from installed wheel at "
