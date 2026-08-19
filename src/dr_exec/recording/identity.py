@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from dr_serialize import (
     IdentityDocument,
@@ -19,6 +19,7 @@ from dr_exec.core.identity import (
     identity_payload,
     require_identity_role,
 )
+from dr_exec.core.kinds import WorkingDirectoryGrantKind
 from dr_exec.core.model import CanonicalUuidSpelling, ContractModel
 from dr_exec.declarations.models import (
     ByteBudget,
@@ -28,6 +29,7 @@ from dr_exec.declarations.models import (
     EnvGrantRecord,
     ExecutionTarget,
     ExecutorSelfBudgets,
+    WorkingDirectoryGrant,
 )
 from dr_exec.recording.provenance import (
     ExecutorSourceSnapshot,
@@ -37,6 +39,9 @@ from dr_exec.recording.provenance import (
 EXECUTOR_IDENTITY_SCHEMA = "dr_exec.executor"
 EXECUTOR_CONFIG_IDENTITY_SCHEMA = "dr_exec.executor_config"
 EXECUTOR_IDENTITY_KIND = "process_executor"
+
+if TYPE_CHECKING:
+    from dr_exec.recording.models import WorkingDirectoryGrantRecord
 
 
 def _validate_git_object_id(value: str | None) -> str | None:
@@ -160,10 +165,26 @@ def build_env_grant_record(grant: EnvGrant, /) -> EnvGrantRecord:
     )
 
 
+def build_working_directory_grant_record(
+    grant: WorkingDirectoryGrant,
+    /,
+) -> WorkingDirectoryGrantRecord:
+    from dr_exec.recording.models import WorkingDirectoryGrantRecord
+
+    if grant.kind == WorkingDirectoryGrantKind.SCRATCH:
+        return WorkingDirectoryGrantRecord(kind=grant.kind)
+    assert grant.path is not None
+    return WorkingDirectoryGrantRecord(
+        kind=grant.kind,
+        path=grant.path.resolve().as_posix(),
+    )
+
+
 __all__ = [
     "build_env_grant_record",
     "build_executor_config_identity",
     "build_executor_identity",
+    "build_working_directory_grant_record",
     "canonical_declaration_digest",
     "validate_executor_config_identity",
     "validate_executor_identity",

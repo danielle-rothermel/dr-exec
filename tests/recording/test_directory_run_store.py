@@ -433,6 +433,7 @@ _PREPARED_LEAF_KEY_PATHS = frozenset(
         "declaration.execution_id.job_id",
         "declaration.target.canonical_declaration_sha256",
         "declaration.target.kind",
+        "declaration.workspace.kind",
         "header.executor_config_identity.payload.join_time.kind",
         "header.executor_config_identity.payload.json_depth.kind",
         "header.executor_config_identity.payload.protocol_frame_bytes.kind",

@@ -49,8 +49,19 @@ exported_symbols = [
 [[terms]]
 name = "scratch workspace"
 definition = """
-A fresh executor-owned working directory dedicated to one execution attempt. \
-It is separate from caller-owned paths and other attempts."""
+An executor-owned working directory dedicated to one execution attempt when the \
+job declares a scratch working-directory grant. It is separate from \
+caller-owned paths and other attempts."""
+
+[[terms]]
+name = "caller workspace"
+definition = """
+A caller-supplied directory used as the child working directory when the job \
+declares a caller working-directory grant. The executor uses it but does not \
+create or remove it."""
+exported_symbols = [
+  "dr_exec.WorkingDirectoryGrant",
+]
 
 [[terms]]
 name = "workload budget"

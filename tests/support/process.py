@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import threading
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -11,6 +12,11 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 import pytest
+
+requires_posix = pytest.mark.skipif(
+    sys.platform not in {"darwin", "linux"},
+    reason="real POSIX process semantics",
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence

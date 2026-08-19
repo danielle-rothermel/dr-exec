@@ -5,6 +5,7 @@ import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from pathlib import Path
 from typing import Annotated, Final, Literal, Self
 
 from dr_serialize import Sha256Digest, canonical_sorted_values
@@ -23,6 +24,7 @@ from dr_exec.core.kinds import (
     ExecutionTargetKind,
     LimitKind,
     OutputOverflowPolicy,
+    WorkingDirectoryGrantKind,
 )
 from dr_exec.core.model import (
     Base64UrlBytes,
@@ -52,6 +54,12 @@ class FiniteByteLimit(ContractModel):
 class FiniteDurationLimit(ContractModel):
     kind: Literal[LimitKind.FINITE] = LimitKind.FINITE
     max_ns: PositiveInt
+
+    @classmethod
+    def from_seconds(cls, seconds: float, /) -> FiniteDurationLimit:
+        if seconds <= 0:
+            raise ValueError("seconds must be positive")
+        return cls(max_ns=int(seconds * 1_000_000_000))
 
     @property
     def limit(self) -> int:
@@ -264,6 +272,33 @@ class EnvGrant:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class WorkingDirectoryGrant:
+    kind: WorkingDirectoryGrantKind
+    path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.kind == WorkingDirectoryGrantKind.SCRATCH
+            and self.path is not None
+        ):
+            raise ValueError(
+                "scratch working-directory grants must not contain a path"
+            )
+        if self.kind == WorkingDirectoryGrantKind.CALLER and self.path is None:
+            raise ValueError(
+                "caller working-directory grants require an absolute path"
+            )
+
+    @classmethod
+    def scratch(cls) -> WorkingDirectoryGrant:
+        return cls(kind=WorkingDirectoryGrantKind.SCRATCH)
+
+    @classmethod
+    def caller(cls, path: Path | str, /) -> WorkingDirectoryGrant:
+        return cls(kind=WorkingDirectoryGrantKind.CALLER, path=Path(path))
+
+
 class EnvGrantRecord(ContractModel):
     kind: EnvGrantKind
     var_names: tuple[str, ...]
@@ -417,6 +452,9 @@ class ExecutionJob:
     target: ExecutionTarget
     env: EnvGrant
     budgets: Budgets = dataclass_field(default_factory=Budgets.unbudgeted)
+    workspace: WorkingDirectoryGrant = dataclass_field(
+        default_factory=WorkingDirectoryGrant.scratch
+    )
 
 
 __all__ = [
@@ -444,4 +482,5 @@ __all__ = [
     "UnbudgetedLimit",
     "UntrustedCommandTarget",
     "UntrustedPythonTarget",
+    "WorkingDirectoryGrant",
 ]

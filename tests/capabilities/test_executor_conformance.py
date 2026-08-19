@@ -15,6 +15,7 @@ from support.executor import (
     trusted_target,
     untrusted_command_target,
 )
+from support.process import requires_posix
 
 from dr_exec import (
     Budgets,
@@ -37,11 +38,6 @@ from dr_exec import (
 
 if TYPE_CHECKING:
     from dr_exec.capabilities.protocols import Executor
-
-requires_macos = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="real macOS process semantics",
-)
 
 
 def build_process_executor(
@@ -67,10 +63,10 @@ EXECUTOR_IMPLEMENTATIONS = [
     pytest.param(
         "process",
         marks=(
-            requires_macos,
+            requires_posix,
             pytest.mark.integration,
             pytest.mark.subprocess,
-            pytest.mark.platform_macos,
+            pytest.mark.platform_posix,
         ),
         id="process",
     ),

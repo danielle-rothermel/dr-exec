@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from support.executor import job_for, python_target, trusted_target
+from support.process import requires_posix
 
 from dr_exec import (
     CompletedExecution,
@@ -28,14 +29,10 @@ from dr_exec import (
 
 WATCHDOG_SECONDS = 120.0
 
-requires_macos = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="real macOS process semantics",
-)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.subprocess,
-    pytest.mark.platform_macos,
+    pytest.mark.platform_posix,
 ]
 
 
@@ -76,7 +73,7 @@ def failing_job() -> ExecutionJob:
     )
 
 
-@requires_macos
+@requires_posix
 def test_a_real_batch_completes_every_job_and_records_each_one(
     executor: ProcessExecutor,
 ) -> None:
@@ -111,7 +108,7 @@ def test_a_real_batch_completes_every_job_and_records_each_one(
     assert len(references) == len(batch)
 
 
-@requires_macos
+@requires_posix
 def test_a_failing_real_job_is_completion_data_and_the_batch_continues(
     executor: ProcessExecutor,
 ) -> None:
@@ -136,7 +133,7 @@ def test_a_failing_real_job_is_completion_data_and_the_batch_continues(
         assert outcomes[job.job_id] == ExitedOutcome(exit_code=0)
 
 
-@requires_macos
+@requires_posix
 def test_a_real_pool_streams_completions_with_their_caller_context(
     executor: ProcessExecutor,
 ) -> None:
@@ -167,7 +164,7 @@ def test_a_real_pool_streams_completions_with_their_caller_context(
     assert all(delivered == context for delivered, context in paired)
 
 
-@requires_macos
+@requires_posix
 def test_a_real_python_target_runs_through_the_pool(
     executor: ProcessExecutor,
 ) -> None:
@@ -188,7 +185,7 @@ def test_a_real_python_target_runs_through_the_pool(
         assert len(one.result.protocol_outputs) == 1
 
 
-@requires_macos
+@requires_posix
 def test_a_real_pool_holds_multiple_children_in_flight_together(
     executor: ProcessExecutor,
 ) -> None:

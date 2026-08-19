@@ -5,6 +5,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-08-18
+
+### Added
+
+- `WorkingDirectoryGrant` on `ExecutionJob` with scratch (default) and caller
+  modes; run records persist the declared mode and caller path.
+- Linux qualification alongside macOS; CI runs POSIX subprocess suites on both.
+- `forward_parent_signals()` to map parent SIGTERM/SIGINT to `CancelToken`
+  cancellation for cluster worker shutdown.
+- `FiniteDurationLimit.from_seconds()` for declaring termination grace in
+  seconds.
+
+### Changed
+
+- Production platform contract is qualified POSIX (macOS and Linux) rather than
+  macOS-only.
+- `RunDeclaration` records the working-directory grant on every new attempt.
+
+## [0.1.10]
+
 ### Removed
 
 - **Breaking:** Removed the seven `*OutcomeRecord` models, the

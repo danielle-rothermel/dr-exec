@@ -14,6 +14,8 @@ from dr_exec.declarations.models import (
     TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
+    WorkingDirectoryGrantKind,
 )
 from dr_exec.declarations.transport import request_transport_bytes
 
@@ -69,8 +71,32 @@ def validate_command_resolvability(
             )
 
 
+def validate_working_directory_grant(grant: WorkingDirectoryGrant, /) -> None:
+    match grant.kind:
+        case WorkingDirectoryGrantKind.SCRATCH:
+            return
+        case WorkingDirectoryGrantKind.CALLER:
+            path = grant.path
+            if path is None:
+                raise DeclarationError(
+                    "caller working-directory grants require a path"
+                )
+            resolved = path.resolve()
+            if not resolved.is_absolute():
+                raise DeclarationError(
+                    "caller working-directory paths must be absolute: "
+                    + path.as_posix()
+                )
+            if not resolved.is_dir():
+                raise DeclarationError(
+                    "caller working-directory paths must name an existing "
+                    "directory: " + resolved.as_posix()
+                )
+
+
 def validate_declaration(job: ExecutionJob, /) -> None:
     validate_input_budget(job, _declared_input_bytes(job))
+    validate_working_directory_grant(job.workspace)
     match job.target:
         case InProcessImportableJsonTarget():
             if job.env.kind is not EnvGrantKind.NONE:
@@ -97,4 +123,5 @@ __all__ = [
     "validate_command_resolvability",
     "validate_declaration",
     "validate_input_budget",
+    "validate_working_directory_grant",
 ]

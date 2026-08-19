@@ -30,8 +30,12 @@ jobs:
       - run: scripts/pre-check.sh
       - run: SKIP=pre-check uv run pre-commit run --all-files
 
-  macos-qualification:
-    runs-on: depot-macos-15
+  posix-qualification:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [depot-macos-15, depot-ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -41,4 +45,4 @@ jobs:
           version: "0.11.25"
           python-version: "3.13"
       - run: uv sync --locked
-      - run: uv run pytest -q -m platform_macos
+      - run: uv run pytest -q -m platform_posix

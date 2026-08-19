@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from dr_serialize import build_identity_document
+from support.process import requires_posix
 
 from dr_exec import (
     Budgets,
@@ -31,11 +32,6 @@ from dr_exec import (
 
 if TYPE_CHECKING:
     from dr_exec.recording.models import CompletedExecution
-
-requires_macos = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="real macOS process semantics",
-)
 
 
 @pytest.fixture
@@ -84,10 +80,10 @@ def reference_of(completed: CompletedExecution, /) -> RunRecordReference:
     return receipt.reference
 
 
-@requires_macos
+@requires_posix
 @pytest.mark.integration
 @pytest.mark.subprocess
-@pytest.mark.platform_macos
+@pytest.mark.platform_posix
 def test_run_binds_the_finalized_manifest_to_the_returned_execution(
     executor: ProcessExecutor,
     store: DirectoryRunStore,

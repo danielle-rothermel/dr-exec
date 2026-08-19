@@ -22,6 +22,7 @@ from dr_exec.core.kinds import (
     ProtocolFailureCode,
     RecordReceiptKind,
     RecordState,
+    WorkingDirectoryGrantKind,
 )
 from dr_exec.core.model import (
     Base64UrlBytes,
@@ -96,11 +97,42 @@ type ExecutionTargetRecord = Annotated[
 ]
 
 
+class WorkingDirectoryGrantRecord(ContractModel):
+    kind: WorkingDirectoryGrantKind
+    path: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @classmethod
+    def scratch(cls) -> WorkingDirectoryGrantRecord:
+        return cls(kind=WorkingDirectoryGrantKind.SCRATCH)
+
+    @model_validator(mode="after")
+    def path_must_match_kind(self) -> WorkingDirectoryGrantRecord:
+        if (
+            self.kind == WorkingDirectoryGrantKind.SCRATCH
+            and self.path is not None
+        ):
+            raise ValueError(
+                "scratch working-directory grants must not contain a path"
+            )
+        if self.kind == WorkingDirectoryGrantKind.CALLER and (
+            self.path is None or not self.path.startswith("/")
+        ):
+            raise ValueError(
+                "caller working-directory grants require an absolute path"
+            )
+        return self
+
+
 class RunDeclaration(ContractModel):
     execution_id: ExecutionId
     target: ExecutionTargetRecord
     env: EnvGrantRecord
     budgets: Budgets
+    workspace: WorkingDirectoryGrantRecord = Field(
+        default_factory=WorkingDirectoryGrantRecord.scratch
+    )
 
 
 class ProcessRecord(ContractModel):
@@ -459,4 +491,5 @@ __all__ = [
     "UntrustedCommandTargetRecord",
     "UntrustedPythonTargetRecord",
     "WorkerPoolRecordReceipt",
+    "WorkingDirectoryGrantRecord",
 ]

@@ -1,15 +1,16 @@
 [[contracts]]
-title = "Production execution is local and macOS-only"
+title = "Production execution is local POSIX qualified on macOS and Linux"
 statement = """
 `ProcessExecutor` v1 production execution runs one machine-local child per job \
-on macOS through one direct-argv execution path. It invokes no shell or remote \
-executor. In-process importable JSON execution uses a separate executor and is \
-not isolated by a child process. Worker pool importable JSON execution uses a \
-separate executor whose worker processes provide parallelism, not isolation."""
+on qualified POSIX platforms through one direct-argv execution path. It \
+invokes no shell or remote executor. In-process importable JSON execution \
+uses a separate executor and is not isolated by a child process. Worker pool \
+importable JSON execution uses a separate executor whose worker processes \
+provide parallelism, not isolation."""
 rationale = """
-One qualified platform and one lifecycle owner keep spawning, transport, \
+Qualified POSIX platforms and one lifecycle owner keep spawning, transport, \
 budget enforcement, teardown, attribution, and recording on the same path."""
-date = "2026-08-05"
+date = "2026-08-18"
 
 [[contracts]]
 title = "Trust is explicit and containment claims are narrow"
@@ -25,17 +26,20 @@ must not be presented as a restriction on what the payload can access."""
 date = "2026-08-05"
 
 [[contracts]]
-title = "Inherited state and scratch space are call-local"
+title = "Inherited state and working directory are call-local"
 statement = """
-A child receives environment values only through its explicit grant, uses a \
-fresh per-run scratch directory as its working directory, and inherits only \
-the descriptors required by its target transport. Scratch cleanup is attempted \
-on every exit path but is best-effort and silent."""
+A child receives environment values only through its explicit grant, uses the \
+working directory declared on its job, and inherits only the descriptors \
+required by its target transport. A scratch working-directory grant creates a \
+fresh per-run directory that the executor best-effort removes on every exit \
+path; a caller working-directory grant uses the supplied path and the \
+executor never removes it. Scratch cleanup failure cannot replace an otherwise \
+trustworthy result, and v1 has no narration surface on which to report it."""
 rationale = """
 Explicit state keeps concurrent attempts independent. Cleanup failure cannot \
 replace an otherwise trustworthy result, and v1 has no narration surface on \
 which to report it."""
-date = "2026-08-05"
+date = "2026-08-18"
 
 [[contracts]]
 title = "Isolated host Python is not a verified runtime closure"
