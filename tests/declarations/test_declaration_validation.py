@@ -15,6 +15,7 @@ from dr_exec import (
     ImportableEntryPoint,
     InProcessImportableJsonTarget,
     JobId,
+    TrustedCommandTarget,
     WorkingDirectoryGrant,
     WorkingDirectoryGrantKind,
 )
@@ -80,3 +81,29 @@ def test_resolve_working_directory_grant_canonicalizes_caller_paths(
 
     assert resolved.kind is WorkingDirectoryGrantKind.CALLER
     assert resolved.path == target.resolve()
+
+
+def test_caller_workspace_declaration_allows_a_nonexistent_path() -> None:
+    job = ExecutionJob(
+        job_id=JobId(uuid4()),
+        target=TrustedCommandTarget(
+            argv=("/usr/bin/true",),
+            stdin=b"",
+        ),
+        env=EnvGrant.none(),
+        budgets=Budgets.unbudgeted(),
+        workspace=WorkingDirectoryGrant.caller(
+            Path("/nonexistent/dr-exec-validation-workspace")
+        ),
+    )
+
+    validate_declaration(job)
+
+
+def test_resolve_working_directory_grant_rejects_a_nonexistent_path() -> None:
+    with pytest.raises(DeclarationError, match="existing directory"):
+        resolve_working_directory_grant(
+            WorkingDirectoryGrant.caller(
+                Path("/nonexistent/dr-exec-validation-workspace")
+            )
+        )

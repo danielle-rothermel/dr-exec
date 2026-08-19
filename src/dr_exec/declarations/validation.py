@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from dr_exec.core.errors import DeclarationError
 from dr_exec.core.kinds import EnvGrantKind
@@ -71,6 +71,20 @@ def validate_command_resolvability(
             )
 
 
+def absolute_posix_path_shape_error(path: Path | str, /) -> str | None:
+    """Return an error when a path is not a canonical absolute POSIX spelling."""
+
+    posix = path.as_posix() if isinstance(path, Path) else path
+    if not posix:
+        return "caller working-directory paths must be absolute"
+    pure = PurePosixPath(posix)
+    if not pure.is_absolute():
+        return "caller working-directory paths must be absolute: " + posix
+    if any(part in {".", ".."} for part in pure.parts):
+        return "caller working-directory paths must be canonical: " + posix
+    return None
+
+
 def validate_working_directory_grant(grant: WorkingDirectoryGrant, /) -> None:
     match grant.kind:
         case WorkingDirectoryGrantKind.SCRATCH:
@@ -81,17 +95,9 @@ def validate_working_directory_grant(grant: WorkingDirectoryGrant, /) -> None:
                 raise DeclarationError(
                     "caller working-directory grants require a path"
                 )
-            if not path.is_absolute():
-                raise DeclarationError(
-                    "caller working-directory paths must be absolute: "
-                    + path.as_posix()
-                )
-            resolved = path.resolve()
-            if not resolved.is_dir():
-                raise DeclarationError(
-                    "caller working-directory paths must name an existing "
-                    "directory: " + resolved.as_posix()
-                )
+            shape_error = absolute_posix_path_shape_error(path)
+            if shape_error is not None:
+                raise DeclarationError(shape_error)
 
 
 def resolve_working_directory_grant(
@@ -106,7 +112,13 @@ def resolve_working_directory_grant(
             return grant
         case WorkingDirectoryGrantKind.CALLER:
             assert grant.path is not None
-            return WorkingDirectoryGrant.caller(grant.path.resolve())
+            resolved = grant.path.resolve()
+            if not resolved.is_dir():
+                raise DeclarationError(
+                    "caller working-directory paths must name an existing "
+                    "directory: " + resolved.as_posix()
+                )
+            return WorkingDirectoryGrant.caller(resolved)
 
 
 def validate_declaration(job: ExecutionJob, /) -> None:
@@ -139,6 +151,7 @@ def validate_declaration(job: ExecutionJob, /) -> None:
 
 
 __all__ = [
+    "absolute_posix_path_shape_error",
     "granted_environment",
     "resolve_working_directory_grant",
     "validate_command_resolvability",

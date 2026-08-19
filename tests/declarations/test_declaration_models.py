@@ -434,3 +434,14 @@ def test_caller_working_directory_grant_records_reject_noncanonical_paths() -> (
             kind=WorkingDirectoryGrantKind.CALLER,
             path="/tmp/../private/tmp/example",
         )
+
+
+def test_caller_working_directory_grant_records_accept_portable_paths() -> (
+    None
+):
+    record = WorkingDirectoryGrantRecord(
+        kind=WorkingDirectoryGrantKind.CALLER,
+        path="/tmp/example",
+    )
+
+    assert record.path == "/tmp/example"
