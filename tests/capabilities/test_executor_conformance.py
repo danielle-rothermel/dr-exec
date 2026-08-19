@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -34,6 +35,7 @@ from dr_exec import (
     RecordReceiptKind,
     RecordState,
     TrustedCommandTarget,
+    WorkingDirectoryGrant,
 )
 
 if TYPE_CHECKING:
@@ -212,6 +214,14 @@ def valid_python_target() -> ExecutionJob:
     return job_for(python_target("conformance"))
 
 
+def valid_caller_workspace() -> ExecutionJob:
+    workspace = Path(tempfile.mkdtemp(prefix="dr-exec-conformance-"))
+    return job_for(
+        trusted_target(("/usr/bin/true",)),
+        workspace=WorkingDirectoryGrant.caller(workspace),
+    )
+
+
 VALID_DECLARATIONS = [
     pytest.param(valid_absolute_command, id="absolute-command"),
     pytest.param(
@@ -220,6 +230,7 @@ VALID_DECLARATIONS = [
     pytest.param(valid_input_within_its_budget, id="input-within-budget"),
     pytest.param(valid_untrusted_command, id="untrusted-command"),
     pytest.param(valid_python_target, id="untrusted-python"),
+    pytest.param(valid_caller_workspace, id="caller-workspace"),
 ]
 
 

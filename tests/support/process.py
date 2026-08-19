@@ -18,6 +18,16 @@ requires_posix = pytest.mark.skipif(
     reason="real POSIX process semantics",
 )
 
+assert_fd_count_unchanged = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="/dev/fd listing is unreliable on Linux CI",
+)
+
+
+def open_fd_count() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
@@ -160,9 +170,12 @@ def finish_threaded_calls[T](
 __all__ = [
     "Gate",
     "ThreadedCall",
+    "assert_fd_count_unchanged",
     "cleanup_exact_pids",
     "exact_pid_exists",
     "finish_threaded_calls",
+    "open_fd_count",
     "process_watchdog",
+    "requires_posix",
     "start_threaded_calls",
 ]

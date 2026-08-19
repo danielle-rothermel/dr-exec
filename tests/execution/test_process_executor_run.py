@@ -20,6 +20,7 @@ from dr_exec import (
     ExecutorSelfBudgets,
     ExitedOutcome,
     FinalizedRecord,
+    FiniteDurationLimit,
     ImportableEntryPoint,
     InProcessImportableJsonTarget,
     IsolatedHostPythonRuntime,
@@ -128,7 +129,7 @@ def test_an_in_process_target_is_refused_before_declaration_validation(
     assert raised.value.code is ExecutorFailureCode.TARGET_NOT_SUPPORTED
 
 
-def test_run_defaults_to_unbudgeted_self_budgets(
+def test_run_defaults_to_production_self_budgets(
     store: DirectoryRunStore,
     host_runtime: IsolatedHostPythonRuntime,
 ) -> None:
@@ -137,4 +138,7 @@ def test_run_defaults_to_unbudgeted_self_budgets(
         run_store=store,
     )
 
-    assert executor.self_budgets == ExecutorSelfBudgets.unbudgeted()
+    assert executor.self_budgets == ExecutorSelfBudgets()
+    termination = executor.self_budgets.termination_time
+    assert isinstance(termination, FiniteDurationLimit)
+    assert termination.max_ns == 30_000_000_000

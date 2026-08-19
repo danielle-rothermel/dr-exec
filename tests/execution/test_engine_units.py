@@ -232,7 +232,7 @@ def test_the_helper_embeds_every_declared_value_as_an_inert_literal() -> None:
     source = spawn_bootstrap_source(
         executable=hostile,
         argv=(hostile, hostile),
-        scratch_directory=hostile,
+        working_directory=hostile,
         descriptor_map=((7, 0),),
         status_descriptor=9,
     )
@@ -242,7 +242,7 @@ def test_the_helper_embeds_every_declared_value_as_an_inert_literal() -> None:
     exec(bindings, namespace)  # noqa: S102 - the embedding is under test
     assert namespace["_DR_EXEC_EXECUTABLE"] == hostile
     assert namespace["_DR_EXEC_ARGV"] == [hostile, hostile]
-    assert namespace["_DR_EXEC_SCRATCH_DIRECTORY"] == hostile
+    assert namespace["_DR_EXEC_WORKING_DIRECTORY"] == hostile
     assert namespace["_DR_EXEC_DESCRIPTOR_MAP"] == [[7, 0]]
 
 
@@ -250,7 +250,7 @@ def test_the_helper_renders_the_pinned_literals_once_each() -> None:
     source = spawn_bootstrap_source(
         executable="/bin/true",
         argv=("/bin/true",),
-        scratch_directory="/tmp",
+        working_directory="/tmp",
         descriptor_map=((7, 0),),
         status_descriptor=9,
     )

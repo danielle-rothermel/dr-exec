@@ -32,13 +32,40 @@ A child receives environment values only through its explicit grant, uses the \
 working directory declared on its job, and inherits only the descriptors \
 required by its target transport. A scratch working-directory grant creates a \
 fresh per-run directory that the executor best-effort removes on every exit \
-path; a caller working-directory grant uses the supplied path and the \
+path; a caller working-directory grant uses the supplied absolute path, \
+canonicalized through ``Path.resolve()`` for spawn and persistence, and the \
 executor never removes it. Scratch cleanup failure cannot replace an otherwise \
 trustworthy result, and v1 has no narration surface on which to report it."""
 rationale = """
 Explicit state keeps concurrent attempts independent. Cleanup failure cannot \
 replace an otherwise trustworthy result, and v1 has no narration surface on \
 which to report it."""
+date = "2026-08-18"
+
+[[contracts]]
+title = "Caller workspace paths persist as declaration evidence"
+statement = """
+Run records persist the resolved absolute path for caller working-directory \
+grants on `RunDeclaration.workspace`. This is declaration evidence for replay \
+and audit, not a store locator; `RunRecordReference` remains the only \
+backend-neutral access path."""
+rationale = """
+Caller grants name a durable directory the executor does not own. Persisting \
+the resolved path makes the declared cwd reconstructible without teaching \
+callers to join storage layout."""
+date = "2026-08-18"
+
+[[contracts]]
+title = "Parent shutdown signals map to cooperative cancellation"
+statement = """
+`forward_parent_signals()` installs SIGTERM and SIGINT handlers on the main \
+thread that call `CancelToken.cancel()`. Cluster workers wrapping \
+`ProcessExecutor.run_blocking()` should use it on the thread that receives \
+parent shutdown so teardown runs through the normal cancellation and default \
+finite `termination_time` grace path."""
+rationale = """
+Explicit parent-signal forwarding keeps shutdown behavior on the same \
+cancellation and escalation path as in-process token cancellation."""
 date = "2026-08-18"
 
 [[contracts]]

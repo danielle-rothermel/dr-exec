@@ -25,7 +25,7 @@ class ProcessExecutor:
     runtime: Runtime
     run_store: RunStore
     self_budgets: ExecutorSelfBudgets = field(
-        default_factory=ExecutorSelfBudgets.unbudgeted
+        default_factory=ExecutorSelfBudgets
     )
 
     async def run(

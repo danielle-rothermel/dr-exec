@@ -59,7 +59,7 @@ def _dr_exec_setup():
     except OSError as error:
         _dr_exec_fail(_DR_EXEC_STAGE_SESSION, error)
     try:
-        _dr_exec_os.chdir(_DR_EXEC_SCRATCH_DIRECTORY)
+        _dr_exec_os.chdir(_DR_EXEC_WORKING_DIRECTORY)
     except OSError as error:
         _dr_exec_fail(_DR_EXEC_STAGE_CHDIR, error)
     try:
@@ -98,14 +98,14 @@ def spawn_bootstrap_source(
     *,
     executable: str,
     argv: tuple[str, ...],
-    scratch_directory: str,
+    working_directory: str,
     descriptor_map: tuple[tuple[int, int], ...],
     status_descriptor: int,
 ) -> str:
     bindings: dict[str, object] = {
         "_DR_EXEC_EXECUTABLE": executable,
         "_DR_EXEC_ARGV": list(argv),
-        "_DR_EXEC_SCRATCH_DIRECTORY": scratch_directory,
+        "_DR_EXEC_WORKING_DIRECTORY": working_directory,
         "_DR_EXEC_DESCRIPTOR_MAP": [list(pair) for pair in descriptor_map],
         "_DR_EXEC_STATUS_DESCRIPTOR": status_descriptor,
         "_DR_EXEC_HIGHEST_TARGET_DESCRIPTOR": PAYLOAD_PROTOCOL_DESCRIPTOR,
@@ -153,7 +153,7 @@ def launch_bootstrap(
     executable: str,
     argv: tuple[str, ...],
     environment: dict[str, str],
-    scratch_directory: str,
+    working_directory: str,
     descriptor_map: tuple[tuple[int, int], ...],
     status_write: int,
 ) -> subprocess.Popen[bytes]:
@@ -162,7 +162,7 @@ def launch_bootstrap(
     source = spawn_bootstrap_source(
         executable=executable,
         argv=argv,
-        scratch_directory=scratch_directory,
+        working_directory=working_directory,
         descriptor_map=descriptor_map,
         status_descriptor=status_write,
     )

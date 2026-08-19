@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  macos-qualification:
+  posix-qualification:
     runs-on: depot-macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -20,10 +20,10 @@ jobs:
           python-version: "3.13"
           enable-cache: false
       - run: uv sync --locked
-      - run: uv run pytest -q -m platform_macos
+      - run: uv run pytest -q -m platform_posix
 
   publish:
-    needs: macos-qualification
+    needs: posix-qualification
     runs-on: ubuntu-latest
     environment:
       name: pypi

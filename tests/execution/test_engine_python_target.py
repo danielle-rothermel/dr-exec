@@ -13,7 +13,9 @@ import pytest
 from dr_serialize import IdentityDocument, build_identity_document
 from support.process import (
     Gate,
+    assert_fd_count_unchanged,
     finish_threaded_calls,
+    open_fd_count,
     requires_posix,
     start_threaded_calls,
 )
@@ -59,6 +61,9 @@ from dr_exec import (
     TrustedPythonTargetRecord,
     UntrustedPythonTarget,
     UntrustedPythonTargetRecord,
+    WorkingDirectoryGrant,
+    WorkingDirectoryGrantKind,
+    WorkingDirectoryGrantRecord,
 )
 from dr_exec.core.model import canonical_model_bytes
 from dr_exec.recording.store import FinalizableRun, PreparedRun, RunningRun
@@ -500,6 +505,36 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
 
 
 @requires_posix
+def test_a_caller_workspace_is_used_for_a_python_target(
+    harness: Harness, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "python-caller"
+    workspace.mkdir()
+    marker = workspace / "cwd.txt"
+    driver = f"""
+def {DRIVER_ENTRYPOINT_NAME}(request, emit):
+    import os
+    from pathlib import Path
+    Path({str(marker)!r}).write_text(os.getcwd())
+"""
+    job = replace(
+        harness.job(driver),
+        workspace=WorkingDirectoryGrant.caller(workspace),
+    )
+    completed = harness.executor.run_blocking(job)
+
+    assert completed.result.outcome == ExitedOutcome(exit_code=0)
+    assert marker.read_text() == workspace.resolve().as_posix()
+    record = harness.store.load(reference_of(completed))
+    assert isinstance(record, FinalizedRecord)
+    assert record.declaration.workspace == WorkingDirectoryGrantRecord(
+        kind=WorkingDirectoryGrantKind.CALLER,
+        path=workspace.resolve().as_posix(),
+    )
+
+
+@requires_posix
+@assert_fd_count_unchanged
 def test_a_started_protocol_worker_failure_raises_after_lifecycle_cleanup(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -510,7 +545,7 @@ def test_a_started_protocol_worker_failure_raises_after_lifecycle_cleanup(
     monkeypatch.setattr(
         dr_exec.execution.engine, "read_protocol_stream", failing_read
     )
-    before = len(os.listdir("/dev/fd"))
+    before = open_fd_count()
     driver = f"""
 import time
 
@@ -530,7 +565,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
         )
 
     assert isinstance(exc.value.__cause__, RuntimeError)
-    assert len(os.listdir("/dev/fd")) == before
+    assert open_fd_count() == before
     assert (
         harness.store.load(harness.only_record_reference()).state
         is RecordState.RUNNING

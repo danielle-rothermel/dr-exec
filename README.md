@@ -175,8 +175,10 @@ class ExecutionJob:
 
 Each job declares exactly one working-directory grant. A scratch grant creates
 a fresh per-run directory that the executor best-effort removes afterward. A
-caller grant uses a caller-supplied path that must already exist; the executor
-never removes it. Run-record sidecars remain in the run store, not the workspace.
+caller grant uses a caller-supplied absolute path that must already exist;
+symlinks are canonicalized through ``Path.resolve()`` for spawn and run-record
+persistence, and the executor never removes the directory. Run-record sidecars
+remain in the run store, not the workspace.
 
 V1 accepts finite workload limits only for wall time, input bytes, and
 aggregate captured payload output. Memory, CPU time, process count, file size,
@@ -576,8 +578,10 @@ escalation path.
 
 Payloads that must checkpoint before exit should treat SIGTERM as a cooperative
 shutdown request and exit cleanly within the declared grace period.
-`termination_time` is declared in nanoseconds; a typical grace is tens of
-seconds, for example `FiniteDurationLimit.from_seconds(30)`.
+`ProcessExecutor` defaults to a 30-second `termination_time` grace before
+SIGKILL escalation; pass `ExecutorSelfBudgets.unbudgeted()` for infinite
+SIGTERM grace on every axis. `termination_time` is declared in nanoseconds;
+`FiniteDurationLimit.from_seconds()` converts from seconds.
 
 ## Recording
 

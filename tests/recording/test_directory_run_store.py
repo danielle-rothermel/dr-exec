@@ -86,12 +86,14 @@ from dr_exec.declarations.models import (
     TrustedPythonTarget,
     UntrustedCommandTarget,
     UntrustedPythonTarget,
+    WorkingDirectoryGrant,
 )
 from dr_exec.execution.engine import _target_of
 from dr_exec.recording.identity import (
     build_env_grant_record,
     build_executor_config_identity,
     build_executor_identity,
+    build_working_directory_grant_record,
     canonical_declaration_digest,
 )
 from dr_exec.recording.provenance import ExecutorSourceSnapshot
@@ -205,6 +207,34 @@ def _prepared_record(
             env=env,
         ),
     )
+
+
+def test_a_caller_workspace_grant_persists_its_resolved_path_in_the_manifest(
+    store: DirectoryRunStore, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "caller"
+    workspace.mkdir()
+    execution_id = ExecutionId(
+        job_id=JobId(uuid4()),
+        attempt_id=AttemptId(uuid4()),
+    )
+    declaration = _declaration(execution_id).model_copy(
+        update={
+            "workspace": build_working_directory_grant_record(
+                WorkingDirectoryGrant.caller(workspace)
+            )
+        }
+    )
+    prepared_run = store.prepare(
+        PreparedRecord(header=_header(), declaration=declaration)
+    )
+    manifest = json.loads(_manifest_bytes(_record_dir(store, prepared_run)))
+
+    assert manifest["declaration"]["workspace"] == {
+        "kind": "caller",
+        "path": workspace.resolve().as_posix(),
+    }
+    assert "declaration.workspace.path" in _leaf_key_paths(manifest)
 
 
 def _producer_prepared_record(

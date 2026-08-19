@@ -57,11 +57,8 @@ caller-owned paths and other attempts."""
 name = "caller workspace"
 definition = """
 A caller-supplied directory used as the child working directory when the job \
-declares a caller working-directory grant. The executor uses it but does not \
-create or remove it."""
-exported_symbols = [
-  "dr_exec.WorkingDirectoryGrant",
-]
+declares a caller working-directory grant. The executor uses the resolved \
+absolute path but does not create or remove the directory."""
 
 [[terms]]
 name = "workload budget"
@@ -119,10 +116,12 @@ protocol. It is distinct from arbitrary stdout and stderr bytes."""
 [[terms]]
 name = "execution job"
 definition = """
-One caller-defined unit containing an execution target, environment grant, and \
-workload budgets for execution and scheduling."""
+One caller-defined unit containing an execution target, environment grant, \
+working-directory grant, and workload budgets for execution and scheduling."""
 exported_symbols = [
   "dr_exec.ExecutionJob",
+  "dr_exec.WorkingDirectoryGrant",
+  "dr_exec.WorkingDirectoryGrantKind",
 ]
 
 [[terms]]

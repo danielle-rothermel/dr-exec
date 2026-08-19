@@ -81,12 +81,12 @@ def validate_working_directory_grant(grant: WorkingDirectoryGrant, /) -> None:
                 raise DeclarationError(
                     "caller working-directory grants require a path"
                 )
-            resolved = path.resolve()
-            if not resolved.is_absolute():
+            if not path.is_absolute():
                 raise DeclarationError(
                     "caller working-directory paths must be absolute: "
                     + path.as_posix()
                 )
+            resolved = path.resolve()
             if not resolved.is_dir():
                 raise DeclarationError(
                     "caller working-directory paths must name an existing "

@@ -22,8 +22,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Production platform contract is qualified POSIX (macOS and Linux) rather than
   macOS-only.
 - `RunDeclaration` records the working-directory grant on every new attempt.
+- `ProcessExecutor` defaults to a finite 30-second `termination_time` grace
+  before SIGKILL escalation; `ExecutorSelfBudgets.unbudgeted()` still opts every
+  axis out explicitly, including infinite SIGTERM grace.
 
-## [0.1.10]
+## [0.1.10] - 2026-08-12
 
 ### Removed
 
@@ -181,20 +184,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   SIGTERM grace before SIGKILL escalation, and required an explicit
   `ExecutionPoolConfig.capacity` at pool assembly.
 - Deleted `scripts/benchmark_importable_json.py`.
-- Updated `dr-store` to 0.2.2.
+- Updated `dr-store` to 0.2.3.
 - Mapped `RegularChildFailureReason` from dr-store verified child reads into
   `RecordLoadError` messages for artifact and sidecar mismatches.
 - Renamed scheduler cross-module types to `AdmissionResult` and
   `ExecutionScheduler` as module-internal scheduling API.
 - Added persisted `ExecutorFailureCode` on `RecordingFailure.failure_code` for
   degraded receipts when executor machinery fails.
-
-## [0.1.10] - 2026-08-12
-
-### Changed
-
-- Updated `dr-store` to 0.2.3. No dr-exec code changes were required; the
-  document-directory and verified-read APIs this release uses are unchanged.
 
 ## [0.1.9] - 2026-08-11
 

@@ -141,7 +141,7 @@ def _resolve_executable(
     # An absolute argv[0] is a Runtime conformance obligation, so a prepared
     # relative name reaches here only from a nonconforming runtime. It stays
     # unresolved and fails at spawn as a classified outcome; the child's cwd
-    # is the fresh scratch directory, where a relative name cannot resolve.
+    # is the job's working directory, where a relative name cannot resolve.
     granted_path = environment.get("PATH")
     if granted_path is None:
         return name
@@ -893,7 +893,7 @@ class _EngineCall:
                 executable=executable,
                 argv=target.argv,
                 environment=environment,
-                scratch_directory=scratch.as_posix(),
+                working_directory=scratch.as_posix(),
                 descriptor_map=tuple(descriptor_map),
                 status_write=status_write,
             )

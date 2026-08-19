@@ -396,8 +396,20 @@ def test_finite_duration_limit_from_seconds_converts_to_nanoseconds() -> None:
 
 
 def test_finite_duration_limit_from_seconds_rejects_nonpositive() -> None:
-    with pytest.raises(ValueError, match="seconds must be positive"):
+    with pytest.raises(ValueError, match="positive finite number"):
         FiniteDurationLimit.from_seconds(0)
+
+
+def test_finite_duration_limit_from_seconds_rejects_sub_nanosecond_values() -> (
+    None
+):
+    with pytest.raises(ValueError, match="positive nanosecond count"):
+        FiniteDurationLimit.from_seconds(1e-10)
+
+
+def test_finite_duration_limit_from_seconds_rejects_overflow() -> None:
+    with pytest.raises(ValueError, match="positive nanosecond count"):
+        FiniteDurationLimit.from_seconds(float(2**256))
 
 
 def test_scratch_working_directory_grants_reject_a_path() -> None:

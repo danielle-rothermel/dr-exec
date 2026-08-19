@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import keyword
+import math
 import os
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -57,9 +59,14 @@ class FiniteDurationLimit(ContractModel):
 
     @classmethod
     def from_seconds(cls, seconds: float, /) -> FiniteDurationLimit:
-        if seconds <= 0:
-            raise ValueError("seconds must be positive")
-        return cls(max_ns=int(seconds * 1_000_000_000))
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("seconds must be a positive finite number")
+        product = seconds * 1_000_000_000
+        if product >= sys.maxsize or product < 1:
+            raise ValueError(
+                "seconds must convert to a positive nanosecond count"
+            )
+        return cls(max_ns=int(product))
 
     @property
     def limit(self) -> int:
@@ -169,18 +176,33 @@ class Budgets(ContractModel):
         return cls()
 
 
+DEFAULT_TERMINATION_GRACE_SECONDS: Final = 30.0
+
+
 class ExecutorSelfBudgets(ContractModel):
     protocol_frame_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
     protocol_total_bytes: ByteBudget = Field(default_factory=UnbudgetedLimit)
     protocol_output_count: CountBudget = Field(default_factory=UnbudgetedLimit)
     json_depth: CountBudget = Field(default_factory=UnbudgetedLimit)
     startup_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
-    termination_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
+    termination_time: DurationBudget = Field(
+        default_factory=lambda: FiniteDurationLimit.from_seconds(
+            DEFAULT_TERMINATION_GRACE_SECONDS
+        )
+    )
     join_time: DurationBudget = Field(default_factory=UnbudgetedLimit)
 
     @classmethod
     def unbudgeted(cls) -> ExecutorSelfBudgets:
-        return cls()
+        return cls(
+            protocol_frame_bytes=UnbudgetedLimit(),
+            protocol_total_bytes=UnbudgetedLimit(),
+            protocol_output_count=UnbudgetedLimit(),
+            json_depth=UnbudgetedLimit(),
+            startup_time=UnbudgetedLimit(),
+            termination_time=UnbudgetedLimit(),
+            join_time=UnbudgetedLimit(),
+        )
 
 
 def _validate_env_var_name(name: str) -> None:
