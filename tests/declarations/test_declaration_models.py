@@ -445,3 +445,21 @@ def test_caller_working_directory_grant_records_accept_portable_paths() -> (
     )
 
     assert record.path == "/tmp/example"
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/tmp/./workspace",
+        "/tmp//workspace",
+        "/tmp/workspace/",
+    ),
+)
+def test_caller_working_directory_grant_records_reject_lossy_posix_paths(
+    path: str,
+) -> None:
+    with pytest.raises(ValueError, match="canonical"):
+        WorkingDirectoryGrantRecord(
+            kind=WorkingDirectoryGrantKind.CALLER,
+            path=path,
+        )

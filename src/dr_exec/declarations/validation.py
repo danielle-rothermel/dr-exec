@@ -80,6 +80,9 @@ def absolute_posix_path_shape_error(path: Path | str, /) -> str | None:
     pure = PurePosixPath(posix)
     if not pure.is_absolute():
         return "caller working-directory paths must be absolute: " + posix
+    canonical = pure.as_posix()
+    if posix != canonical:
+        return "caller working-directory paths must be canonical: " + posix
     if any(part in {".", ".."} for part in pure.parts):
         return "caller working-directory paths must be canonical: " + posix
     return None
