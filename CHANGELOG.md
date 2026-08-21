@@ -23,6 +23,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `... [truncated]` marker, so no payload-chosen message can grow a worker
   result frame without bound. The frame protocol, its terminator, and the
   persisted record shape are unchanged.
+- The detail formatter is total: a payload exception whose `__str__`, type
+  names, or traceback rendering itself raises still completes as the same
+  payload-owned failure, with a fixed `<unprintable ...>` placeholder in place
+  of what could not be rendered. Rendering is also surrogate-safe — a lone
+  surrogate or `surrogateescape` byte in a message is escaped rather than
+  refused by strict UTF-8. The diagnostic path never changes the outcome kind.
 
 ## [0.1.12] - 2026-08-21
 

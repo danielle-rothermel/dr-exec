@@ -26,7 +26,10 @@ from support.importable_json import (
     NOT_CALLABLE,
     RAISES,
     RAISES_HUGE_MESSAGE,
+    RAISES_LONE_SURROGATE,
     RAISES_SENTINEL,
+    RAISES_SURROGATE_ESCAPE,
+    RAISES_UNPRINTABLE,
     RETURN_NON_JSON,
     RETURN_NULL,
     ExecutorHarness,
@@ -218,6 +221,64 @@ def test_a_giant_payload_exception_message_is_truncated_to_the_cap(
     assert isinstance(outcome, ExitedOutcome)
     assert outcome.exit_code == 1
     assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_an_unprintable_payload_exception_still_fails_as_the_payloads(
+    harness: ExecutorHarness,
+) -> None:
+    # The formatter runs inside the handler that owns this failure. If its own
+    # rendering could raise, the pool would report worker death and the
+    # in-process executor a generic termination — a different outcome kind for
+    # what is still an ordinary payload raise. It stays payload-owned.
+    completed = run_one(harness, RAISES_UNPRINTABLE)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    # The type still identifies the failure even though its message cannot be
+    # rendered, and the placeholder names what refused to render.
+    assert "UnprintableError" in detail
+    assert "<unprintable UnprintableError: __str__ raised TypeError>" in detail
+
+
+def test_a_lone_surrogate_payload_message_is_escaped_not_raised(
+    harness: ExecutorHarness,
+) -> None:
+    # A lone surrogate is a legal str that strict UTF-8 cannot encode. Sizing
+    # the detail must not be the step that turns a payload raise into
+    # something else, so the character is escaped rather than encoded.
+    completed = run_one(harness, RAISES_LONE_SURROGATE)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert "ValueError" in detail
+    assert "SENTINEL-12345" in detail
+    assert "\\ud800" in detail
+
+
+def test_a_surrogate_escaped_payload_message_is_escaped_not_raised(
+    harness: ExecutorHarness,
+) -> None:
+    # Undecodable OS-level bytes reach Python as surrogateescape code points,
+    # which strict UTF-8 also refuses. Same requirement: escape, never raise.
+    completed = run_one(harness, RAISES_SURROGATE_ESCAPE)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert "OSError" in detail
+    assert "SENTINEL-12345" in detail
+    assert "\\udcff" in detail
 
 
 def test_non_json_return_maps_to_protocol_failure_with_payload_owner(

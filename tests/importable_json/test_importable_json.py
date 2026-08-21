@@ -463,6 +463,12 @@ def test_the_worker_repeats_the_payload_error_detail_bounds_exactly() -> None:
     assert worker_pool_worker.PAYLOAD_RAISED_DETAIL_PREFIX == (
         importable_json.PAYLOAD_RAISED_DETAIL_PREFIX
     )
+    assert worker_pool_worker.PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER == (
+        importable_json.PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER
+    )
+    assert worker_pool_worker.PAYLOAD_ERROR_TRACEBACK_OMITTED_MARKER == (
+        importable_json.PAYLOAD_ERROR_TRACEBACK_OMITTED_MARKER
+    )
 
 
 def test_both_payload_error_formatters_render_one_exception_identically() -> (
@@ -520,6 +526,80 @@ def test_a_truncated_detail_still_makes_a_parseable_worker_frame() -> None:
     assert frame.endswith(worker_pool_worker.WORKER_FRAME_TERMINATOR)
     # Exactly one newline in the whole frame: the terminator. Every newline in
     # the detail is escaped, so no truncated detail can split a frame in two.
+    assert frame.count(worker_pool_worker.WORKER_FRAME_TERMINATOR) == 1
+    document = validate_identity_document(json.loads(frame.decode("utf-8")))
+    payload = document.payload
+    assert isinstance(payload, dict)
+    assert payload[worker_pool_worker.DETAIL_KEY] == detail
+
+
+class _UnprintableError(Exception):
+    """An exception whose own rendering raises."""
+
+    def __str__(self) -> str:
+        raise TypeError("SENTINEL-UNPRINTABLE")
+
+
+def test_both_formatters_render_an_unprintable_exception_identically() -> None:
+    # The formatter is total: a payload exception that cannot be stringified
+    # yields a placeholder, not a raise, and both copies agree on it.
+    try:
+        raise _UnprintableError()
+    except _UnprintableError as error:
+        owned = importable_json.format_payload_error_detail(error)
+        repeated = worker_pool_worker.format_payload_error_detail(error)
+
+    assert owned == repeated
+    assert "_UnprintableError" in owned
+    assert "<unprintable _UnprintableError: __str__ raised TypeError>" in owned
+
+
+def test_a_lone_surrogate_message_renders_as_an_escape_in_both_copies() -> (
+    None
+):
+    # Strict UTF-8 cannot encode a lone surrogate. Sizing the detail must not
+    # be the step that raises, so the character is escaped instead.
+    try:
+        raise ValueError("SENTINEL-12345\ud800")
+    except ValueError as error:
+        owned = importable_json.format_payload_error_detail(error)
+        repeated = worker_pool_worker.format_payload_error_detail(error)
+
+    assert owned == repeated
+    assert "SENTINEL-12345" in owned
+    assert "\\ud800" in owned
+    _assert_one_parseable_frame(owned)
+
+
+def test_a_surrogate_escaped_message_renders_as_escapes_in_both_copies() -> (
+    None
+):
+    # Undecodable OS-level bytes arrive as surrogateescape code points, which
+    # strict UTF-8 also refuses to encode.
+    message = "SENTINEL-12345" + b"\xff\xfe".decode(
+        "utf-8", errors="surrogateescape"
+    )
+    try:
+        raise OSError(message)
+    except OSError as error:
+        owned = importable_json.format_payload_error_detail(error)
+        repeated = worker_pool_worker.format_payload_error_detail(error)
+
+    assert owned == repeated
+    assert "SENTINEL-12345" in owned
+    assert "\\udcff" in owned
+    assert "\\udcfe" in owned
+    _assert_one_parseable_frame(owned)
+
+
+def _assert_one_parseable_frame(detail: str, /) -> None:
+    """Assert one detail still makes exactly one canonical worker frame."""
+
+    frame = worker_pool_worker._status_frame(
+        worker_pool_worker.WorkerFrameStatus.PAYLOAD_RAISED, detail
+    )
+
+    assert frame.endswith(worker_pool_worker.WORKER_FRAME_TERMINATOR)
     assert frame.count(worker_pool_worker.WORKER_FRAME_TERMINATOR) == 1
     document = validate_identity_document(json.loads(frame.decode("utf-8")))
     payload = document.payload

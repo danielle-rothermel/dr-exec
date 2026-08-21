@@ -39,6 +39,40 @@ def raise_huge_message(_value: object) -> None:
     raise ValueError("SENTINEL-12345" + "x" * HUGE_MESSAGE_CHARACTER_COUNT)
 
 
+class UnprintableError(Exception):
+    """An exception whose own rendering raises.
+
+    A payload controls its exception type, so the diagnostic formatter must
+    stay total against one that cannot be stringified at all.
+    """
+
+    def __str__(self) -> str:
+        raise TypeError("SENTINEL-UNPRINTABLE")
+
+
+def raise_unprintable(_value: object) -> None:
+    raise UnprintableError()
+
+
+# A lone surrogate is a legal ``str`` that strict UTF-8 refuses to encode.
+LONE_SURROGATE_MESSAGE = "SENTINEL-12345\ud800"
+
+
+def raise_lone_surrogate(_value: object) -> None:
+    raise ValueError(LONE_SURROGATE_MESSAGE)
+
+
+# Undecodable OS-level bytes reach Python as ``surrogateescape`` code points,
+# which strict UTF-8 also refuses to encode.
+SURROGATE_ESCAPE_MESSAGE = "SENTINEL-12345" + b"\xff\xfe".decode(
+    "utf-8", errors="surrogateescape"
+)
+
+
+def raise_surrogate_escape(_value: object) -> None:
+    raise OSError(SURROGATE_ESCAPE_MESSAGE)
+
+
 def raise_system_exit(_value: object) -> None:
     raise SystemExit(7)
 

@@ -42,6 +42,16 @@ PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT: Final = 20
 PAYLOAD_RAISED_DETAIL_PREFIX: Final = "the importable JSON entry point raised"
 
 
+# The detail is rendered from payload-controlled objects: a payload chooses its
+# exception type, its ``__str__``, and the frames its traceback walks, and any
+# of those can raise. The formatter runs inside the handler that owns the
+# payload failure, so an exception escaping it would replace a payload-owned
+# outcome with a different one. These placeholders are what it substitutes
+# instead, and they are part of the rendered shape.
+PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER: Final = "<unprintable>"
+PAYLOAD_ERROR_TRACEBACK_OMITTED_MARKER: Final = "<traceback unavailable>"
+
+
 def format_payload_error_detail(error: BaseException, /) -> str:
     """Render one payload exception as bounded, single-line-prefixed detail.
 
@@ -49,16 +59,79 @@ def format_payload_error_detail(error: BaseException, /) -> str:
     at :data:`PAYLOAD_ERROR_DETAIL_MAX_BYTES` with an explicit marker. The
     worker-pool worker repeats this function rather than importing it, and a
     golden test pins the two copies equal.
+
+    This function is total: every payload-controlled rendering step is guarded
+    and substituted with a fixed placeholder on failure, so the diagnostic path
+    can never raise and never changes which outcome the caller reports.
     """
 
+    module_name, qualified_name = _safe_type_names(error)
     return _format_payload_error_detail(
-        type(error).__module__,
-        type(error).__qualname__,
-        str(error),
-        traceback.format_exception(
-            error, limit=-PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT
-        ),
+        module_name,
+        qualified_name,
+        _safe_message(error),
+        _safe_traceback_lines(error),
     )
+
+
+def _safe_type_names(error: BaseException, /) -> tuple[str, str]:
+    """Read one exception type's module and qualified name defensively."""
+
+    try:
+        error_type = type(error)
+        module_name = error_type.__module__
+        qualified_name = error_type.__qualname__
+    except BaseException:  # noqa: BLE001 - the detail must never raise
+        return (
+            PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER,
+            PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER,
+        )
+    if not isinstance(module_name, str) or not isinstance(qualified_name, str):
+        return (
+            PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER,
+            PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER,
+        )
+    return module_name, qualified_name
+
+
+def _safe_message(error: BaseException, /) -> str:
+    """Stringify one exception, naming what failed instead of raising."""
+
+    try:
+        return str(error)
+    except BaseException as failure:  # noqa: BLE001 - must never raise
+        return _unprintable_message(error, failure)
+
+
+def _unprintable_message(
+    error: BaseException, failure: BaseException, /
+) -> str:
+    """Name the unrenderable exception and the one its rendering raised.
+
+    Both names are read defensively, because the payload controls them too;
+    if even that fails the placeholder degrades to a bare constant.
+    """
+
+    _, raised = _safe_type_names(error)
+    _, by = _safe_type_names(failure)
+    if PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER in (raised, by):
+        return PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER
+    return f"<unprintable {raised}: __str__ raised {by}>"
+
+
+def _safe_traceback_lines(error: BaseException, /) -> list[str]:
+    """Render a bounded traceback tail, or a marker when it cannot be read.
+
+    Traceback rendering walks payload-controlled frames and can raise on
+    exotic ones. That omits the traceback, never the whole detail.
+    """
+
+    try:
+        return traceback.format_exception(
+            error, limit=-PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT
+        )
+    except BaseException:  # noqa: BLE001 - the detail must never raise
+        return [PAYLOAD_ERROR_TRACEBACK_OMITTED_MARKER + "\n"]
 
 
 def _format_payload_error_detail(
@@ -79,11 +152,17 @@ def _format_payload_error_detail(
 
 
 def _truncate_utf8(text: str, /) -> str:
-    """Cap ``text`` by encoded size, never splitting a UTF-8 character."""
+    """Cap ``text`` by encoded size, never splitting a UTF-8 character.
 
-    encoded = text.encode("utf-8")
+    Encoding is non-raising in both directions. A payload message may carry
+    lone surrogates, or ``surrogateescape`` bytes from an OS-level error, which
+    strict UTF-8 refuses to encode; those render as backslash escapes so that
+    sizing and truncation stay defined for every input.
+    """
+
+    encoded = text.encode("utf-8", errors="backslashreplace")
     if len(encoded) <= PAYLOAD_ERROR_DETAIL_MAX_BYTES:
-        return text
+        return encoded.decode("utf-8", errors="replace")
     marker = PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER
     budget = PAYLOAD_ERROR_DETAIL_MAX_BYTES - len(marker.encode("utf-8"))
     kept = encoded[:budget].decode("utf-8", errors="ignore")
