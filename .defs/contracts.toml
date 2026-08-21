@@ -446,8 +446,9 @@ of blocking the caller. After close, new jobs fail cleanly as \
 `ProtocolFailedOutcome` rather than reusing terminated workers left in idle \
 slots. A worker does not outlive the parent that owns it: an \
 idle worker ends at request-pipe EOF, and a worker inside a job ends when it \
-observes that it has been reparented and SIGKILLs the process group it leads \
-before exiting. Descendants that remain in that group die with it; a \
+observes that it has been reparented. Both paths SIGKILL the process group \
+the worker leads before exiting, including leftovers from a job that already \
+returned. Descendants that remain in that group die with it; a \
 descendant that creates another session can leave the group and survive. That \
 cleanup bounds only an orphan's survival, never a job's runtime or a payload's \
 size."""
@@ -457,7 +458,7 @@ mid-job, and retrying work whose side effects are unknown would be worse than \
 failing it. A parent killed abnormally never gets to clean up, so a worker \
 that cannot reach anyone with its answer has to end itself and the ordinary \
 descendants it spawned rather than hold a core indefinitely."""
-date = "2026-08-20"
+date = "2026-08-21"
 
 [[contracts]]
 title = "Worker pool budgets stay unbudgeted until declared"

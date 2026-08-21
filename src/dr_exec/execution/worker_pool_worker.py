@@ -96,6 +96,11 @@ def main() -> None:
         sys.exit(_STARTUP_IMPORT_FAILED_EXIT_CODE)
     _write_frame(results, READY_FRAME)
     _serve(entry_point, requests=requests, results=results)
+    # A completed job can leave descendants in this group. Normal
+    # leader exit does not kill them, and the daemon watchdog may
+    # not run before interpreter shutdown, so EOF must take the
+    # same group path as a busy orphan.
+    kill_own_process_group()
 
 
 def watch_parent(parent_pid: int, /) -> threading.Thread:

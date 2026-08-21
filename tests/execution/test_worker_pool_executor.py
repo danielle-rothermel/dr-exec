@@ -1053,17 +1053,22 @@ def test_a_worker_does_not_outlive_a_parent_that_died_abnormally(
     assert not exact_pid_exists(worker_pid)
 
 
+@pytest.mark.parametrize("mode", [orphan_parent.FORK, orphan_parent.FORK_IDLE])
 def test_an_orphaned_worker_kills_a_grandchild_it_forked(
-    tmp_path: Path,
+    tmp_path: Path, mode: str
 ) -> None:
-    """Orphan cleanup must reach descendants that stayed in the worker group."""
+    """Orphan cleanup must reach descendants that stayed in the worker group.
+
+    ``fork`` leaves the job running so the busy watchdog kills the group.
+    ``fork_idle`` lets the job return first so EOF has to do it.
+    """
 
     grandchild_path = tmp_path / "grandchild"
     parent = subprocess.Popen(
         (
             sys.executable,
             str(ORPHAN_PARENT_SCRIPT),
-            orphan_parent.FORK,
+            mode,
             str(grandchild_path),
         ),
         stdout=subprocess.PIPE,

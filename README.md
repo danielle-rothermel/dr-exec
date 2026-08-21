@@ -464,7 +464,8 @@ Workers do not outlive the pool that owns them, even if the owning process dies
 abnormally and never gets to close anything. Each worker leads its own process
 group. An idle worker ends when its request pipe reaches end of file; a worker
 in the middle of a job is not reading that pipe, so it instead notices that it
-has been reparented and SIGKILLs that group before exiting. Parent-side
+has been reparented. Both paths SIGKILL that group before exiting, including
+leftovers from a job that already returned. Parent-side
 deadline, cancel, and close take the same group path. Descendants that remain
 in the group die with the worker; a descendant that creates another session
 can leave it and survive. This is best-effort cleanup for an abnormal death,
