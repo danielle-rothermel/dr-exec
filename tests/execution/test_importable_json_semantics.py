@@ -25,6 +25,9 @@ from support.importable_json import (
     MISSING_MODULE,
     NOT_CALLABLE,
     RAISES,
+    RAISES_HOSTILE_ENCODE_MESSAGE,
+    RAISES_HOSTILE_QUALNAME,
+    RAISES_HOSTILE_SIZING_MESSAGE,
     RAISES_HUGE_MESSAGE,
     RAISES_LONE_SURROGATE,
     RAISES_SENTINEL,
@@ -242,6 +245,38 @@ def test_an_unprintable_payload_exception_still_fails_as_the_payloads(
     # rendered, and the placeholder names what refused to render.
     assert "UnprintableError" in detail
     assert "<unprintable UnprintableError: __str__ raised TypeError>" in detail
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        RAISES_HOSTILE_ENCODE_MESSAGE,
+        RAISES_HOSTILE_SIZING_MESSAGE,
+        RAISES_HOSTILE_QUALNAME,
+    ],
+    ids=["encode-raises", "sizing-raises", "hostile-qualname"],
+)
+def test_a_hostile_str_subclass_still_fails_as_the_payloads(
+    harness: ExecutorHarness,
+    entry_point: ImportableEntryPoint,
+) -> None:
+    # A payload controls the *type* of the strings the formatter reads, not
+    # just their contents. A str subclass satisfies isinstance(x, str) while
+    # overriding encode, __len__, __getitem__, __add__, or __format__ with a
+    # method that raises, which would escape the guards during sizing or
+    # interpolation. The formatter normalizes to an exact str first, so this
+    # stays an ordinary payload raise rather than becoming worker death in
+    # pool execution or a generic termination in-process.
+    completed = run_one(harness, entry_point)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert type(detail) is str
+    assert len(detail.encode("utf-8")) <= PAYLOAD_ERROR_DETAIL_MAX_BYTES
 
 
 def test_a_lone_surrogate_payload_message_is_escaped_not_raised(

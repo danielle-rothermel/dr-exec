@@ -60,6 +60,18 @@ RAISES_UNPRINTABLE = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="raise_unprintable",
 )
+RAISES_HOSTILE_ENCODE_MESSAGE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_hostile_encode_message",
+)
+RAISES_HOSTILE_SIZING_MESSAGE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_hostile_sizing_message",
+)
+RAISES_HOSTILE_QUALNAME = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_hostile_qualname",
+)
 RAISES_LONE_SURROGATE = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="raise_lone_surrogate",

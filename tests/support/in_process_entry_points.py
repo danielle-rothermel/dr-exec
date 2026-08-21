@@ -54,6 +54,71 @@ def raise_unprintable(_value: object) -> None:
     raise UnprintableError()
 
 
+# A payload also controls the *type* of the strings the formatter reads. A
+# ``str`` subclass passes ``isinstance(x, str)`` while overriding the very
+# methods the formatter calls, so each of these hides a raise behind one.
+HOSTILE_STR_SENTINEL = "SENTINEL-HOSTILE-STR"
+
+
+class _EncodeRaisingStr(str):
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        raise RuntimeError("SENTINEL-HOSTILE-ENCODE")
+
+    def __format__(self, spec: str) -> str:
+        raise RuntimeError("SENTINEL-HOSTILE-ENCODE")
+
+
+class _SizingRaisingStr(str):
+    # Interpolation is the first step that touches the message, so a raising
+    # __format__ is what actually escapes the old guards; __len__, __getitem__
+    # and __add__ cover the sizing and concatenation steps behind it.
+    def __format__(self, spec: str) -> str:
+        raise RuntimeError("SENTINEL-HOSTILE-FORMAT")
+
+    def __len__(self) -> int:
+        raise RuntimeError("SENTINEL-HOSTILE-LEN")
+
+    def __getitem__(self, index: object) -> str:
+        raise RuntimeError("SENTINEL-HOSTILE-GETITEM")
+
+    def __add__(self, other: object) -> str:
+        raise RuntimeError("SENTINEL-HOSTILE-ADD")
+
+
+class _HostileMessageError(Exception):
+    """An exception whose ``__str__`` returns a hostile ``str`` subclass."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    def __str__(self) -> str:
+        return self._message
+
+
+def raise_hostile_encode_message(_value: object) -> None:
+    raise _HostileMessageError(_EncodeRaisingStr(HOSTILE_STR_SENTINEL))
+
+
+def raise_hostile_sizing_message(_value: object) -> None:
+    raise _HostileMessageError(_SizingRaisingStr(HOSTILE_STR_SENTINEL))
+
+
+class HostileQualnameError(Exception):
+    """An exception whose class metadata is a hostile ``str`` subclass."""
+
+
+# Assigned after the class body so the hostile subclass replaces the plain
+# ``str`` the class statement installed.
+HostileQualnameError.__qualname__ = _EncodeRaisingStr(  # type: ignore[assignment]
+    "HostileQualnameError"
+)
+
+
+def raise_hostile_qualname(_value: object) -> None:
+    raise HostileQualnameError(HOSTILE_STR_SENTINEL)
+
+
 # A lone surrogate is a legal ``str`` that strict UTF-8 refuses to encode.
 LONE_SURROGATE_MESSAGE = "SENTINEL-12345\ud800"
 

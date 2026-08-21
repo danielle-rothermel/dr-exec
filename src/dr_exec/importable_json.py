@@ -74,6 +74,33 @@ def format_payload_error_detail(error: BaseException, /) -> str:
     )
 
 
+def _exact_str(value: object, /) -> str:
+    """Reduce a payload-controlled value to an exact ``str``, or a placeholder.
+
+    ``isinstance(value, str)`` is not enough to make the rest of the formatter
+    total: a ``str`` subclass passes it while overriding ``__str__``,
+    ``__format__``, ``__eq__``, ``__len__``, ``__getitem__``, ``__add__``, or
+    ``encode`` with a method that raises. Every payload-sourced string is
+    therefore collapsed to an exact ``str`` here, before any comparison,
+    interpolation, concatenation, sizing, or encoding touches it, and
+    ``type(...) is str`` is the acceptance test rather than ``isinstance``.
+    """
+
+    if type(value) is str:
+        return value
+    try:
+        if isinstance(value, str):
+            # Bypass any overridden __str__ instead of trusting the subclass.
+            reduced = str.__str__(value)
+        else:
+            reduced = str(value)
+    except BaseException:  # noqa: BLE001 - the detail must never raise
+        return PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER
+    if type(reduced) is not str:
+        return PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER
+    return reduced
+
+
 def _safe_type_names(error: BaseException, /) -> tuple[str, str]:
     """Read one exception type's module and qualified name defensively."""
 
@@ -91,16 +118,17 @@ def _safe_type_names(error: BaseException, /) -> tuple[str, str]:
             PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER,
             PAYLOAD_ERROR_UNPRINTABLE_PLACEHOLDER,
         )
-    return module_name, qualified_name
+    return _exact_str(module_name), _exact_str(qualified_name)
 
 
 def _safe_message(error: BaseException, /) -> str:
     """Stringify one exception, naming what failed instead of raising."""
 
     try:
-        return str(error)
+        message = str(error)
     except BaseException as failure:  # noqa: BLE001 - must never raise
         return _unprintable_message(error, failure)
+    return _exact_str(message)
 
 
 def _unprintable_message(
@@ -127,9 +155,10 @@ def _safe_traceback_lines(error: BaseException, /) -> list[str]:
     """
 
     try:
-        return traceback.format_exception(
+        lines = traceback.format_exception(
             error, limit=-PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT
         )
+        return [_exact_str(line) for line in lines]
     except BaseException:  # noqa: BLE001 - the detail must never raise
         return [PAYLOAD_ERROR_TRACEBACK_OMITTED_MARKER + "\n"]
 

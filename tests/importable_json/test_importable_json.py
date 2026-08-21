@@ -554,6 +554,41 @@ def test_both_formatters_render_an_unprintable_exception_identically() -> None:
     assert "<unprintable _UnprintableError: __str__ raised TypeError>" in owned
 
 
+class _HostileStr(str):
+    """A ``str`` subclass whose formatter-facing methods all raise."""
+
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        raise RuntimeError("SENTINEL-HOSTILE-ENCODE")
+
+    def __len__(self) -> int:
+        raise RuntimeError("SENTINEL-HOSTILE-LEN")
+
+    def __format__(self, spec: str) -> str:
+        raise RuntimeError("SENTINEL-HOSTILE-FORMAT")
+
+
+class _HostileMessageError(Exception):
+    def __str__(self) -> str:
+        return _HostileStr("SENTINEL-HOSTILE-STR")
+
+
+def test_both_formatters_render_a_hostile_str_subclass_identically() -> None:
+    # isinstance(x, str) accepts a subclass that overrides encode, __len__, or
+    # __format__ with a raising method, which would escape the guards at the
+    # sizing and interpolation steps. Normalizing to an exact str keeps the
+    # formatter total, and both copies still agree on the result.
+    try:
+        raise _HostileMessageError()
+    except _HostileMessageError as error:
+        owned = importable_json.format_payload_error_detail(error)
+        repeated = worker_pool_worker.format_payload_error_detail(error)
+
+    assert owned == repeated
+    assert type(owned) is str
+    assert "_HostileMessageError" in owned
+    assert "SENTINEL-HOSTILE-STR" in owned
+
+
 def test_a_lone_surrogate_message_renders_as_an_escape_in_both_copies() -> (
     None
 ):
