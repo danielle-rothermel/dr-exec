@@ -385,6 +385,9 @@ def run_batch(
     work; dropping an unclosed iterator does not guarantee prompt cleanup.
     A finite ``wall_time`` is an operation-wide ceiling: on expiry the
     scheduler cancels in-flight and remaining jobs as ``CancelledOutcome``.
+    How forcibly that happens is the executor's existing cancel path —
+    worker-pool and ``ProcessExecutor`` terminate, in-process stays
+    cooperative — and the watcher stays armed through early-close drain.
     """
 
     scheduler: ExecutionScheduler[None] = ExecutionScheduler(
@@ -425,9 +428,9 @@ def run_batch(
                 return
             yield completion.completed_execution
     finally:
-        disarm.set()
         scheduler.close_intake()
         scheduler.wait_for_quiescence()
+        disarm.set()
         scheduler.shutdown()
 
 

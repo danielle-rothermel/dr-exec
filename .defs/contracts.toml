@@ -489,11 +489,15 @@ statement = """
 `wall_time`. The default is no operation-wide ceiling. On expiry the private \
 scheduler cancels live tokens and births later tokens already cancelled so \
 in-flight jobs tear down through each executor's existing cancel path and \
-remaining source jobs still complete as `CancelledOutcome`. The bound is \
-neither a per-job workload budget nor an executor self-budget. \
+remaining source jobs still complete as `CancelledOutcome`. That path stays \
+cooperative for in-process jobs: an entry point that never returns can still \
+hold the batch past the deadline. The watcher stays armed through early-close \
+or source-error drain so a declared deadline can still cancel admitted work. \
+The bound is neither a per-job workload budget nor an executor self-budget. \
 `ExecutionPool`, `open_pool`, and `map_stream` do not take this deadline."""
 rationale = """
 A batch ceiling is a lifecycle concern of the batch primitive. Reusing \
 scheduler tokens keeps one cancellation path and one outcome kind rather than \
-asking every caller to wrap `run_many` with a clock."""
-date = "2026-08-20"
+asking every caller to wrap `run_many` with a clock. In-process honesty stays \
+with the executor that cannot hard-stop Python."""
+date = "2026-08-21"

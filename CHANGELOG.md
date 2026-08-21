@@ -11,7 +11,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `run_batch` and each executor's `run_many` accept an optional finite
   `wall_time`. On expiry, remaining jobs complete as `CancelledOutcome` and
-  in-flight work tears down through the existing cancel path.
+  in-flight work tears down through the existing cancel path. The watcher
+  stays armed through early-close drain; in-process cancellation stays
+  cooperative.
 
 ### Changed
 

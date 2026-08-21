@@ -1488,6 +1488,37 @@ def test_a_finite_batch_consumes_its_input_lazily() -> None:
     assert observed <= 2
 
 
+def test_a_batch_wall_time_still_cancels_during_early_close_drain() -> None:
+    batch = jobs(2)
+    first, held = batch
+    responder = GatedResponder(cancellation_aware=True)
+
+    def respond(
+        job: ExecutionJob, token: CancelToken | None, /
+    ) -> CompletedExecution:
+        if job.job_id == first.job_id:
+            return completion_for(job.job_id)
+        return responder(job, token)
+
+    stream = run_batch(
+        FakeExecutor(responder=respond),
+        batch,
+        capacity=2,
+        wall_time=FiniteDurationLimit(max_ns=250_000_000),
+    )
+
+    primer = in_thread(lambda: next(stream, None))
+    responder.await_arrival(held.job_id)
+    join(primer)
+
+    closer = in_thread(stream.close)
+    join(closer)
+
+    assert responder.cancelled == (held.job_id,)
+    assert responder.executor_returned_gate(held.job_id).is_set()
+    responder.assert_no_watchers()
+
+
 def test_an_abandoned_batch_still_drains_its_admitted_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

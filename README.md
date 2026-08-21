@@ -314,7 +314,8 @@ vocabulary while doing essentially nothing extra.
 - **Its budgets are advisory.** A finite wall-time budget arms a cancel signal
   that is checked *before* the entry point is called and *after* it returns. It
   cannot interrupt a running call. An entry point that spins forever spins
-  forever. Cancellation is cooperative, not enforced.
+  forever. Cancellation is cooperative, not enforced, including a batch
+  `wall_time` on `run_many`.
 
 Also: no isolation, no durable run record, no environment grant, and a crash in
 the entry point is a crash in your process.
@@ -469,7 +470,9 @@ in the group die with the worker; a descendant that creates another session
 can leave it and survive. This is best-effort cleanup for an abnormal death,
 not supervision: it puts no ceiling on how long a job may run or how large a
 payload may be. `run_many` may also declare a finite batch `wall_time` that
-cancels remaining work as `CancelledOutcome`.
+cancels remaining work as `CancelledOutcome`. That ceiling is only as
+forcible as the executor's cancel path: worker-pool and `ProcessExecutor`
+terminate in-flight work; in-process cancellation stays cooperative.
 
 ## Runtime
 
