@@ -592,14 +592,21 @@ def _opened_gate(directory: Path, /) -> Path:
     return gate
 
 
-def _await_marker(marker: Path, /) -> None:
+def _await_marker(
+    marker: Path, /, *, driver: threading.Thread | None = None
+) -> None:
     """Block until the entry point has actually started running."""
 
     while not marker.exists():
-        pass
+        if driver is not None and not driver.is_alive():
+            pytest.fail(
+                "the worker finished before the payload announced ready"
+            )
 
 
-def _await_pid_file(path: Path, /) -> int:
+def _await_pid_file(
+    path: Path, /, *, driver: threading.Thread | None = None
+) -> int:
     """Block until a child has written a parseable pid."""
 
     while True:
@@ -607,6 +614,10 @@ def _await_pid_file(path: Path, /) -> int:
             text = path.read_text(encoding="utf-8").strip()
             if text:
                 return int(text)
+        if driver is not None and not driver.is_alive():
+            pytest.fail(
+                "the worker finished before the grandchild wrote its pid"
+            )
 
 
 def test_map_stream_yields_in_completion_order_not_submission_order(
@@ -1125,7 +1136,7 @@ def test_a_declared_stop_kills_a_grandchild_the_worker_forked(
             "gate_path": str(gate.path),
             "grandchild_pid_path": str(grandchild_path),
         },
-        budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=250_000_000))
+        budgets=Budgets(wall_time=FiniteDurationLimit.from_seconds(2))
         if stopper == "budget"
         else None,
     )
@@ -1142,8 +1153,8 @@ def test_a_declared_stop_kills_a_grandchild_the_worker_forked(
     with cleanup_exact_pids() as registered:
         driver = threading.Thread(target=run)
         driver.start()
-        _await_marker(ready)
-        grandchild_pid = _await_pid_file(grandchild_path)
+        _await_marker(ready, driver=driver)
+        grandchild_pid = _await_pid_file(grandchild_path, driver=driver)
         registered.append(grandchild_pid)
         if token is not None:
             token.cancel()
