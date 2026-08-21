@@ -1149,7 +1149,7 @@ def test_a_declared_stop_kills_a_grandchild_the_worker_forked(
             token.cancel()
         driver.join(WATCHDOG_SECONDS)
         assert not driver.is_alive()
-        assert not exact_pid_exists(grandchild_pid)
+        _await_pid_gone(grandchild_pid)
 
     outcome = completed_holder[0].result.outcome
     if stopper == "budget":
