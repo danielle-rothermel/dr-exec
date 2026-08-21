@@ -21,6 +21,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parent-side stop SIGKILL that group so grandchildren that stay in it die
   with the worker. Idle EOF takes the same group path as a busy orphan, so
   leftovers from a completed job die too.
+- Updated `dr-store` to 0.2.5.
 
 ## [0.1.11] - 2026-08-18
 
