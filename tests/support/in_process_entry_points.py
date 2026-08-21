@@ -26,6 +26,19 @@ def raise_error(_value: object) -> None:
     raise RuntimeError("entry point failed")
 
 
+def raise_sentinel_value_error(_value: object) -> None:
+    raise ValueError("SENTINEL-12345")
+
+
+# The message alone is far larger than the detail cap, so the rendered detail
+# has to be truncated no matter how few frames the traceback carries.
+HUGE_MESSAGE_CHARACTER_COUNT = 200_000
+
+
+def raise_huge_message(_value: object) -> None:
+    raise ValueError("SENTINEL-12345" + "x" * HUGE_MESSAGE_CHARACTER_COUNT)
+
+
 def raise_system_exit(_value: object) -> None:
     raise SystemExit(7)
 

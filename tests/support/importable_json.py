@@ -48,6 +48,14 @@ RAISES = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="raise_error",
 )
+RAISES_SENTINEL = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_sentinel_value_error",
+)
+RAISES_HUGE_MESSAGE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_huge_message",
+)
 ECHO_OR_RAISE = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="echo_unless_asked_to_raise",

@@ -14,6 +14,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from enum import UNIQUE, StrEnum, verify
 from typing import IO, Final, cast
@@ -51,6 +52,46 @@ class WorkerFrameStatus(StrEnum):
     PAYLOAD_RAISED = "payload_raised"
     PAYLOAD_RESULT_INVALID = "payload_result_invalid"
     EXECUTOR_REJECTED = "executor_rejected"
+
+
+# Persisted-format contract: the bounded payload-error rendering is the same
+# one ``dr_exec.importable_json`` applies in-process. This module cannot import
+# it, so the constants and the formatting are re-declared here deliberately and
+# a golden test pins both copies equal to the owning definitions.
+PAYLOAD_ERROR_DETAIL_MAX_BYTES: Final = 8192
+PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER: Final = "... [truncated]"
+PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT: Final = 20
+PAYLOAD_RAISED_DETAIL_PREFIX: Final = "the importable JSON entry point raised"
+
+
+def format_payload_error_detail(error: BaseException, /) -> str:
+    """Render one payload exception as bounded detail for the parent.
+
+    The cap applies to the whole rendered string, so no entry point can grow
+    a result frame without bound by raising with a huge message.
+    """
+
+    error_type = type(error)
+    qualified = (
+        error_type.__qualname__
+        if error_type.__module__ == "builtins"
+        else f"{error_type.__module__}.{error_type.__qualname__}"
+    )
+    rendered = traceback.format_exception(
+        error, limit=-PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT
+    )
+    detail = (
+        f"{PAYLOAD_RAISED_DETAIL_PREFIX}: {qualified}: {error}\n"
+        + "".join(rendered)
+    )
+    encoded = detail.encode("utf-8")
+    if len(encoded) <= PAYLOAD_ERROR_DETAIL_MAX_BYTES:
+        return detail
+    budget = PAYLOAD_ERROR_DETAIL_MAX_BYTES - len(
+        PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER.encode("utf-8")
+    )
+    kept = encoded[:budget].decode("utf-8", errors="ignore")
+    return kept + PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER
 
 
 READY_FRAME: Final = b"ready" + WORKER_FRAME_TERMINATOR
@@ -204,10 +245,10 @@ def _handle(
         return _status_frame(WorkerFrameStatus.EXECUTOR_REJECTED, str(error))
     try:
         returned = entry_point(payload)
-    except Exception:  # noqa: BLE001 - a payload failure is result data
+    except Exception as error:  # noqa: BLE001 - a payload failure is result data
         return _status_frame(
             WorkerFrameStatus.PAYLOAD_RAISED,
-            "the importable JSON entry point raised",
+            format_payload_error_detail(error),
         )
     try:
         result = validate_strict_json(returned)

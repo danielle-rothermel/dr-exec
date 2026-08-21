@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import traceback
 from functools import cache
 from typing import Final
 
@@ -29,6 +30,64 @@ from dr_exec.recording.models import CompletedExecution, ExitedOutcome
 # request and result positions and are pinned by golden tests.
 ENVELOPE_SCHEMA: Final = "dr_exec.importable_json"
 ENVELOPE_SCHEMA_VERSION: Final = 1
+
+# A payload's exception text is attacker-shaped data as far as this library is
+# concerned: an entry point may raise with a message of any size, and the
+# worker pool puts that text on a pipe the parent must read whole. The cap is
+# what keeps one frame from growing without bound, so it is applied to the
+# rendered detail as a whole rather than to any one of its parts.
+PAYLOAD_ERROR_DETAIL_MAX_BYTES: Final = 8192
+PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER: Final = "... [truncated]"
+PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT: Final = 20
+PAYLOAD_RAISED_DETAIL_PREFIX: Final = "the importable JSON entry point raised"
+
+
+def format_payload_error_detail(error: BaseException, /) -> str:
+    """Render one payload exception as bounded, single-line-prefixed detail.
+
+    The shape is ``<prefix>: <QualifiedType>: <message>\\n<traceback>``, capped
+    at :data:`PAYLOAD_ERROR_DETAIL_MAX_BYTES` with an explicit marker. The
+    worker-pool worker repeats this function rather than importing it, and a
+    golden test pins the two copies equal.
+    """
+
+    return _format_payload_error_detail(
+        type(error).__module__,
+        type(error).__qualname__,
+        str(error),
+        traceback.format_exception(
+            error, limit=-PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT
+        ),
+    )
+
+
+def _format_payload_error_detail(
+    module_name: str,
+    qualified_name: str,
+    message: str,
+    traceback_lines: list[str],
+    /,
+) -> str:
+    qualified = (
+        qualified_name
+        if module_name == "builtins"
+        else f"{module_name}.{qualified_name}"
+    )
+    headline = f"{PAYLOAD_RAISED_DETAIL_PREFIX}: {qualified}: {message}"
+    detail = headline + "\n" + "".join(traceback_lines)
+    return _truncate_utf8(detail)
+
+
+def _truncate_utf8(text: str, /) -> str:
+    """Cap ``text`` by encoded size, never splitting a UTF-8 character."""
+
+    encoded = text.encode("utf-8")
+    if len(encoded) <= PAYLOAD_ERROR_DETAIL_MAX_BYTES:
+        return text
+    marker = PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER
+    budget = PAYLOAD_ERROR_DETAIL_MAX_BYTES - len(marker.encode("utf-8"))
+    kept = encoded[:budget].decode("utf-8", errors="ignore")
+    return kept + marker
 
 
 def is_importable_json_envelope(document: IdentityDocument, /) -> bool:
@@ -187,7 +246,7 @@ def _invoke_importable_entry_point(
         result = callable_entry(payload)
     except Exception as error:
         raise ImportableJsonPayloadDispatchError(
-            "the importable JSON entry point raised"
+            format_payload_error_detail(error)
         ) from error
     try:
         return validate_strict_json(result)

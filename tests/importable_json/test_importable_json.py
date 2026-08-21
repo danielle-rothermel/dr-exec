@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
@@ -12,6 +13,7 @@ from dr_serialize import (
     Jsonable,
     StrictJsonError,
     build_identity_document,
+    validate_identity_document,
 )
 from pydantic import ValidationError
 
@@ -443,3 +445,83 @@ def _completion(
         ),
         record_receipt=FakeRecordReceipt(execution_id=execution_id),
     )
+
+
+def test_the_worker_repeats_the_payload_error_detail_bounds_exactly() -> None:
+    # The worker module cannot import dr_exec, so its second copy of the
+    # bounded rendering is pinned equal here the same way the envelope
+    # literals are. Drift would let one mode truncate where the other does not.
+    assert worker_pool_worker.PAYLOAD_ERROR_DETAIL_MAX_BYTES == (
+        importable_json.PAYLOAD_ERROR_DETAIL_MAX_BYTES
+    )
+    assert worker_pool_worker.PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER == (
+        importable_json.PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER
+    )
+    assert worker_pool_worker.PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT == (
+        importable_json.PAYLOAD_ERROR_TRACEBACK_FRAME_LIMIT
+    )
+    assert worker_pool_worker.PAYLOAD_RAISED_DETAIL_PREFIX == (
+        importable_json.PAYLOAD_RAISED_DETAIL_PREFIX
+    )
+
+
+def test_both_payload_error_formatters_render_one_exception_identically() -> (
+    None
+):
+    # Same exception, same rendering: the two copies agree on the headline, so
+    # a caller reads the same shape whichever mode ran the payload.
+    try:
+        raise ValueError("SENTINEL-12345")
+    except ValueError as error:
+        owned = importable_json.format_payload_error_detail(error)
+        repeated = worker_pool_worker.format_payload_error_detail(error)
+
+    assert owned == repeated
+    headline = owned.splitlines()[0]
+    assert headline == (
+        f"{importable_json.PAYLOAD_RAISED_DETAIL_PREFIX}: "
+        "ValueError: SENTINEL-12345"
+    )
+
+
+def test_a_huge_payload_message_renders_within_the_cap_with_the_marker() -> (
+    None
+):
+    # The cap is a hard bound on the rendered detail, not a hint: it is what
+    # keeps a worker result frame finite for any message a payload chooses.
+    try:
+        raise ValueError("SENTINEL-12345" + "x" * 500_000)
+    except ValueError as error:
+        detail = worker_pool_worker.format_payload_error_detail(error)
+
+    encoded = detail.encode("utf-8")
+    assert len(encoded) <= importable_json.PAYLOAD_ERROR_DETAIL_MAX_BYTES
+    assert detail.endswith(
+        importable_json.PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER
+    )
+    assert detail.startswith(
+        f"{importable_json.PAYLOAD_RAISED_DETAIL_PREFIX}: "
+        "ValueError: SENTINEL-12345"
+    )
+
+
+def test_a_truncated_detail_still_makes_a_parseable_worker_frame() -> None:
+    # The frame stays newline-terminated and canonical even though the detail
+    # itself contains newlines and was cut mid-render.
+    try:
+        raise ValueError("SENTINEL-12345" + "\né" * 200_000)
+    except ValueError as error:
+        detail = worker_pool_worker.format_payload_error_detail(error)
+
+    frame = worker_pool_worker._status_frame(
+        worker_pool_worker.WorkerFrameStatus.PAYLOAD_RAISED, detail
+    )
+
+    assert frame.endswith(worker_pool_worker.WORKER_FRAME_TERMINATOR)
+    # Exactly one newline in the whole frame: the terminator. Every newline in
+    # the detail is escaped, so no truncated detail can split a frame in two.
+    assert frame.count(worker_pool_worker.WORKER_FRAME_TERMINATOR) == 1
+    document = validate_identity_document(json.loads(frame.decode("utf-8")))
+    payload = document.payload
+    assert isinstance(payload, dict)
+    assert payload[worker_pool_worker.DETAIL_KEY] == detail

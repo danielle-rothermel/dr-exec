@@ -25,6 +25,8 @@ from support.importable_json import (
     MISSING_MODULE,
     NOT_CALLABLE,
     RAISES,
+    RAISES_HUGE_MESSAGE,
+    RAISES_SENTINEL,
     RETURN_NON_JSON,
     RETURN_NULL,
     ExecutorHarness,
@@ -59,6 +61,10 @@ from dr_exec import (
     WorkerPoolRecordReceipt,
     build_in_process_importable_json_job,
     parse_importable_json_result,
+)
+from dr_exec.importable_json import (
+    PAYLOAD_ERROR_DETAIL_MAX_BYTES,
+    PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER,
 )
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
@@ -173,6 +179,41 @@ def test_entry_point_exception_maps_to_nonzero_exit_with_payload_owner(
 ) -> None:
     completed = run_one(harness, RAISES)
 
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_a_payload_raise_carries_its_exception_type_message_and_traceback(
+    harness: ExecutorHarness,
+) -> None:
+    # The whole point of the detail: a caller reading only the completion can
+    # tell what went wrong without the child's stderr.
+    completed = run_one(harness, RAISES_SENTINEL)
+
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert "ValueError" in detail
+    assert "SENTINEL-12345" in detail
+    assert "raise_sentinel_value_error" in detail
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_a_giant_payload_exception_message_is_truncated_to_the_cap(
+    harness: ExecutorHarness,
+) -> None:
+    # A payload controls its own message, so the cap is what keeps a worker's
+    # result frame from growing without bound. The completion still parses.
+    completed = run_one(harness, RAISES_HUGE_MESSAGE)
+
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert len(detail.encode("utf-8")) <= PAYLOAD_ERROR_DETAIL_MAX_BYTES
+    assert detail.endswith(PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER)
+    # Truncation keeps the head, so the identifying part survives the cut.
+    assert "ValueError" in detail
+    assert "SENTINEL-12345" in detail
     outcome = completed.result.outcome
     assert isinstance(outcome, ExitedOutcome)
     assert outcome.exit_code == 1
