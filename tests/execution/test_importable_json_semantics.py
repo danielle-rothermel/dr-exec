@@ -25,6 +25,14 @@ from support.importable_json import (
     MISSING_MODULE,
     NOT_CALLABLE,
     RAISES,
+    RAISES_HOSTILE_ENCODE_MESSAGE,
+    RAISES_HOSTILE_QUALNAME,
+    RAISES_HOSTILE_SIZING_MESSAGE,
+    RAISES_HUGE_MESSAGE,
+    RAISES_LONE_SURROGATE,
+    RAISES_SENTINEL,
+    RAISES_SURROGATE_ESCAPE,
+    RAISES_UNPRINTABLE,
     RETURN_NON_JSON,
     RETURN_NULL,
     ExecutorHarness,
@@ -59,6 +67,10 @@ from dr_exec import (
     WorkerPoolRecordReceipt,
     build_in_process_importable_json_job,
     parse_importable_json_result,
+)
+from dr_exec.importable_json import (
+    PAYLOAD_ERROR_DETAIL_MAX_BYTES,
+    PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER,
 )
 
 JOB_ID = JobId(UUID("0189d3f4-1c2b-7e3a-9f10-2b3c4d5e6f70"))
@@ -177,6 +189,131 @@ def test_entry_point_exception_maps_to_nonzero_exit_with_payload_owner(
     assert isinstance(outcome, ExitedOutcome)
     assert outcome.exit_code == 1
     assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_a_payload_raise_carries_its_exception_type_message_and_traceback(
+    harness: ExecutorHarness,
+) -> None:
+    # The whole point of the detail: a caller reading only the completion can
+    # tell what went wrong without the child's stderr.
+    completed = run_one(harness, RAISES_SENTINEL)
+
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert "ValueError" in detail
+    assert "SENTINEL-12345" in detail
+    assert "raise_sentinel_value_error" in detail
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_a_giant_payload_exception_message_is_truncated_to_the_cap(
+    harness: ExecutorHarness,
+) -> None:
+    # A payload controls its own message, so the cap is what keeps a worker's
+    # result frame from growing without bound. The completion still parses.
+    completed = run_one(harness, RAISES_HUGE_MESSAGE)
+
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert len(detail.encode("utf-8")) <= PAYLOAD_ERROR_DETAIL_MAX_BYTES
+    assert detail.endswith(PAYLOAD_ERROR_DETAIL_TRUNCATION_MARKER)
+    # Truncation keeps the head, so the identifying part survives the cut.
+    assert "ValueError" in detail
+    assert "SENTINEL-12345" in detail
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_an_unprintable_payload_exception_still_fails_as_the_payloads(
+    harness: ExecutorHarness,
+) -> None:
+    # The formatter runs inside the handler that owns this failure. If its own
+    # rendering could raise, the pool would report worker death and the
+    # in-process executor a generic termination — a different outcome kind for
+    # what is still an ordinary payload raise. It stays payload-owned.
+    completed = run_one(harness, RAISES_UNPRINTABLE)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    # The type still identifies the failure even though its message cannot be
+    # rendered, and the placeholder names what refused to render.
+    assert "UnprintableError" in detail
+    assert "<unprintable UnprintableError: __str__ raised TypeError>" in detail
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        RAISES_HOSTILE_ENCODE_MESSAGE,
+        RAISES_HOSTILE_SIZING_MESSAGE,
+        RAISES_HOSTILE_QUALNAME,
+    ],
+    ids=["encode-raises", "sizing-raises", "hostile-qualname"],
+)
+def test_a_hostile_str_subclass_still_fails_as_the_payloads(
+    harness: ExecutorHarness,
+    entry_point: ImportableEntryPoint,
+) -> None:
+    # A payload controls the *type* of the strings the formatter reads, not
+    # just their contents. A str subclass satisfies isinstance(x, str) while
+    # overriding encode, __len__, __getitem__, __add__, or __format__ with a
+    # method that raises, which would escape the guards during sizing or
+    # interpolation. The formatter normalizes to an exact str first, so this
+    # stays an ordinary payload raise rather than becoming worker death in
+    # pool execution or a generic termination in-process.
+    completed = run_one(harness, entry_point)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert type(detail) is str
+    assert len(detail.encode("utf-8")) <= PAYLOAD_ERROR_DETAIL_MAX_BYTES
+
+
+def test_a_lone_surrogate_payload_message_is_escaped_not_raised(
+    harness: ExecutorHarness,
+) -> None:
+    # A lone surrogate is a legal str that strict UTF-8 cannot encode. Sizing
+    # the detail must not be the step that turns a payload raise into
+    # something else, so the character is escaped rather than encoded.
+    completed = run_one(harness, RAISES_LONE_SURROGATE)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert "ValueError" in detail
+    assert "SENTINEL-12345" in detail
+    assert "\\ud800" in detail
+
+
+def test_a_surrogate_escaped_payload_message_is_escaped_not_raised(
+    harness: ExecutorHarness,
+) -> None:
+    # Undecodable OS-level bytes reach Python as surrogateescape code points,
+    # which strict UTF-8 also refuses. Same requirement: escape, never raise.
+    completed = run_one(harness, RAISES_SURROGATE_ESCAPE)
+
+    outcome = completed.result.outcome
+    assert isinstance(outcome, ExitedOutcome)
+    assert outcome.exit_code == 1
+    assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+    detail = completed.result.attribution.detail
+    assert detail is not None
+    assert "OSError" in detail
+    assert "SENTINEL-12345" in detail
+    assert "\\udcff" in detail
 
 
 def test_non_json_return_maps_to_protocol_failure_with_payload_owner(

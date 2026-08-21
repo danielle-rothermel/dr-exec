@@ -48,6 +48,38 @@ RAISES = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="raise_error",
 )
+RAISES_SENTINEL = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_sentinel_value_error",
+)
+RAISES_HUGE_MESSAGE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_huge_message",
+)
+RAISES_UNPRINTABLE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_unprintable",
+)
+RAISES_HOSTILE_ENCODE_MESSAGE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_hostile_encode_message",
+)
+RAISES_HOSTILE_SIZING_MESSAGE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_hostile_sizing_message",
+)
+RAISES_HOSTILE_QUALNAME = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_hostile_qualname",
+)
+RAISES_LONE_SURROGATE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_lone_surrogate",
+)
+RAISES_SURROGATE_ESCAPE = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="raise_surrogate_escape",
+)
 ECHO_OR_RAISE = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="echo_unless_asked_to_raise",
