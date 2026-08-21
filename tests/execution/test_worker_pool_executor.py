@@ -17,6 +17,7 @@ import asyncio
 import io
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -36,7 +37,10 @@ from support.importable_json import (
     BURN_UNTIL_GATE,
     COUNT_IMPORTS,
     ECHO,
+    ECHO_OR_BLOCK,
     EXIT_ABRUPTLY,
+    FORK_CHILD,
+    FORK_THEN_SYSTEM_EXIT,
     IMPORT_BLOCKS,
     IMPORT_FAIL,
     RAISE_SYSTEM_EXIT,
@@ -211,15 +215,13 @@ def test_a_worker_death_mid_job_fails_that_job_with_payload_attribution(
     assert isinstance(completed.record_receipt, WorkerPoolRecordReceipt)
 
 
-def test_system_exit_from_an_entry_point_reports_the_requested_exit_code(
-    tmp_path: Path,
-) -> None:
-    """The worker's own exit status is what the job reports.
+def test_system_exit_from_an_entry_point_kills_the_worker_group() -> None:
+    """SystemExit still ends the worker; group cleanup reports SIGKILL.
 
-    ``SystemExit`` leaves the worker through interpreter shutdown, so its
-    result pipe reaches end of file before the process finishes exiting.
-    Describing the death without reaping the process first would report a
-    kill by the pool instead of the code the entry point asked for.
+    Every worker unwind SIGKILLs the group so a forked descendant cannot
+    hold the result pipe open. An unforked ``SystemExit`` takes that same
+    path, so the job reports the cleanup signal rather than the requested
+    code.
     """
 
     with WorkerPoolImportableJsonExecutor(
@@ -230,9 +232,42 @@ def test_system_exit_from_an_entry_point_reports_the_requested_exit_code(
         )
 
     outcome = completed.result.outcome
-    assert isinstance(outcome, ExitedOutcome)
-    assert outcome.exit_code == 7
+    assert isinstance(outcome, SignaledOutcome)
+    assert outcome.signal_number == signal.SIGKILL
     assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_system_exit_after_a_fork_kills_the_grandchild_and_unblocks_the_parent(
+    tmp_path: Path,
+) -> None:
+    """A leftover that inherited the result pipe must not hang the parent."""
+
+    grandchild_path = tmp_path / "grandchild"
+    job = job_for_entry_point(
+        FORK_THEN_SYSTEM_EXIT,
+        {"grandchild_pid_path": str(grandchild_path)},
+    )
+    completed_holder: list[CompletedExecution] = []
+
+    def run() -> None:
+        with WorkerPoolImportableJsonExecutor(
+            entry_point=FORK_THEN_SYSTEM_EXIT, worker_count=1
+        ) as executor:
+            completed_holder.append(executor.run_blocking(job))
+
+    with cleanup_exact_pids() as registered:
+        driver = threading.Thread(target=run)
+        driver.start()
+        grandchild_pid = _await_pid_file(grandchild_path, driver=driver)
+        registered.append(grandchild_pid)
+        driver.join(WATCHDOG_SECONDS)
+        assert not driver.is_alive()
+        _await_pid_gone(grandchild_pid)
+
+    outcome = completed_holder[0].result.outcome
+    assert isinstance(outcome, SignaledOutcome)
+    assert outcome.signal_number == signal.SIGKILL
+    assert completed_holder[0].result.attribution.owner is FailureOwner.PAYLOAD
 
 
 def test_the_pool_respawns_and_keeps_serving_after_a_worker_dies() -> None:
@@ -589,11 +624,32 @@ def _opened_gate(directory: Path, /) -> Path:
     return gate
 
 
-def _await_marker(marker: Path, /) -> None:
+def _await_marker(
+    marker: Path, /, *, driver: threading.Thread | None = None
+) -> None:
     """Block until the entry point has actually started running."""
 
     while not marker.exists():
-        pass
+        if driver is not None and not driver.is_alive():
+            pytest.fail(
+                "the worker finished before the payload announced ready"
+            )
+
+
+def _await_pid_file(
+    path: Path, /, *, driver: threading.Thread | None = None
+) -> int:
+    """Block until a child has written a parseable pid."""
+
+    while True:
+        if path.exists():
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                return int(text)
+        if driver is not None and not driver.is_alive():
+            pytest.fail(
+                "the worker finished before the grandchild wrote its pid"
+            )
 
 
 def test_map_stream_yields_in_completion_order_not_submission_order(
@@ -1027,6 +1083,161 @@ def test_a_worker_does_not_outlive_a_parent_that_died_abnormally(
         _await_pid_gone(worker_pid)
 
     assert not exact_pid_exists(worker_pid)
+
+
+@pytest.mark.parametrize("mode", [orphan_parent.FORK, orphan_parent.FORK_IDLE])
+def test_an_orphaned_worker_kills_a_grandchild_it_forked(
+    tmp_path: Path, mode: str
+) -> None:
+    """Orphan cleanup must reach descendants that stayed in the worker group.
+
+    ``fork`` leaves the job running so the busy watchdog kills the group.
+    ``fork_idle`` lets the job return first so EOF has to do it.
+    """
+
+    grandchild_path = tmp_path / "grandchild"
+    parent = subprocess.Popen(
+        (
+            sys.executable,
+            str(ORPHAN_PARENT_SCRIPT),
+            mode,
+            str(grandchild_path),
+        ),
+        stdout=subprocess.PIPE,
+        env=_tests_on_path(),
+    )
+    with cleanup_exact_pids() as registered:
+        registered.append(parent.pid)
+        assert parent.stdout is not None
+        worker_pid, grandchild_pid = (
+            int(part) for part in parent.stdout.readline().split()
+        )
+        registered.extend((worker_pid, grandchild_pid))
+        assert exact_pid_exists(worker_pid)
+        assert exact_pid_exists(grandchild_pid)
+
+        parent.kill()
+        parent.wait()
+
+        _await_pid_gone(worker_pid)
+        _await_pid_gone(grandchild_pid)
+
+    assert not exact_pid_exists(worker_pid)
+    assert not exact_pid_exists(grandchild_pid)
+
+
+def test_kill_own_process_group_is_a_no_op_when_this_process_is_not_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "getpid", lambda: 10)
+    monkeypatch.setattr(os, "getpgrp", lambda: 1)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        os, "killpg", lambda pid, number: killed.append((pid, number))
+    )
+
+    worker_pool_worker.kill_own_process_group()
+
+    assert killed == []
+
+
+def test_kill_own_process_group_signals_only_the_group_this_process_leads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "getpid", lambda: 10)
+    monkeypatch.setattr(os, "getpgrp", lambda: 10)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        os, "killpg", lambda pid, number: killed.append((pid, number))
+    )
+
+    worker_pool_worker.kill_own_process_group()
+
+    assert killed == [(10, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize("stopper", ["budget", "cancel"])
+def test_a_declared_stop_kills_a_grandchild_the_worker_forked(
+    tmp_path: Path, stopper: str
+) -> None:
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    ready = tmp_path / "ready"
+    gate = Gate.create(directory, "gate")
+    grandchild_path = tmp_path / "grandchild"
+    token = CancelToken() if stopper == "cancel" else None
+    job = job_for_entry_point(
+        FORK_CHILD,
+        {
+            "ready_path": str(ready),
+            "gate_path": str(gate.path),
+            "grandchild_pid_path": str(grandchild_path),
+        },
+        budgets=Budgets(wall_time=FiniteDurationLimit.from_seconds(2))
+        if stopper == "budget"
+        else None,
+    )
+    completed_holder: list[CompletedExecution] = []
+
+    def run() -> None:
+        with WorkerPoolImportableJsonExecutor(
+            entry_point=FORK_CHILD, worker_count=1
+        ) as executor:
+            completed_holder.append(
+                executor.run_blocking(job, cancellation=token)
+            )
+
+    with cleanup_exact_pids() as registered:
+        driver = threading.Thread(target=run)
+        driver.start()
+        _await_marker(ready, driver=driver)
+        grandchild_pid = _await_pid_file(grandchild_path, driver=driver)
+        registered.append(grandchild_pid)
+        if token is not None:
+            token.cancel()
+        driver.join(WATCHDOG_SECONDS)
+        assert not driver.is_alive()
+        _await_pid_gone(grandchild_pid)
+
+    outcome = completed_holder[0].result.outcome
+    if stopper == "budget":
+        assert isinstance(outcome, BudgetExceededOutcome)
+        assert outcome.axis is BudgetAxis.WALL_TIME
+    else:
+        assert isinstance(outcome, CancelledOutcome)
+
+
+def test_run_many_batch_wall_time_cancels_work_and_leaves_the_pool_reusable(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    ready = tmp_path / "ready"
+    gate = Gate.create(directory, "gate")
+    holder = job_for_entry_point(
+        ECHO_OR_BLOCK,
+        {"ready_path": str(ready), "gate_path": str(gate.path)},
+    )
+    queued = job_for_entry_point(ECHO_OR_BLOCK, {"value": 1})
+
+    with WorkerPoolImportableJsonExecutor(
+        entry_point=ECHO_OR_BLOCK, worker_count=1
+    ) as executor:
+        completed = list(
+            executor.run_many(
+                (holder, queued),
+                wall_time=FiniteDurationLimit(max_ns=500_000_000),
+            )
+        )
+        after = executor.run_blocking(
+            job_for_entry_point(ECHO_OR_BLOCK, {"value": 2})
+        )
+
+    assert len(completed) == 2
+    assert all(
+        isinstance(one.result.outcome, CancelledOutcome) for one in completed
+    )
+    assert parse_importable_json_result(after) == {"value": {"value": 2}}
 
 
 def _await_pid_gone(pid: int, /) -> None:

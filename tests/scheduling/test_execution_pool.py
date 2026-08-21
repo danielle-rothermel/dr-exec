@@ -30,6 +30,7 @@ from dr_exec import (
     ExecutionSubmission,
     ExecutorFailure,
     FakeExecutor,
+    FiniteDurationLimit,
     FixedPoolCapacity,
     JobId,
 )
@@ -78,9 +79,14 @@ def fixed_pool(executor: Executor, slots: int, /) -> ExecutionPool:
 
 
 def batch_of(
-    executor: Executor, batch: Iterable[ExecutionJob], /, *, slots: int
+    executor: Executor,
+    batch: Iterable[ExecutionJob],
+    /,
+    *,
+    slots: int,
+    wall_time: FiniteDurationLimit | None = None,
 ) -> Generator[CompletedExecution]:
-    return run_batch(executor, batch, capacity=slots)
+    return run_batch(executor, batch, capacity=slots, wall_time=wall_time)
 
 
 class RecordingSource:
@@ -1412,6 +1418,57 @@ def test_a_finite_batch_yields_every_one_of_its_completions() -> None:
     }
 
 
+def test_a_batch_wall_time_cancels_inflight_queued_and_remaining_jobs() -> (
+    None
+):
+    executor, responder = gated_executor(cancellation_aware=True)
+    batch = jobs(3)
+    collected: list[CompletedExecution] = []
+
+    def drain() -> None:
+        collected.extend(
+            run_batch(
+                executor,
+                batch,
+                capacity=1,
+                wall_time=FiniteDurationLimit(max_ns=250_000_000),
+            )
+        )
+
+    driver = in_thread(drain)
+    responder.await_arrival(batch[0].job_id)
+    join(driver)
+
+    assert {one.result.execution_id.job_id for one in collected} == {
+        job.job_id for job in batch
+    }
+    assert all(
+        isinstance(one.result.outcome, CancelledOutcome) for one in collected
+    )
+    responder.assert_no_watchers()
+
+
+def test_a_batch_that_finishes_before_its_wall_time_is_not_cancelled() -> None:
+    batch = jobs(3)
+
+    completed = list(
+        batch_of(
+            immediate_executor(),
+            batch,
+            slots=2,
+            wall_time=FiniteDurationLimit(max_ns=30_000_000_000),
+        )
+    )
+
+    assert {one.result.execution_id.job_id for one in completed} == {
+        job.job_id for job in batch
+    }
+    assert all(
+        not isinstance(one.result.outcome, CancelledOutcome)
+        for one in completed
+    )
+
+
 def test_a_finite_batch_consumes_its_input_lazily() -> None:
     batch = jobs(2)
     pulled = 0
@@ -1429,6 +1486,37 @@ def test_a_finite_batch_consumes_its_input_lazily() -> None:
     stream.close()
 
     assert observed <= 2
+
+
+def test_a_batch_wall_time_still_cancels_during_early_close_drain() -> None:
+    batch = jobs(2)
+    first, held = batch
+    responder = GatedResponder(cancellation_aware=True)
+
+    def respond(
+        job: ExecutionJob, token: CancelToken | None, /
+    ) -> CompletedExecution:
+        if job.job_id == first.job_id:
+            return completion_for(job.job_id)
+        return responder(job, token)
+
+    stream = run_batch(
+        FakeExecutor(responder=respond),
+        batch,
+        capacity=2,
+        wall_time=FiniteDurationLimit(max_ns=250_000_000),
+    )
+
+    primer = in_thread(lambda: next(stream, None))
+    responder.await_arrival(held.job_id)
+    join(primer)
+
+    closer = in_thread(stream.close)
+    join(closer)
+
+    assert responder.cancelled == (held.job_id,)
+    assert responder.executor_returned_gate(held.job_id).is_set()
+    responder.assert_no_watchers()
 
 
 def test_an_abandoned_batch_still_drains_its_admitted_work(

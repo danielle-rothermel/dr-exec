@@ -18,6 +18,7 @@ from dr_exec.core.kinds import (
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
+    FiniteDurationLimit,
     InProcessImportableJsonTarget,
 )
 from dr_exec.declarations.transport import request_transport_bytes
@@ -275,11 +276,13 @@ class ImportableJsonExecutor:
         /,
         *,
         config: ExecutionPoolConfig | None = None,
+        wall_time: FiniteDurationLimit | None = None,
     ) -> Iterator[CompletedExecution]:
         return run_batch(
             self,
             jobs,
             capacity=batch_capacity(config, default=AutoPoolCapacity()),
+            wall_time=wall_time,
         )
 
     def open_pool(

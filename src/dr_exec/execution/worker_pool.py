@@ -31,6 +31,7 @@ from dr_exec.core.kinds import (
 from dr_exec.core.names import ExecutionId
 from dr_exec.declarations.models import (
     ExecutionJob,
+    FiniteDurationLimit,
     ImportableEntryPoint,
     InProcessImportableJsonTarget,
 )
@@ -41,6 +42,7 @@ from dr_exec.execution.outcomes import (
     executor_protocol_failure_attribution,
     malformed_frame_outcome,
 )
+from dr_exec.execution.spawn import ESCALATION_SIGNAL, signal_process_group
 from dr_exec.execution.worker_pool_worker import (
     DETAIL_KEY,
     READY_FRAME,
@@ -148,9 +150,13 @@ class _Worker:
         return frame
 
     def terminate(self) -> None:
+        pid = self.process.pid
         if self.process.poll() is None:
-            self.process.kill()
+            signal_process_group(pid, ESCALATION_SIGNAL)
+            if self.process.poll() is None:
+                self.process.kill()
         self.process.wait()
+        signal_process_group(pid, ESCALATION_SIGNAL)
         self.reader.join()
         _close_quietly(self.requests)
 
@@ -480,6 +486,7 @@ class WorkerPoolImportableJsonExecutor:
         /,
         *,
         config: ExecutionPoolConfig | None = None,
+        wall_time: FiniteDurationLimit | None = None,
     ) -> Iterator[CompletedExecution]:
         """Stream a finite batch in completion order across the workers."""
 
@@ -490,6 +497,7 @@ class WorkerPoolImportableJsonExecutor:
                 config,
                 default=FixedPoolCapacity(max_active_jobs=self.width),
             ),
+            wall_time=wall_time,
         )
 
     def open_pool(
@@ -735,6 +743,7 @@ def _spawn_worker(entry_point: ImportableEntryPoint, /) -> _Worker:
             ),
             pass_fds=(request_read, result_write),
             close_fds=True,
+            process_group=0,
         )
     except OSError as error:
         for descriptor in (

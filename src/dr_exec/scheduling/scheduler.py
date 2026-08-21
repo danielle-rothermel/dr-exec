@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import time
 from collections import deque
 from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from enum import UNIQUE, Enum, auto, verify
-from threading import Condition, Thread
+from threading import Condition, Event, Thread
 from typing import TYPE_CHECKING
 
 from dr_exec.core.cancel import CancelToken
 from dr_exec.core.errors import ExecutorFailure
 from dr_exec.core.kinds import ExecutorFailureCode
+from dr_exec.declarations.models import FiniteDurationLimit
 
 if TYPE_CHECKING:
     from dr_exec.capabilities.protocols import Executor
@@ -63,6 +65,7 @@ class ExecutionScheduler[ContextT]:
         "_capacity",
         "_condition",
         "_executor",
+        "_expired",
         "_intake_closed",
         "_next_ticket",
         "_notify_change",
@@ -95,6 +98,7 @@ class ExecutionScheduler[ContextT]:
         self._residents = 0
         self._running = 0
         self._intake_closed = False
+        self._expired = False
         self._broken: BaseException | None = None
 
     def can_admit(self) -> bool:
@@ -112,6 +116,8 @@ class ExecutionScheduler[ContextT]:
             ticket = self._next_ticket
             self._next_ticket += 1
             token = CancelToken()
+            if self._expired:
+                token.cancel()
             self._tokens[ticket] = token
             self._pending.append(_Admitted(ticket, job, context, token))
             self._residents += 1
@@ -179,6 +185,19 @@ class ExecutionScheduler[ContextT]:
 
     def cancel_all(self) -> None:
         with self._condition:
+            for token in tuple(self._tokens.values()):
+                token.cancel()
+            self._announce_change()
+
+    def expire(self) -> None:
+        """Cancel live work and birth later tokens already cancelled.
+
+        Intake stays open so remaining source jobs still admit and complete
+        as ``CancelledOutcome`` rather than vanishing from the batch.
+        """
+
+        with self._condition:
+            self._expired = True
             for token in tuple(self._tokens.values()):
                 token.cancel()
             self._announce_change()
@@ -358,11 +377,17 @@ def run_batch(
     /,
     *,
     capacity: int,
+    wall_time: FiniteDurationLimit | None = None,
 ) -> Generator[CompletedExecution]:
     """Stream a finite batch in completion order under a private scheduler.
 
     Input is consumed lazily. Exhaustion or explicit close drains admitted
     work; dropping an unclosed iterator does not guarantee prompt cleanup.
+    A finite ``wall_time`` is an operation-wide ceiling: on expiry the
+    scheduler cancels in-flight and remaining jobs as ``CancelledOutcome``.
+    How forcibly that happens is the executor's existing cancel path —
+    worker-pool and ``ProcessExecutor`` terminate, in-process stays
+    cooperative — and the watcher stays armed through early-close drain.
     """
 
     scheduler: ExecutionScheduler[None] = ExecutionScheduler(
@@ -371,6 +396,14 @@ def run_batch(
     source = iter(jobs)
     exhausted = False
     carried: ExecutionJob | None = None
+    disarm = Event()
+    if wall_time is not None:
+        Thread(
+            target=_watch_batch_deadline,
+            args=(scheduler, time.monotonic_ns() + wall_time.limit, disarm),
+            name="dr-exec-batch-deadline",
+            daemon=True,
+        ).start()
     try:
         while True:
             while not exhausted and scheduler.can_admit():
@@ -397,7 +430,22 @@ def run_batch(
     finally:
         scheduler.close_intake()
         scheduler.wait_for_quiescence()
+        disarm.set()
         scheduler.shutdown()
+
+
+def _watch_batch_deadline(
+    scheduler: ExecutionScheduler[object],
+    deadline_ns: int,
+    disarm: Event,
+    /,
+) -> None:
+    remaining = (deadline_ns - time.monotonic_ns()) / 1e9
+    if remaining > 0 and disarm.wait(timeout=remaining):
+        return
+    if disarm.is_set():
+        return
+    scheduler.expire()
 
 
 __all__ = [

@@ -18,6 +18,7 @@ from dr_exec import (
     ExecutionJob,
     ExecutionPool,
     ExecutionPoolConfig,
+    FiniteDurationLimit,
     ImportableEntryPoint,
     ImportableJsonExecutor,
     InProcessRecordReceipt,
@@ -83,6 +84,18 @@ BURN_UNTIL_GATE = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="burn_until_gate",
 )
+FORK_CHILD = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="fork_child",
+)
+FORK_THEN_SYSTEM_EXIT = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="fork_then_system_exit",
+)
+ECHO_OR_BLOCK = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="echo_or_block_on_gate",
+)
 COUNT_IMPORTS = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="import_count",
@@ -111,6 +124,7 @@ class PooledExecutor(Executor, Protocol):
         /,
         *,
         config: ExecutionPoolConfig | None = None,
+        wall_time: FiniteDurationLimit | None = None,
     ) -> Iterator[CompletedExecution]:
         raise NotImplementedError
 

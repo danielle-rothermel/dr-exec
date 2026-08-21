@@ -5,6 +5,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-08-21
+
+### Added
+
+- `run_batch` and each executor's `run_many` accept an optional finite
+  `wall_time`. On expiry, remaining jobs complete as `CancelledOutcome` and
+  in-flight work tears down through the existing cancel path. The watcher
+  stays armed through early-close drain; in-process cancellation stays
+  cooperative.
+
+### Changed
+
+- Worker-pool workers lead their own process group. Orphan cleanup and
+  parent-side stop SIGKILL that group so grandchildren that stay in it die
+  with the worker. Idle EOF takes the same group path as a busy orphan, so
+  leftovers from a completed job die too. Every worker exit, including
+  `SystemExit` and a failed startup import, takes that group path so a
+  descendant cannot hold the result pipe open.
+- Updated `dr-store` to 0.2.5.
+
 ## [0.1.11] - 2026-08-18
 
 ### Added

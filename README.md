@@ -314,7 +314,8 @@ vocabulary while doing essentially nothing extra.
 - **Its budgets are advisory.** A finite wall-time budget arms a cancel signal
   that is checked *before* the entry point is called and *after* it returns. It
   cannot interrupt a running call. An entry point that spins forever spins
-  forever. Cancellation is cooperative, not enforced.
+  forever. Cancellation is cooperative, not enforced, including a batch
+  `wall_time` on `run_many`.
 
 Also: no isolation, no durable run record, no environment grant, and a crash in
 the entry point is a crash in your process.
@@ -453,18 +454,27 @@ worker-pool record receipt. A worker that dies mid-job fails **that job**
 loudly, with attribution distinguishing a payload-caused crash from a pool
 failure, and the pool respawns a replacement worker; no job silently hangs or
 disappears. Budgets remain unbudgeted by default; when a caller declares a
-finite wall-time budget, the pool enforces it by terminating the worker, which
-makes the budget real rather than advisory. If scheduling machinery breaks, the
+finite wall-time budget, the pool enforces it by terminating the worker's
+process group, which makes the budget real rather than advisory. If scheduling machinery breaks, the
 pool raises `SchedulerBroken` from `dr_exec`; queued work is dropped with no
 terminal outcome, so callers must reconcile the whole in-flight window rather
 than trust per-job results alone.
 
 Workers do not outlive the pool that owns them, even if the owning process dies
-abnormally and never gets to close anything. An idle worker ends when its
-request pipe reaches end of file; a worker in the middle of a job is not
-reading that pipe, so it instead notices that it has been reparented and exits.
-This is best-effort cleanup for an abnormal death, not supervision: it puts no
-ceiling on how long a job may run or how large a payload may be.
+abnormally and never gets to close anything. Each worker leads its own process
+group. An idle worker ends when its request pipe reaches end of file; a worker
+in the middle of a job is not reading that pipe, so it instead notices that it
+has been reparented. Every worker exit SIGKILLs that group, including
+`SystemExit`, a failed startup import, and leftovers from a job that already
+returned, so a descendant cannot hold the result pipe open. Parent-side
+deadline, cancel, and close take the same group path. Descendants that remain
+in the group die with the worker; a descendant that creates another session
+can leave it and survive. This is best-effort cleanup for an abnormal death,
+not supervision: it puts no ceiling on how long a job may run or how large a
+payload may be. `run_many` may also declare a finite batch `wall_time` that
+cancels remaining work as `CancelledOutcome`. That ceiling is only as
+forcible as the executor's cancel path: worker-pool and `ProcessExecutor`
+terminate in-flight work; in-process cancellation stays cooperative.
 
 ## Runtime
 
@@ -559,6 +569,7 @@ class ProcessExecutor:
         /,
         *,
         config: ExecutionPoolConfig | None = None,
+        wall_time: FiniteDurationLimit | None = None,
     ) -> Iterator[CompletedExecution]: ...
 
     def open_pool(

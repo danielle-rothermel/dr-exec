@@ -40,7 +40,7 @@ wheels = [
 
 [[package]]
 name = "dr-exec"
-version = "0.1.11"
+version = "0.1.12"
 source = { editable = "." }
 dependencies = [
     { name = "dr-serialize" },
@@ -59,7 +59,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dr-serialize", specifier = "==0.1.2" },
-    { name = "dr-store", specifier = "==0.2.3" },
+    { name = "dr-store", specifier = "==0.2.5" },
     { name = "pydantic", specifier = "==2.13.4" },
 ]
 
@@ -85,7 +85,7 @@ wheels = [
 
 [[package]]
 name = "dr-store"
-version = "0.2.3"
+version = "0.2.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dr-serialize" },
@@ -93,9 +93,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ae/a3/3c509a09d571f028a019eb60cdd29acce7c935d2d28fbdc086da083cfa3b/dr_store-0.2.3.tar.gz", hash = "sha256:fc7fa39e56d094ac3427e1aeb095bec93ff9af12b78ccd4bf075cd57fd86c62f", size = 54349, upload-time = "2026-08-12T19:09:55.904Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/5b/6b8d34c4e2217d2f06981792f7ec06aa83608c606e70d9f141ca35b4192b/dr_store-0.2.5.tar.gz", hash = "sha256:2710e6af17b61d7748eff0ed8bb217e03c427ee85b00b1c1089ded817c61d4d2", size = 82810, upload-time = "2026-08-21T05:19:32.304Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e9/bd/582436e02202b4f7edcde6435f04dd50be984bfb3f54fe25db699bb29cdc/dr_store-0.2.3-py3-none-any.whl", hash = "sha256:9945d3d8cdd26380d7ff1eac42831b4f7da0f23a66afe48b63c17f56543ee8e4", size = 62886, upload-time = "2026-08-12T19:09:54.481Z" },
+    { url = "https://files.pythonhosted.org/packages/15/9e/83d5ddb187ccc56a30fe602ebea1ac2a37b34d2af64109b25f3927f4a76b/dr_store-0.2.5-py3-none-any.whl", hash = "sha256:b54bc03d298e57c41bd6f657de151bbde798f4921726c20ff74dfda79edaee49", size = 99079, upload-time = "2026-08-21T05:19:30.741Z" },
 ]
 
 [[package]]
