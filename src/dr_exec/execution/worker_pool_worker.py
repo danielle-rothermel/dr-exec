@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -73,6 +74,13 @@ def main() -> None:
     result_fd = int(sys.argv[4])
     parent_pid = int(sys.argv[5])
 
+    # Own group so orphan and parent-side stop reach grandchildren that
+    # stay in it. Idempotent when spawn already passed process_group=0.
+    try:
+        os.setpgid(0, 0)
+    except OSError:
+        pass
+
     # Started before the entry-point import, because an import that blocks
     # forever would otherwise outlive the parent just as a job would.
     watch_parent(parent_pid)
@@ -115,6 +123,7 @@ def watch_parent(parent_pid: int, /) -> threading.Thread:
             time.sleep(PARENT_LIVENESS_POLL_SECONDS)
         # The pipes lead nowhere and the entry point may hold locks or be
         # uninterruptible, so leave immediately rather than unwinding.
+        kill_own_process_group()
         os._exit(ORPHANED_WORKER_EXIT_CODE)
 
     watchdog = threading.Thread(
@@ -122,6 +131,22 @@ def watch_parent(parent_pid: int, /) -> threading.Thread:
     )
     watchdog.start()
     return watchdog
+
+
+def kill_own_process_group() -> None:
+    """SIGKILL this worker's group only when this process leads it.
+
+    A worker that failed ``setpgid`` still shares the parent's group.
+    ``killpg(getpgrp())`` in that state would take the parent with it.
+    """
+
+    pid = os.getpid()
+    if os.getpgrp() != pid:
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def open_request_reader(request_fd: int, /) -> IO[bytes]:

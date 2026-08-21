@@ -17,6 +17,7 @@ import asyncio
 import io
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -36,7 +37,9 @@ from support.importable_json import (
     BURN_UNTIL_GATE,
     COUNT_IMPORTS,
     ECHO,
+    ECHO_OR_BLOCK,
     EXIT_ABRUPTLY,
+    FORK_CHILD,
     IMPORT_BLOCKS,
     IMPORT_FAIL,
     RAISE_SYSTEM_EXIT,
@@ -596,6 +599,16 @@ def _await_marker(marker: Path, /) -> None:
         pass
 
 
+def _await_pid_file(path: Path, /) -> int:
+    """Block until a child has written a parseable pid."""
+
+    while True:
+        if path.exists():
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                return int(text)
+
+
 def test_map_stream_yields_in_completion_order_not_submission_order(
     tmp_path: Path,
 ) -> None:
@@ -1027,6 +1040,156 @@ def test_a_worker_does_not_outlive_a_parent_that_died_abnormally(
         _await_pid_gone(worker_pid)
 
     assert not exact_pid_exists(worker_pid)
+
+
+def test_an_orphaned_worker_kills_a_grandchild_it_forked(
+    tmp_path: Path,
+) -> None:
+    """Orphan cleanup must reach descendants that stayed in the worker group."""
+
+    grandchild_path = tmp_path / "grandchild"
+    parent = subprocess.Popen(
+        (
+            sys.executable,
+            str(ORPHAN_PARENT_SCRIPT),
+            orphan_parent.FORK,
+            str(grandchild_path),
+        ),
+        stdout=subprocess.PIPE,
+        env=_tests_on_path(),
+    )
+    with cleanup_exact_pids() as registered:
+        registered.append(parent.pid)
+        assert parent.stdout is not None
+        worker_pid, grandchild_pid = (
+            int(part) for part in parent.stdout.readline().split()
+        )
+        registered.extend((worker_pid, grandchild_pid))
+        assert exact_pid_exists(worker_pid)
+        assert exact_pid_exists(grandchild_pid)
+
+        parent.kill()
+        parent.wait()
+
+        _await_pid_gone(worker_pid)
+        _await_pid_gone(grandchild_pid)
+
+    assert not exact_pid_exists(worker_pid)
+    assert not exact_pid_exists(grandchild_pid)
+
+
+def test_kill_own_process_group_is_a_no_op_when_this_process_is_not_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "getpid", lambda: 10)
+    monkeypatch.setattr(os, "getpgrp", lambda: 1)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        os, "killpg", lambda pid, number: killed.append((pid, number))
+    )
+
+    worker_pool_worker.kill_own_process_group()
+
+    assert killed == []
+
+
+def test_kill_own_process_group_signals_only_the_group_this_process_leads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "getpid", lambda: 10)
+    monkeypatch.setattr(os, "getpgrp", lambda: 10)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        os, "killpg", lambda pid, number: killed.append((pid, number))
+    )
+
+    worker_pool_worker.kill_own_process_group()
+
+    assert killed == [(10, signal.SIGKILL)]
+
+
+@pytest.mark.parametrize("stopper", ["budget", "cancel"])
+def test_a_declared_stop_kills_a_grandchild_the_worker_forked(
+    tmp_path: Path, stopper: str
+) -> None:
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    ready = tmp_path / "ready"
+    gate = Gate.create(directory, "gate")
+    grandchild_path = tmp_path / "grandchild"
+    token = CancelToken() if stopper == "cancel" else None
+    job = job_for_entry_point(
+        FORK_CHILD,
+        {
+            "ready_path": str(ready),
+            "gate_path": str(gate.path),
+            "grandchild_pid_path": str(grandchild_path),
+        },
+        budgets=Budgets(wall_time=FiniteDurationLimit(max_ns=250_000_000))
+        if stopper == "budget"
+        else None,
+    )
+    completed_holder: list[CompletedExecution] = []
+
+    def run() -> None:
+        with WorkerPoolImportableJsonExecutor(
+            entry_point=FORK_CHILD, worker_count=1
+        ) as executor:
+            completed_holder.append(
+                executor.run_blocking(job, cancellation=token)
+            )
+
+    with cleanup_exact_pids() as registered:
+        driver = threading.Thread(target=run)
+        driver.start()
+        _await_marker(ready)
+        grandchild_pid = _await_pid_file(grandchild_path)
+        registered.append(grandchild_pid)
+        if token is not None:
+            token.cancel()
+        driver.join(WATCHDOG_SECONDS)
+        assert not driver.is_alive()
+        assert not exact_pid_exists(grandchild_pid)
+
+    outcome = completed_holder[0].result.outcome
+    if stopper == "budget":
+        assert isinstance(outcome, BudgetExceededOutcome)
+        assert outcome.axis is BudgetAxis.WALL_TIME
+    else:
+        assert isinstance(outcome, CancelledOutcome)
+
+
+def test_run_many_batch_wall_time_cancels_work_and_leaves_the_pool_reusable(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "gates"
+    directory.mkdir()
+    ready = tmp_path / "ready"
+    gate = Gate.create(directory, "gate")
+    holder = job_for_entry_point(
+        ECHO_OR_BLOCK,
+        {"ready_path": str(ready), "gate_path": str(gate.path)},
+    )
+    queued = job_for_entry_point(ECHO_OR_BLOCK, {"value": 1})
+
+    with WorkerPoolImportableJsonExecutor(
+        entry_point=ECHO_OR_BLOCK, worker_count=1
+    ) as executor:
+        completed = list(
+            executor.run_many(
+                (holder, queued),
+                wall_time=FiniteDurationLimit(max_ns=500_000_000),
+            )
+        )
+        after = executor.run_blocking(
+            job_for_entry_point(ECHO_OR_BLOCK, {"value": 2})
+        )
+
+    assert len(completed) == 2
+    assert all(
+        isinstance(one.result.outcome, CancelledOutcome) for one in completed
+    )
+    assert parse_importable_json_result(after) == {"value": {"value": 2}}
 
 
 def _await_pid_gone(pid: int, /) -> None:

@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `run_batch` and each executor's `run_many` accept an optional finite
+  `wall_time`. On expiry, remaining jobs complete as `CancelledOutcome` and
+  in-flight work tears down through the existing cancel path.
+
+### Changed
+
+- Worker-pool workers lead their own process group. Orphan cleanup and
+  parent-side stop SIGKILL that group so grandchildren that stay in it die
+  with the worker.
+
 ## [0.1.11] - 2026-08-18
 
 ### Added

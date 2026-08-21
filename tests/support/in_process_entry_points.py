@@ -120,6 +120,37 @@ def block_on_gate(value: dict[str, object]) -> dict[str, object]:
     return {"released": True}
 
 
+def fork_child(value: dict[str, object]) -> dict[str, object]:
+    """Fork a grandchild that stays in this process group, then block.
+
+    The grandchild writes its pid and lives until the group is signaled.
+    The worker announces ready and waits on the caller's gate when one is
+    given, or sleeps when the orphan-parent helper asks it to.
+    """
+
+    grandchild_pid_path = Path(str(value["grandchild_pid_path"]))
+    child = os.fork()
+    if child == 0:
+        staged = grandchild_pid_path.with_name(
+            grandchild_pid_path.name + ".staging"
+        )
+        staged.write_text(str(os.getpid()), encoding="utf-8")
+        staged.replace(grandchild_pid_path)
+        while True:
+            time.sleep(3600)
+    if "gate_path" in value:
+        Path(str(value["ready_path"])).touch()
+        with Path(str(value["gate_path"])).open("rb") as gate:
+            gate.read(1)
+        return {"released": True}
+    seconds = 100_000.0
+    raw_seconds = value.get("seconds")
+    if isinstance(raw_seconds, int | float):
+        seconds = float(raw_seconds)
+    time.sleep(seconds)
+    return {"ok": True}
+
+
 def burn_until_gate(value: dict[str, object]) -> dict[str, object]:
     """Announce readiness, then spin on CPU until killed or released.
 

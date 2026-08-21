@@ -5,7 +5,11 @@ from dataclasses import dataclass, field
 
 from dr_exec.capabilities.protocols import RunStore, Runtime
 from dr_exec.core.cancel import CancelToken
-from dr_exec.declarations.models import ExecutionJob, ExecutorSelfBudgets
+from dr_exec.declarations.models import (
+    ExecutionJob,
+    ExecutorSelfBudgets,
+    FiniteDurationLimit,
+)
 from dr_exec.execution.engine import run_execution
 from dr_exec.recording.models import CompletedExecution
 from dr_exec.scheduling.offload import offload_run_blocking
@@ -58,11 +62,13 @@ class ProcessExecutor:
         /,
         *,
         config: ExecutionPoolConfig | None = None,
+        wall_time: FiniteDurationLimit | None = None,
     ) -> Iterator[CompletedExecution]:
         return run_batch(
             self,
             jobs,
             capacity=batch_capacity(config, default=AutoPoolCapacity()),
+            wall_time=wall_time,
         )
 
     def open_pool(

@@ -233,7 +233,9 @@ completions in completion order. Every `ProcessExecutor` production job \
 executes in a fresh child; `ProcessExecutor` provides no warm-child reuse. \
 Worker pool importable JSON execution deliberately reuses long-lived worker \
 processes for parallelism, creating no durable record and making no containment \
-claim. V1 provides no dimension model or cross-product batching."""
+claim. V1 provides no dimension model or cross-product batching. `run_batch` \
+and each executor's `run_many` accept an optional finite batch `wall_time` \
+that is a scheduler lifecycle bound, not a per-job workload budget."""
 rationale = """
 One resident bound prevents unbounded intake while keeping domain dimensions \
 and completeness outside execution infrastructure. Scheduling capacity is the \
@@ -444,15 +446,18 @@ of blocking the caller. After close, new jobs fail cleanly as \
 `ProtocolFailedOutcome` rather than reusing terminated workers left in idle \
 slots. A worker does not outlive the parent that owns it: an \
 idle worker ends at request-pipe EOF, and a worker inside a job ends when it \
-observes that it has been reparented. That cleanup bounds only an orphan's \
-survival, never a job's runtime or a payload's size."""
+observes that it has been reparented and SIGKILLs the process group it leads \
+before exiting. Descendants that remain in that group die with it; a \
+descendant that creates another session can leave the group and survive. That \
+cleanup bounds only an orphan's survival, never a job's runtime or a payload's \
+size."""
 rationale = """
 Loud, attributed failure is the only honest report when a process disappears \
 mid-job, and retrying work whose side effects are unknown would be worse than \
 failing it. A parent killed abnormally never gets to clean up, so a worker \
-that cannot reach anyone with its answer has to end itself rather than hold a \
-core indefinitely."""
-date = "2026-08-11"
+that cannot reach anyone with its answer has to end itself and the ordinary \
+descendants it spawned rather than hold a core indefinitely."""
+date = "2026-08-20"
 
 [[contracts]]
 title = "Worker pool budgets stay unbudgeted until declared"
@@ -460,17 +465,35 @@ statement = """
 Worker pool jobs default to `Budgets.unbudgeted()` and receive no deadline, \
 timer, watchdog, size limit, queue bound, worker recycling, jobs-per-worker \
 ceiling, idle timeout, restart budget, or heartbeat. Only a caller-declared \
-finite wall-time budget arms a deadline, enforced by terminating the worker and \
-completing the job as `BudgetExceededOutcome`; caller cancellation takes the \
-same path and completes as `CancelledOutcome`. A finite input-bytes budget is \
-checked before dispatch and a finite payload_output budget is rejected, as for \
-in-process jobs. A declared stop condition covers the whole job, including the \
-wait for a worker's entry-point import, so a blocking import cannot outlive it. \
+finite wall-time budget arms a deadline, enforced by terminating the worker's \
+process group and completing the job as `BudgetExceededOutcome`; caller \
+cancellation takes the same path and completes as `CancelledOutcome`. A finite \
+input-bytes budget is checked before dispatch and a finite payload_output \
+budget is rejected, as for in-process jobs. A declared stop condition covers \
+the whole job, including the wait for a worker's entry-point import, so a \
+blocking import cannot outlive it. `run_many` and `run_batch` may declare a \
+finite batch `wall_time` that cancels remaining work as `CancelledOutcome`. \
 `map_stream` concurrency is a parallelism width whose default saturates the \
 workers rather than throttling them, and a map stream delivers only its own \
 submissions' completions so streams sharing a pool never starve each other."""
 rationale = """
-Terminating a worker is what makes a declared wall-time budget real rather than \
-advisory, and confining every limit to explicit declaration keeps the mode's \
-defaults honest about imposing none."""
-date = "2026-08-11"
+Terminating a worker's process group is what makes a declared wall-time budget \
+real for ordinary descendants rather than advisory, and confining every limit \
+to explicit declaration keeps the mode's defaults honest about imposing none."""
+date = "2026-08-20"
+
+[[contracts]]
+title = "A batch wall deadline is a scheduler lifecycle bound"
+statement = """
+`run_batch` and each concrete executor's `run_many` accept an optional finite \
+`wall_time`. The default is no operation-wide ceiling. On expiry the private \
+scheduler cancels live tokens and births later tokens already cancelled so \
+in-flight jobs tear down through each executor's existing cancel path and \
+remaining source jobs still complete as `CancelledOutcome`. The bound is \
+neither a per-job workload budget nor an executor self-budget. \
+`ExecutionPool`, `open_pool`, and `map_stream` do not take this deadline."""
+rationale = """
+A batch ceiling is a lifecycle concern of the batch primitive. Reusing \
+scheduler tokens keeps one cancellation path and one outcome kind rather than \
+asking every caller to wrap `run_many` with a clock."""
+date = "2026-08-20"
