@@ -40,6 +40,7 @@ from support.importable_json import (
     ECHO_OR_BLOCK,
     EXIT_ABRUPTLY,
     FORK_CHILD,
+    FORK_THEN_SYSTEM_EXIT,
     IMPORT_BLOCKS,
     IMPORT_FAIL,
     RAISE_SYSTEM_EXIT,
@@ -214,15 +215,13 @@ def test_a_worker_death_mid_job_fails_that_job_with_payload_attribution(
     assert isinstance(completed.record_receipt, WorkerPoolRecordReceipt)
 
 
-def test_system_exit_from_an_entry_point_reports_the_requested_exit_code(
-    tmp_path: Path,
-) -> None:
-    """The worker's own exit status is what the job reports.
+def test_system_exit_from_an_entry_point_kills_the_worker_group() -> None:
+    """SystemExit still ends the worker; group cleanup reports SIGKILL.
 
-    ``SystemExit`` leaves the worker through interpreter shutdown, so its
-    result pipe reaches end of file before the process finishes exiting.
-    Describing the death without reaping the process first would report a
-    kill by the pool instead of the code the entry point asked for.
+    Every worker unwind SIGKILLs the group so a forked descendant cannot
+    hold the result pipe open. An unforked ``SystemExit`` takes that same
+    path, so the job reports the cleanup signal rather than the requested
+    code.
     """
 
     with WorkerPoolImportableJsonExecutor(
@@ -233,9 +232,42 @@ def test_system_exit_from_an_entry_point_reports_the_requested_exit_code(
         )
 
     outcome = completed.result.outcome
-    assert isinstance(outcome, ExitedOutcome)
-    assert outcome.exit_code == 7
+    assert isinstance(outcome, SignaledOutcome)
+    assert outcome.signal_number == signal.SIGKILL
     assert completed.result.attribution.owner is FailureOwner.PAYLOAD
+
+
+def test_system_exit_after_a_fork_kills_the_grandchild_and_unblocks_the_parent(
+    tmp_path: Path,
+) -> None:
+    """A leftover that inherited the result pipe must not hang the parent."""
+
+    grandchild_path = tmp_path / "grandchild"
+    job = job_for_entry_point(
+        FORK_THEN_SYSTEM_EXIT,
+        {"grandchild_pid_path": str(grandchild_path)},
+    )
+    completed_holder: list[CompletedExecution] = []
+
+    def run() -> None:
+        with WorkerPoolImportableJsonExecutor(
+            entry_point=FORK_THEN_SYSTEM_EXIT, worker_count=1
+        ) as executor:
+            completed_holder.append(executor.run_blocking(job))
+
+    with cleanup_exact_pids() as registered:
+        driver = threading.Thread(target=run)
+        driver.start()
+        grandchild_pid = _await_pid_file(grandchild_path, driver=driver)
+        registered.append(grandchild_pid)
+        driver.join(WATCHDOG_SECONDS)
+        assert not driver.is_alive()
+        _await_pid_gone(grandchild_pid)
+
+    outcome = completed_holder[0].result.outcome
+    assert isinstance(outcome, SignaledOutcome)
+    assert outcome.signal_number == signal.SIGKILL
+    assert completed_holder[0].result.attribution.owner is FailureOwner.PAYLOAD
 
 
 def test_the_pool_respawns_and_keeps_serving_after_a_worker_dies() -> None:

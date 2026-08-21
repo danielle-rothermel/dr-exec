@@ -151,6 +151,32 @@ def fork_child(value: dict[str, object]) -> dict[str, object]:
     return {"ok": True}
 
 
+def fork_then_system_exit(value: dict[str, object]) -> None:
+    """Fork a grandchild, then leave through SystemExit.
+
+    The parent waits until the grandchild has written its pid so a test
+    can observe it, then raises. Group cleanup on that unwind is what
+    must kill the leftover and unblock the worker-pool parent.
+    """
+
+    grandchild_pid_path = Path(str(value["grandchild_pid_path"]))
+    child = os.fork()
+    if child == 0:
+        staged = grandchild_pid_path.with_name(
+            grandchild_pid_path.name + ".staging"
+        )
+        staged.write_text(str(os.getpid()), encoding="utf-8")
+        staged.replace(grandchild_pid_path)
+        while True:
+            time.sleep(3600)
+    while (
+        not grandchild_pid_path.exists()
+        or not grandchild_pid_path.read_text(encoding="utf-8").strip()
+    ):
+        time.sleep(0.01)
+    raise SystemExit(7)
+
+
 def burn_until_gate(value: dict[str, object]) -> dict[str, object]:
     """Announce readiness, then spin on CPU until killed or released.
 

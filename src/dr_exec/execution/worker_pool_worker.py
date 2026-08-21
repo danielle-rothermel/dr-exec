@@ -90,17 +90,19 @@ def main() -> None:
     # flushed whole, and the parent must see it immediately.
     results = os.fdopen(result_fd, "wb", buffering=0)
     try:
-        entry_point = _resolve_entry_point(module_name, attribute_name)
-    except BaseException:  # noqa: BLE001 - the parent sees a closed pipe
-        results.close()
-        sys.exit(_STARTUP_IMPORT_FAILED_EXIT_CODE)
-    _write_frame(results, READY_FRAME)
-    _serve(entry_point, requests=requests, results=results)
-    # A completed job can leave descendants in this group. Normal
-    # leader exit does not kill them, and the daemon watchdog may
-    # not run before interpreter shutdown, so EOF must take the
-    # same group path as a busy orphan.
-    kill_own_process_group()
+        try:
+            entry_point = _resolve_entry_point(module_name, attribute_name)
+        except BaseException:  # noqa: BLE001 - the parent sees a closed pipe
+            results.close()
+            sys.exit(_STARTUP_IMPORT_FAILED_EXIT_CODE)
+        _write_frame(results, READY_FRAME)
+        _serve(entry_point, requests=requests, results=results)
+    finally:
+        # A descendant can inherit the result pipe. Normal leader exit,
+        # SystemExit, and a failed startup import would otherwise leave
+        # that copy open so the parent waits forever for EOF and never
+        # reaches its own group kill.
+        kill_own_process_group()
 
 
 def watch_parent(parent_pid: int, /) -> threading.Thread:

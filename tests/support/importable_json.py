@@ -88,6 +88,10 @@ FORK_CHILD = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="fork_child",
 )
+FORK_THEN_SYSTEM_EXIT = ImportableEntryPoint(
+    module_name=ENTRY_POINT_MODULE,
+    attribute_name="fork_then_system_exit",
+)
 ECHO_OR_BLOCK = ImportableEntryPoint(
     module_name=ENTRY_POINT_MODULE,
     attribute_name="echo_or_block_on_gate",

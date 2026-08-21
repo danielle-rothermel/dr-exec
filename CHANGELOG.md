@@ -20,7 +20,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Worker-pool workers lead their own process group. Orphan cleanup and
   parent-side stop SIGKILL that group so grandchildren that stay in it die
   with the worker. Idle EOF takes the same group path as a busy orphan, so
-  leftovers from a completed job die too.
+  leftovers from a completed job die too. Every worker exit, including
+  `SystemExit` and a failed startup import, takes that group path so a
+  descendant cannot hold the result pipe open.
 - Updated `dr-store` to 0.2.5.
 
 ## [0.1.11] - 2026-08-18
