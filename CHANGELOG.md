@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Run-record `schema_version` is 2. New finalized cancelled records persist
   `result.outcome.started`. Existing v1 manifests no longer load.
+- Updated `dr-store` to 0.2.6.
 
 ## [0.1.13] - 2026-08-21
 
