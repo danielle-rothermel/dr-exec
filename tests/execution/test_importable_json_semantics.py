@@ -28,6 +28,7 @@ from support.importable_json import (
     IMPORT_FAIL,
     MISSING_MODULE,
     NOT_CALLABLE,
+    RAISE_SYSTEM_EXIT,
     RAISES,
     RAISES_HOSTILE_ENCODE_MESSAGE,
     RAISES_HOSTILE_QUALNAME,
@@ -404,6 +405,28 @@ def test_pre_cancelled_token_returns_cancelled_outcome(
     assert completed.result.attribution.owner is FailureOwner.NONE
 
 
+def test_cancel_after_entry_outranks_a_non_json_result(
+    harness: ExecutorHarness,
+    tmp_path: Path,
+) -> None:
+    completed = _cancel_after_ready(
+        harness, RETURN_NON_JSON, tmp_path / "non-json"
+    )
+
+    assert completed.result.outcome == CancelledOutcome(started=True)
+
+
+def test_cancel_after_entry_outranks_system_exit(
+    harness: ExecutorHarness,
+    tmp_path: Path,
+) -> None:
+    completed = _cancel_after_ready(
+        harness, RAISE_SYSTEM_EXIT, tmp_path / "system-exit"
+    )
+
+    assert completed.result.outcome == CancelledOutcome(started=True)
+
+
 def test_an_unbudgeted_job_installs_no_deadline(
     harness: ExecutorHarness,
 ) -> None:
@@ -576,6 +599,36 @@ def test_a_job_admitted_after_the_batch_wall_reports_started_false(
     }
     assert outcomes[holder.job_id] == CancelledOutcome(started=True)
     assert outcomes[later.job_id] == CancelledOutcome(started=False)
+
+
+def _cancel_after_ready(
+    harness: ExecutorHarness,
+    entry_point: ImportableEntryPoint,
+    directory: Path,
+    /,
+) -> CompletedExecution:
+    directory.mkdir()
+    ready = directory / "ready"
+    gate = Gate.create(directory, "gate")
+    token = CancelToken()
+    job = build_job(
+        entry_point,
+        {"ready_path": str(ready), "gate_path": str(gate.path)},
+    )
+    collected: list[CompletedExecution] = []
+
+    def run() -> None:
+        with harness.open(entry_point, workers=1) as executor:
+            collected.append(executor.run_blocking(job, cancellation=token))
+
+    driver = threading.Thread(target=run)
+    driver.start()
+    _await_ready(ready, driver=driver)
+    token.cancel()
+    _release_in_process_gate(harness, gate)
+    _join_driver(driver)
+    assert collected, "the batch driver returned no completion"
+    return collected[0]
 
 
 def _await_ready(marker: Path, /, *, driver: threading.Thread) -> None:

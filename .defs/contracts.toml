@@ -161,6 +161,9 @@ and does not replace the execution outcome. Run-record directory identity and \
 `AttemptId` derive deterministically from the caller-supplied `JobId`; dr-exec \
 mints no internal random execution or record identifiers. A deterministic \
 directory with no loadable lifecycle record is reclaimed before retry. \
+A directory whose manifest names a recognizable but unsupported \
+`schema_version` is preserved; `load` and a later `prepare` for that \
+`JobId` fail closed rather than deleting it. \
 Run-record manifests \
 publish within fixed structural byte and depth ceilings and load through bounded, \
 descriptor-pinned canonical reads before strict lifecycle validation. Fake \

@@ -209,6 +209,10 @@ class ImportableJsonExecutor:
         try:
             return self._run_body(execution, target, cancellation, stop)
         except BaseException as error:  # noqa: BLE001 - pool must not break
+            if not isinstance(error, KeyboardInterrupt):
+                stopped = _stopped(execution, cancellation, stop, started=True)
+                if stopped is not None:
+                    return stopped
             if isinstance(error, SystemExit):
                 code = error.code
                 exit_code = code if isinstance(code, int) else 1
@@ -245,6 +249,9 @@ class ImportableJsonExecutor:
                 attribution_override=executor_protocol_failure_attribution,
             )
         except ImportableJsonPayloadResultError as error:
+            stopped = _stopped(execution, cancellation, stop, started=True)
+            if stopped is not None:
+                return stopped
             return execution.completed(
                 outcome=malformed_frame_outcome(str(error))
             )

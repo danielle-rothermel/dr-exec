@@ -599,6 +599,29 @@ def test_prepare_for_the_same_job_id_targets_the_same_record_directory(
     )
 
 
+def test_an_unsupported_schema_version_is_preserved_on_prepare_retry(
+    store: DirectoryRunStore,
+    execution_id: ExecutionId,
+) -> None:
+    run = store.prepare(_prepared_record(execution_id))
+    record_dir = _record_dir(store, run)
+    manifest = json.loads(_manifest_bytes(record_dir))
+    manifest["header"]["schema_version"] = 1
+    rewritten = canonical_json_bytes(manifest)
+    (record_dir / MANIFEST_NAME).write_bytes(rewritten)
+
+    with pytest.raises(
+        RecordLoadError, match="unsupported run record schema_version 1"
+    ):
+        store.load(run.reference)
+
+    with pytest.raises(ExecutorFailure, match="prepare the run record"):
+        store.prepare(_prepared_record(execution_id))
+
+    assert record_dir.is_dir()
+    assert _manifest_bytes(record_dir) == rewritten
+
+
 def test_a_failed_prepare_reclaims_its_orphan_and_allows_retry(
     store: DirectoryRunStore,
     execution_id: ExecutionId,
