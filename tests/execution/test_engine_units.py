@@ -393,7 +393,7 @@ def test_a_setup_failure_with_no_reported_errno_still_classifies() -> None:
             ),
             FailureOwner.EXECUTOR,
         ),
-        (CancelledOutcome(), FailureOwner.NONE),
+        (CancelledOutcome(started=False), FailureOwner.NONE),
     ],
 )
 def test_every_recognized_outcome_gets_one_evidence_based_owner(

@@ -801,7 +801,7 @@ def {DRIVER_ENTRYPOINT_NAME}(request, emit):
     )
     canceller.join()
 
-    assert completed.result.outcome == CancelledOutcome()
+    assert completed.result.outcome == CancelledOutcome(started=True)
     assert payloads_of(completed) == [{"index": 0}]
     record = harness.store.load(reference_of(completed))
     assert record.state is RecordState.FINALIZED

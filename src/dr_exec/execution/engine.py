@@ -741,7 +741,7 @@ class _EngineCall:
         if cancellation is not None and cancellation.cancelled:
             return self._finalize_pre_spawn(
                 prepared,
-                CancelledOutcome(),
+                CancelledOutcome(started=False),
             )
         with _working_directory(workspace) as run_directory:
             return self._run_spawned(
@@ -1143,7 +1143,7 @@ class _EngineCall:
         if stop is not None and stop.axis is BudgetAxis.WALL_TIME:
             return BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME)
         if stop is not None and stop.cancelled:
-            return CancelledOutcome()
+            return CancelledOutcome(started=True)
         if protocol is not None and protocol.failure is not None:
             return ProtocolFailedOutcome(
                 failure_code=protocol.failure.code,

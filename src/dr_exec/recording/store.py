@@ -62,6 +62,7 @@ RECORD_DIRECTORY_PREFIX = "run"
 MANIFEST_NAME = "record.json"
 STDOUT_SIDECAR_NAME = "stdout.bin"
 STDERR_SIDECAR_NAME = "stderr.bin"
+_CURRENT_RUN_RECORD_SCHEMA_VERSION: Final = 2
 
 _RUN_RECORD_ADAPTER: TypeAdapter[RunRecord] = TypeAdapter(RunRecord)
 
@@ -424,6 +425,8 @@ class DirectoryRunStore:
         try:
             _load_record(record_dir)
         except RecordLoadError:
+            if _unsupported_lifecycle_schema_version(record_dir) is not None:
+                return
             shutil.rmtree(record_dir)
 
     def _record_dir(self, reference: RunRecordReference, /) -> Path:
@@ -485,6 +488,11 @@ def _load_record(record_dir: Path, /) -> RunRecord:
         raise RecordLoadError(
             _manifest_read_message(error, record_dir)
         ) from error
+    version = _header_schema_version(manifest)
+    if version is not None and version != _CURRENT_RUN_RECORD_SCHEMA_VERSION:
+        raise RecordLoadError(
+            f"unsupported run record schema_version {version}"
+        )
     manifest_bytes = canonical_json_bytes(manifest)
     try:
         return _RUN_RECORD_ADAPTER.validate_json(manifest_bytes, strict=True)
@@ -492,6 +500,29 @@ def _load_record(record_dir: Path, /) -> RunRecord:
         raise RecordLoadError(
             f"run record at {record_dir} is not a valid lifecycle record"
         ) from error
+
+
+def _header_schema_version(manifest: object, /) -> int | None:
+    if not isinstance(manifest, dict):
+        return None
+    header = manifest.get("header")
+    if not isinstance(header, dict):
+        return None
+    version = header.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    return version
+
+
+def _unsupported_lifecycle_schema_version(record_dir: Path, /) -> int | None:
+    try:
+        manifest = _directory(record_dir).read_manifest()
+    except DocumentDirectoryError:
+        return None
+    version = _header_schema_version(manifest)
+    if version is None or version == _CURRENT_RUN_RECORD_SCHEMA_VERSION:
+        return None
+    return version
 
 
 def _verify_sidecars(record_dir: Path, record: FinalizedRecord, /) -> None:

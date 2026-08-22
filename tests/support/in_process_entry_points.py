@@ -138,7 +138,9 @@ def raise_surrogate_escape(_value: object) -> None:
     raise OSError(SURROGATE_ESCAPE_MESSAGE)
 
 
-def raise_system_exit(_value: object) -> None:
+def raise_system_exit(value: object) -> None:
+    if isinstance(value, dict) and "gate_path" in value:
+        block_on_gate(cast("dict[str, object]", value))
     raise SystemExit(7)
 
 
@@ -161,7 +163,9 @@ def block_after_ready(value: dict[str, object]) -> None:
         gate.read(1)
 
 
-def return_non_json(_value: object) -> object:
+def return_non_json(value: object) -> object:
+    if isinstance(value, dict) and "gate_path" in value:
+        block_on_gate(cast("dict[str, object]", value))
     return object()
 
 

@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-08-21
+
+### Added
+
+- `CancelledOutcome` now reports `started: bool`, so a batch-wall or caller
+  cancel distinguishes a job that never ran from one that had already leased a
+  worker, entered an in-process entry point, or spawned a child. Attribution
+  is unchanged (`owner=NONE`, detail `the call was cancelled`).
+
+### Changed
+
+- Run-record `schema_version` is 2. New finalized cancelled records persist
+  `result.outcome.started`. Existing v1 manifests no longer load and are
+  not reclaimed on a later `prepare` for the same `JobId`.
+- Updated `dr-store` to 0.2.6.
+
 ## [0.1.13] - 2026-08-21
 
 ### Fixed

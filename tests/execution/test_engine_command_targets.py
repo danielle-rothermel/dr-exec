@@ -642,7 +642,7 @@ def test_a_caller_workspace_survives_non_clean_exit_paths(
             )
         finally:
             finish_threaded_calls((canceller,))
-        assert completed.result.outcome == CancelledOutcome()
+        assert completed.result.outcome == CancelledOutcome(started=True)
     elif scenario == "budget":
         completed = harness.run(
             python_command("import time; time.sleep(2)"),
@@ -1263,7 +1263,7 @@ def test_finite_termination_budget_allows_a_cooperative_term_exit(
     finally:
         (child_pid,) = finish_threaded_calls((canceller,))
 
-    assert completed.result.outcome == CancelledOutcome()
+    assert completed.result.outcome == CancelledOutcome(started=True)
     assert handled.read_text() == str(child_pid)
     assert not exact_pid_exists(child_pid)
     assert [
@@ -1324,7 +1324,7 @@ def test_forward_parent_signals_cancels_a_long_running_child(
         finally:
             finish_threaded_calls((signaller,))
 
-    assert completed.result.outcome == CancelledOutcome()
+    assert completed.result.outcome == CancelledOutcome(started=True)
     assert handled.read_text() != ""
     assert not exact_pid_exists(int(handled.read_text()))
     assert [
@@ -1370,7 +1370,7 @@ def test_a_multi_hour_wall_budget_still_honors_cancellation(
     finally:
         finish_threaded_calls((canceller,))
 
-    assert completed.result.outcome == CancelledOutcome()
+    assert completed.result.outcome == CancelledOutcome(started=True)
 
 
 @requires_posix
@@ -1418,7 +1418,7 @@ def test_finite_termination_budget_escalates_a_term_ignoring_child(
     finally:
         (child_pid,) = finish_threaded_calls((canceller,))
 
-    assert completed.result.outcome == CancelledOutcome()
+    assert completed.result.outcome == CancelledOutcome(started=True)
     assert not exact_pid_exists(child_pid)
     assert [
         number
@@ -1525,7 +1525,7 @@ def test_pre_spawn_cancellation_records_without_launching_a_child(
         cancellation=token,
     )
 
-    assert completed.result.outcome == CancelledOutcome()
+    assert completed.result.outcome == CancelledOutcome(started=False)
     assert completed.result.attribution.owner is FailureOwner.NONE
     assert not marker.exists()
     record = harness.store.load(reference_of(completed))
@@ -1558,7 +1558,7 @@ def test_post_spawn_cancellation_tears_down_and_returns_cancelled(
     )
     canceller.join()
 
-    assert completed.result.outcome == CancelledOutcome()
+    assert completed.result.outcome == CancelledOutcome(started=True)
     record = harness.store.load(reference_of(completed))
     assert record.state is RecordState.FINALIZED
 

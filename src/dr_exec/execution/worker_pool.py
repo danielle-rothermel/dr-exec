@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import IO, Final
@@ -433,7 +433,7 @@ class WorkerPoolImportableJsonExecutor:
             transport=request_transport_bytes(target.request),
         )
         if cancellation is not None and cancellation.cancelled:
-            return execution.completed(outcome=CancelledOutcome())
+            return execution.completed(outcome=CancelledOutcome(started=False))
         return self._dispatch(
             execution,
             deadline_ns=job.budgets.wall_time.limit,
@@ -469,6 +469,7 @@ class WorkerPoolImportableJsonExecutor:
             return execution.protocol_failed(
                 "the worker pool closed while this job was starting a worker"
             )
+        stop = replace(stop, started=True)
         with lease:
             try:
                 lease.worker.wait_for_ready(stop=stop)
@@ -558,6 +559,7 @@ class _StopWatch:
 
     deadline_ns: int | None
     cancellation: CancelToken | None
+    started: bool = False
 
     @property
     def unwatched(self) -> bool:
@@ -565,7 +567,7 @@ class _StopWatch:
 
     def outcome(self) -> ExecutionOutcome | None:
         if self.cancellation is not None and self.cancellation.cancelled:
-            return CancelledOutcome()
+            return CancelledOutcome(started=self.started)
         if (
             self.deadline_ns is not None
             and time.monotonic_ns() >= self.deadline_ns
