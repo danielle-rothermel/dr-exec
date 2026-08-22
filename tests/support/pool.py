@@ -81,7 +81,7 @@ class GatedResponder:
         completed = completion_for(job_id)
         return CompletedExecution(
             result=completed.result.model_copy(
-                update={"outcome": CancelledOutcome()}
+                update={"outcome": CancelledOutcome(started=True)}
             ),
             record_receipt=completed.record_receipt,
         )

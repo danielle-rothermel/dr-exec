@@ -9,8 +9,11 @@ every case here must hold for the in-process executor and for the worker pool.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
+from pathlib import Path
 from typing import cast
 from uuid import UUID
 
@@ -19,6 +22,7 @@ from dr_serialize import Jsonable
 from support.executor import job_for, trusted_python_target
 from support.importable_json import (
     ECHO,
+    ECHO_OR_BLOCK,
     ECHO_OR_RAISE,
     HARNESSES,
     IMPORT_FAIL,
@@ -38,6 +42,8 @@ from support.importable_json import (
     ExecutorHarness,
     PooledExecutor,
 )
+from support.pool import WATCHDOG_SECONDS
+from support.process import Gate
 
 from dr_exec import (
     Budgets,
@@ -53,6 +59,7 @@ from dr_exec import (
     ExitedOutcome,
     FailureOwner,
     FiniteByteLimit,
+    FiniteDurationLimit,
     FiniteOutput,
     FixedPoolCapacity,
     ImportableEntryPoint,
@@ -393,7 +400,7 @@ def test_pre_cancelled_token_returns_cancelled_outcome(
 
     completed = run_one(harness, ECHO, cancellation=token)
 
-    assert isinstance(completed.result.outcome, CancelledOutcome)
+    assert completed.result.outcome == CancelledOutcome(started=False)
     assert completed.result.attribution.owner is FailureOwner.NONE
 
 
@@ -475,6 +482,135 @@ def test_a_failing_job_leaves_the_pool_healthy(
     assert parse_importable_json_result(returned["echo"]) == {
         "value": {"index": 4}
     }
+
+
+def test_a_batch_wall_reports_whether_cancelled_execution_started(
+    harness: ExecutorHarness,
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready"
+    gate = Gate.create(tmp_path, "gate")
+    running = build_job(
+        ECHO_OR_BLOCK,
+        {"ready_path": str(ready), "gate_path": str(gate.path)},
+        job_id=JobId(UUID(int=21)),
+    )
+    pending = build_job(
+        ECHO_OR_BLOCK, {"value": 1}, job_id=JobId(UUID(int=22))
+    )
+    wall = FiniteDurationLimit(max_ns=500_000_000)
+    collected: list[CompletedExecution] = []
+
+    def drain() -> None:
+        with harness.open(ECHO_OR_BLOCK, workers=1) as executor:
+            collected.extend(
+                executor.run_many(
+                    (running, pending),
+                    config=ExecutionPoolConfig(
+                        capacity=FixedPoolCapacity(max_active_jobs=1)
+                    ),
+                    wall_time=wall,
+                )
+            )
+
+    driver = threading.Thread(target=drain)
+    begun = time.monotonic()
+    driver.start()
+    _await_ready(ready, driver=driver)
+    _wait_out_the_wall(begun, wall)
+    _release_in_process_gate(harness, gate)
+    _join_driver(driver)
+
+    outcomes = {
+        one.result.execution_id.job_id: one.result.outcome for one in collected
+    }
+    assert outcomes[running.job_id] == CancelledOutcome(started=True)
+    assert outcomes[pending.job_id] == CancelledOutcome(started=False)
+
+
+def test_a_job_admitted_after_the_batch_wall_reports_started_false(
+    harness: ExecutorHarness,
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready"
+    gate = Gate.create(tmp_path, "gate")
+    holder = build_job(
+        ECHO_OR_BLOCK,
+        {"ready_path": str(ready), "gate_path": str(gate.path)},
+        job_id=JobId(UUID(int=23)),
+    )
+    later = build_job(ECHO_OR_BLOCK, {"value": 2}, job_id=JobId(UUID(int=24)))
+    wall = FiniteDurationLimit(max_ns=500_000_000)
+    expired = threading.Event()
+    collected: list[CompletedExecution] = []
+
+    def jobs() -> Iterator[ExecutionJob]:
+        yield holder
+        if not expired.wait(WATCHDOG_SECONDS):
+            raise AssertionError("watchdog fired waiting for the batch wall")
+        yield later
+
+    def drain() -> None:
+        with harness.open(ECHO_OR_BLOCK, workers=1) as executor:
+            collected.extend(
+                executor.run_many(
+                    jobs(),
+                    config=ExecutionPoolConfig(
+                        capacity=FixedPoolCapacity(max_active_jobs=1)
+                    ),
+                    wall_time=wall,
+                )
+            )
+
+    driver = threading.Thread(target=drain)
+    begun = time.monotonic()
+    driver.start()
+    _await_ready(ready, driver=driver)
+    _wait_out_the_wall(begun, wall)
+    expired.set()
+    _release_in_process_gate(harness, gate)
+    _join_driver(driver)
+
+    outcomes = {
+        one.result.execution_id.job_id: one.result.outcome for one in collected
+    }
+    assert outcomes[holder.job_id] == CancelledOutcome(started=True)
+    assert outcomes[later.job_id] == CancelledOutcome(started=False)
+
+
+def _await_ready(marker: Path, /, *, driver: threading.Thread) -> None:
+    deadline = time.monotonic() + WATCHDOG_SECONDS
+    while not marker.exists():
+        if not driver.is_alive():
+            pytest.fail(
+                "the batch finished before the payload announced ready"
+            )
+        if time.monotonic() >= deadline:
+            pytest.fail("watchdog fired waiting for the payload ready marker")
+        time.sleep(0.001)
+
+
+def _wait_out_the_wall(begun: float, wall: FiniteDurationLimit, /) -> None:
+    remaining = (wall.max_ns / 1e9) - (time.monotonic() - begun) + 0.05
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def _release_in_process_gate(harness: ExecutorHarness, gate: Gate, /) -> None:
+    """Unblock the cooperative in-process body after the wall has fired.
+
+    Worker-pool cancel kills the reader. Opening the FIFO for write would
+    then block forever, and the killed job does not need the release.
+    """
+
+    if harness.name == "in_process":
+        gate.release()
+
+
+def _join_driver(driver: threading.Thread, /) -> None:
+    driver.join(WATCHDOG_SECONDS)
+    if driver.is_alive():
+        pytest.fail("watchdog fired joining the batch driver")
 
 
 def _run_pool(

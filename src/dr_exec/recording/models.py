@@ -44,7 +44,7 @@ from dr_exec.runtime.host import RuntimeRecord
 
 
 class RunRecordHeader(ContractModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     executor_identity: IdentityDocumentField
     executor_config_identity: IdentityDocumentField
     prepared_at: UtcDatetime
@@ -271,6 +271,7 @@ class ProtocolFailedOutcome(ContractModel):
 
 class CancelledOutcome(ContractModel):
     kind: Literal[OutcomeKind.CANCELLED] = OutcomeKind.CANCELLED
+    started: bool
 
 
 type ExecutionOutcome = Annotated[

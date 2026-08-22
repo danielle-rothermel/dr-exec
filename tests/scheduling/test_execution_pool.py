@@ -655,7 +655,7 @@ def test_a_cancelled_call_is_delivered_as_completion_data() -> None:
             return completed
         return CompletedExecution(
             result=completed.result.model_copy(
-                update={"outcome": CancelledOutcome()}
+                update={"outcome": CancelledOutcome(started=True)}
             ),
             record_receipt=completed.record_receipt,
         )
@@ -673,8 +673,8 @@ def test_a_cancelled_call_is_delivered_as_completion_data() -> None:
     outcomes = {
         one.result.execution_id.job_id: one.result.outcome for one in collected
     }
-    assert outcomes[cancelled_job.job_id] == CancelledOutcome()
-    assert outcomes[plain_job.job_id] != CancelledOutcome()
+    assert outcomes[cancelled_job.job_id] == CancelledOutcome(started=True)
+    assert outcomes[plain_job.job_id] != CancelledOutcome(started=True)
 
 
 def test_drain_lets_admitted_work_finish_uncancelled() -> None:

@@ -64,7 +64,7 @@ class _StopState:
     deadline_expired: bool = False
 
     def outcome(
-        self, cancellation: CancelToken | None, /
+        self, cancellation: CancelToken | None, /, *, started: bool
     ) -> ExecutionOutcome | None:
         """Report why this job must stop, or ``None`` while it may run.
 
@@ -73,7 +73,7 @@ class _StopState:
         """
 
         if cancellation is not None and cancellation.cancelled:
-            return CancelledOutcome()
+            return CancelledOutcome(started=started)
         if self.deadline_expired:
             return BudgetExceededOutcome(axis=BudgetAxis.WALL_TIME)
         return None
@@ -231,7 +231,7 @@ class ImportableJsonExecutor:
         stop: _StopState,
         /,
     ) -> CompletedExecution:
-        stopped = _stopped(execution, cancellation, stop)
+        stopped = _stopped(execution, cancellation, stop, started=False)
         if stopped is not None:
             return stopped
         try:
@@ -249,14 +249,14 @@ class ImportableJsonExecutor:
                 outcome=malformed_frame_outcome(str(error))
             )
         except ImportableJsonPayloadDispatchError as error:
-            stopped = _stopped(execution, cancellation, stop)
+            stopped = _stopped(execution, cancellation, stop, started=True)
             if stopped is not None:
                 return stopped
             return execution.completed(
                 outcome=ExitedOutcome(exit_code=1),
                 attribution_detail=str(error),
             )
-        stopped = _stopped(execution, cancellation, stop)
+        stopped = _stopped(execution, cancellation, stop, started=True)
         if stopped is not None:
             return stopped
         return execution.completed(
@@ -350,8 +350,10 @@ def _stopped(
     cancellation: CancelToken | None,
     stop: _StopState,
     /,
+    *,
+    started: bool,
 ) -> CompletedExecution | None:
-    outcome = stop.outcome(cancellation)
+    outcome = stop.outcome(cancellation, started=started)
     if outcome is None:
         return None
     return execution.completed(outcome=outcome)

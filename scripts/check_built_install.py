@@ -341,7 +341,9 @@ def _check_timeout_and_cancellation(
     assert not caller.is_alive()
     assert failures == []
     assert len(completed) == 1
-    assert completed[0].result.outcome == dr_exec.CancelledOutcome()
+    assert completed[0].result.outcome == dr_exec.CancelledOutcome(
+        started=True
+    )
     _assert_parse_fails(completed[0])
 
 

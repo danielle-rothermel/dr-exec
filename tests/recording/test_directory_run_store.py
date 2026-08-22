@@ -743,13 +743,15 @@ def test_a_recognized_pre_child_outcome_finalizes_from_prepared(
 
     receipt = store.finalize(
         prepared_run,
-        _result(execution_id, outcome=CancelledOutcome()),
+        _result(execution_id, outcome=CancelledOutcome(started=False)),
     )
 
     assert isinstance(receipt, CompleteRecordReceipt)
     finalized = store.load(prepared_run.reference)
     assert isinstance(finalized, FinalizedRecord)
-    assert finalized.result.outcome.kind == CancelledOutcome().kind
+    assert (
+        finalized.result.outcome.kind == CancelledOutcome(started=False).kind
+    )
 
 
 def test_mark_running_publishes_from_the_handle_without_reloading(
@@ -1243,8 +1245,8 @@ def test_each_target_producer_is_secret_free_across_the_lifecycle(
             id="protocol-failed",
         ),
         pytest.param(
-            CancelledOutcome(),
-            frozenset({"kind"}),
+            CancelledOutcome(started=False),
+            frozenset({"kind", "started"}),
             id="cancelled",
         ),
     ],

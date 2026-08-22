@@ -497,7 +497,11 @@ statement = """
 `wall_time`. The default is no operation-wide ceiling. On expiry the private \
 scheduler cancels live tokens and births later tokens already cancelled so \
 in-flight jobs tear down through each executor's existing cancel path and \
-remaining source jobs still complete as `CancelledOutcome`. That path stays \
+remaining source jobs still complete as `CancelledOutcome`. Each cancelled \
+execution reports whether it started (`CancelledOutcome.started`): `True` \
+once a worker was leased, an in-process entry point was entered, or a child \
+was spawned, and `False` for pending, pre-dispatch, and born-cancelled \
+admission. That path stays \
 cooperative for in-process jobs: an entry point that never returns can still \
 hold the batch past the deadline. The watcher stays armed through early-close \
 or source-error drain so a declared deadline can still cancel admitted work. \
