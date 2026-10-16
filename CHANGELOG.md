@@ -5,6 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-10-16
+
+### Changed
+
+- Loosened the `pydantic` requirement from `==2.13.4` to `>=2.14,<3` so
+  dr-exec can be installed alongside dr-providers 0.3.5, which requires
+  pydantic 2.14; whetstone-ai pins both packages. The lock resolves
+  pydantic 2.14.1.
+
 ## [0.1.14] - 2026-08-21
 
 ### Added
