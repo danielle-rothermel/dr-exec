@@ -1,6 +1,6 @@
 [project]
 name = "dr-exec"
-version = "0.1.14"
+version = "0.1.15"
 description = "Contract-driven local process execution"
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "dr-serialize==0.1.2",
     "dr-store==0.2.6",
-    "pydantic==2.13.4",
+    "pydantic>=2.14,<3",
 ]
 
 [build-system]
