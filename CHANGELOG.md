@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-10-16
+
+### Changed
+
+- Updated `dr-store` to 0.2.7, in lockstep with whetstone-ai. dr-store 0.2.7
+  reports more specific `StaleLeaseError` messages; dr-exec behavior is
+  unchanged.
+
 ## [0.1.15] - 2026-10-16
 
 ### Changed
